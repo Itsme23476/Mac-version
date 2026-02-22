@@ -15,8 +15,215 @@ from app.ui.win_hotkey import (
     log_system_state, create_autofill_debug_report, log_window_hierarchy
 )
 import logging
+import sys
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# macOS Private CGS APIs for moving windows to spaces (including fullscreen)
+# ============================================================================
+def _get_cgs_functions():
+    """
+    Load private CGS functions using ctypes.
+    These are undocumented APIs that allow moving windows between spaces.
+    """
+    if sys.platform != 'darwin':
+        return None
+    
+    try:
+        import ctypes
+        import ctypes.util
+        
+        # Load CoreGraphics framework
+        cg_path = ctypes.util.find_library('CoreGraphics')
+        if not cg_path:
+            logger.warning("[CGS] CoreGraphics library not found")
+            return None
+        
+        cg = ctypes.CDLL(cg_path)
+        
+        # Define function signatures
+        # CGSConnectionID _CGSDefaultConnection(void)
+        cg._CGSDefaultConnection.restype = ctypes.c_uint32
+        cg._CGSDefaultConnection.argtypes = []
+        
+        # CGSSpaceID CGSGetActiveSpace(CGSConnectionID cid)
+        # Note: This might be CGSManagedDisplayGetCurrentSpace on newer macOS
+        try:
+            cg.CGSGetActiveSpace.restype = ctypes.c_uint64
+            cg.CGSGetActiveSpace.argtypes = [ctypes.c_uint32]
+            has_get_active_space = True
+        except AttributeError:
+            has_get_active_space = False
+        
+        # CGError CGSAddWindowsToSpaces(CGSConnectionID cid, CFArrayRef windowIDs, CFArrayRef spaceIDs)
+        try:
+            cg.CGSAddWindowsToSpaces.restype = ctypes.c_int32
+            cg.CGSAddWindowsToSpaces.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p]
+            has_add_to_spaces = True
+        except AttributeError:
+            has_add_to_spaces = False
+        
+        return {
+            'lib': cg,
+            'has_get_active_space': has_get_active_space,
+            'has_add_to_spaces': has_add_to_spaces
+        }
+    except Exception as e:
+        logger.error(f"[CGS] Error loading CGS functions: {e}")
+        return None
+
+
+def move_window_to_active_space(window_number):
+    """
+    Move a window to the currently active space using private CGS APIs.
+    This works for fullscreen spaces too.
+    
+    Args:
+        window_number: The NSWindow's windowNumber property
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    if sys.platform != 'darwin':
+        return False
+    
+    try:
+        from Foundation import NSArray, NSNumber
+        from Quartz import CGSGetActiveSpace, kCGSAllSpacesMask
+        import ctypes
+        import ctypes.util
+        
+        # Load CoreGraphics
+        cg_path = ctypes.util.find_library('CoreGraphics')
+        cg = ctypes.CDLL(cg_path)
+        
+        # Get default connection
+        cg._CGSDefaultConnection.restype = ctypes.c_uint32
+        conn = cg._CGSDefaultConnection()
+        
+        # Get active space
+        cg.CGSGetActiveSpace.restype = ctypes.c_uint64
+        cg.CGSGetActiveSpace.argtypes = [ctypes.c_uint32]
+        active_space = cg.CGSGetActiveSpace(conn)
+        
+        logger.info(f"[CGS] Connection: {conn}, Active space: {active_space}, Window: {window_number}")
+        
+        # Create arrays for CGSAddWindowsToSpaces
+        window_array = NSArray.arrayWithObject_(NSNumber.numberWithInt_(window_number))
+        space_array = NSArray.arrayWithObject_(NSNumber.numberWithLongLong_(active_space))
+        
+        # Add window to active space
+        cg.CGSAddWindowsToSpaces.restype = ctypes.c_int32
+        cg.CGSAddWindowsToSpaces.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p]
+        
+        from objc import pyobjc_id
+        result = cg.CGSAddWindowsToSpaces(conn, pyobjc_id(window_array), pyobjc_id(space_array))
+        
+        logger.info(f"[CGS] CGSAddWindowsToSpaces result: {result}")
+        return result == 0
+        
+    except ImportError as e:
+        logger.warning(f"[CGS] Import error (trying alternate method): {e}")
+        return _move_window_to_space_alternate(window_number)
+    except Exception as e:
+        logger.error(f"[CGS] Error moving window to space: {e}")
+        return _move_window_to_space_alternate(window_number)
+
+
+def _move_window_to_space_alternate(window_number):
+    """
+    Alternate method using SkyLight framework (SLS) for newer macOS versions.
+    Also tries multiple CGS function variants.
+    """
+    try:
+        import ctypes
+        import ctypes.util
+        from Foundation import NSArray, NSNumber
+        from objc import pyobjc_id
+        
+        # Try SkyLight framework first (used in newer macOS)
+        skylight_path = '/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight'
+        try:
+            sls = ctypes.CDLL(skylight_path)
+            use_skylight = True
+            logger.info("[CGS] Using SkyLight framework")
+        except OSError:
+            cg_path = ctypes.util.find_library('CoreGraphics')
+            sls = ctypes.CDLL(cg_path)
+            use_skylight = False
+            logger.info("[CGS] Using CoreGraphics framework")
+        
+        # Get connection
+        if use_skylight:
+            sls.SLSMainConnectionID.restype = ctypes.c_uint32
+            conn = sls.SLSMainConnectionID()
+        else:
+            sls._CGSDefaultConnection.restype = ctypes.c_uint32
+            conn = sls._CGSDefaultConnection()
+        
+        # Get active space
+        active_space = None
+        if use_skylight:
+            try:
+                sls.SLSGetActiveSpace.restype = ctypes.c_uint64
+                sls.SLSGetActiveSpace.argtypes = [ctypes.c_uint32]
+                active_space = sls.SLSGetActiveSpace(conn)
+            except AttributeError:
+                pass
+        
+        if not active_space:
+            try:
+                sls.CGSGetActiveSpace.restype = ctypes.c_uint64
+                sls.CGSGetActiveSpace.argtypes = [ctypes.c_uint32]
+                active_space = sls.CGSGetActiveSpace(conn)
+            except AttributeError:
+                pass
+        
+        if not active_space:
+            logger.warning("[CGS] Could not get active space")
+            return False
+        
+        logger.info(f"[CGS ALT] Connection: {conn}, Active space: {active_space}, Window: {window_number}")
+        
+        # Create arrays
+        window_array = NSArray.arrayWithObject_(NSNumber.numberWithInt_(window_number))
+        space_array = NSArray.arrayWithObject_(NSNumber.numberWithLongLong_(active_space))
+        
+        # Try different methods to add window to space
+        methods_to_try = [
+            ('SLSAddWindowsToSpaces', sls if use_skylight else None),
+            ('CGSAddWindowsToSpaces', sls),
+            ('SLSMoveWindowsToManagedSpace', sls if use_skylight else None),
+        ]
+        
+        for method_name, lib in methods_to_try:
+            if lib is None:
+                continue
+            try:
+                func = getattr(lib, method_name)
+                func.restype = ctypes.c_int32
+                func.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p]
+                result = func(conn, pyobjc_id(window_array), pyobjc_id(space_array))
+                logger.info(f"[CGS ALT] {method_name} result: {result}")
+                if result == 0:
+                    return True
+            except AttributeError:
+                logger.debug(f"[CGS ALT] {method_name} not available")
+                continue
+            except Exception as e:
+                logger.debug(f"[CGS ALT] {method_name} error: {e}")
+                continue
+        
+        # If all methods failed, try a simpler approach: just set collection behavior
+        # to force window to current space
+        logger.warning("[CGS ALT] All space move methods failed, trying workaround")
+        return False
+        
+    except Exception as e:
+        logger.error(f"[CGS ALT] Error: {e}")
+        return False
 
 
 class SearchWorker(QThread):
@@ -77,10 +284,13 @@ class QuickSearchOverlay(QDialog):
             Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
         self.setWindowTitle("Quick Search")
         self.setModal(False)
         self.resize(720, 300)
+        
+        # On macOS, we need to configure the NSPanel AFTER the window is created
+        # This flag tracks whether we've done the one-time native configuration
+        self._macos_panel_configured = False
 
         # Phase 1: State Capture Variables
         self._saved_cursor_pos = None
@@ -499,29 +709,6 @@ class QuickSearchOverlay(QDialog):
         # Start Fade In Animation
         self.setWindowOpacity(0)
         
-        # On macOS, we need special handling to show popup without activating main window
-        if sys.platform == 'darwin':
-            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-            logger.info("[QS] macOS: Set WA_ShowWithoutActivating=True before show()")
-            
-            # CRITICAL: Hide the main app windows BEFORE showing popup
-            # This prevents Qt from bringing them to front
-            try:
-                from AppKit import NSApp
-                
-                # Find and hide the main window (not the popup)
-                for ns_window in NSApp.windows():
-                    try:
-                        title = ns_window.title()
-                        if "Lumina" in title and ns_window.isVisible():
-                            # Order it out (hide without closing)
-                            ns_window.orderOut_(None)
-                            logger.info(f"[QS] macOS: Hidden main window '{title}'")
-                    except:
-                        pass
-            except Exception as e:
-                logger.warning(f"[QS] macOS: Error hiding main window: {e}")
-        
         logger.info("[QS] About to call self.show()")
         self.show()
         logger.info("[QS] self.show() completed")
@@ -530,114 +717,316 @@ class QuickSearchOverlay(QDialog):
         self.opacity_anim.setEndValue(1)
         self.opacity_anim.start()
 
-        # Bring window to front - use platform-specific methods
-        logger.info("[QS] About to call _bring_to_front()")
-        self._bring_to_front()
+        # On macOS, we MUST configure the window AFTER show() completes
+        # because Qt resets window properties during show()
+        # Use a short timer to ensure Qt has finished its internal processing
+        if sys.platform == 'darwin':
+            # Immediate configuration
+            self._bring_to_front()
+            # Delayed re-configuration to fight Qt's resets
+            QTimer.singleShot(10, self._bring_to_front)
+            QTimer.singleShot(50, self._bring_to_front)
+            QTimer.singleShot(100, self._ensure_macos_panel_visible)
+        else:
+            self._bring_to_front()
+        
         logger.info("[QS] _bring_to_front() completed")
         
         self.input.setFocus()
         self.input.selectAll()
         logger.info("[QS] show_centered_bottom: Completed")
     
+    def _ensure_macos_panel_visible(self):
+        """
+        Final check to ensure the panel is visible and properly configured.
+        Called after a delay to fight Qt's window property resets.
+        """
+        try:
+            from AppKit import NSApp, NSScreen
+            
+            popup_window = None
+            for ns_window in NSApp.windows():
+                try:
+                    if ns_window.title() == "Quick Search":
+                        popup_window = ns_window
+                        break
+                except:
+                    continue
+            
+            if popup_window:
+                current_level = popup_window.level()
+                if current_level < 1000:
+                    logger.warning(f"[QS] Panel level was reset to {current_level}, re-applying 1000")
+                    popup_window.setLevel_(1000)
+                    popup_window.setHidesOnDeactivate_(False)
+                    # CanJoinAllSpaces | FullScreenAuxiliary = 257
+                    popup_window.setCollectionBehavior_((1 << 0) | (1 << 8))
+                    popup_window.orderFrontRegardless()
+                
+                # Log detailed state
+                frame = popup_window.frame()
+                screen = popup_window.screen()
+                screen_frame = screen.frame() if screen else "No screen"
+                logger.info(f"[QS] Final panel state: level={popup_window.level()}, visible={popup_window.isVisible()}")
+                logger.info(f"[QS] Panel frame: ({frame.origin.x}, {frame.origin.y}, {frame.size.width}, {frame.size.height})")
+                logger.info(f"[QS] Panel screen: {screen_frame}")
+                logger.info(f"[QS] Collection behavior: {popup_window.collectionBehavior()}")
+                logger.info(f"[QS] hidesOnDeactivate: {popup_window.hidesOnDeactivate()}")
+                
+                # Check if we're on the same screen as the active app
+                main_screen = NSScreen.mainScreen()
+                if main_screen:
+                    main_frame = main_screen.frame()
+                    logger.info(f"[QS] Main screen: ({main_frame.origin.x}, {main_frame.origin.y}, {main_frame.size.width}, {main_frame.size.height})")
+                
+        except Exception as e:
+            logger.error(f"[QS] _ensure_macos_panel_visible error: {e}")
+    
     def _bring_to_front(self):
         """Platform-specific method to bring window to front and focus it."""
         import sys
         
         if sys.platform == 'darwin':
-            # macOS-specific: Show popup without activating the main app window
-            try:
-                from AppKit import NSApp
-                
-                logger.info("[QS] _bring_to_front: Starting macOS window handling")
-                
-                # Log all windows for debugging
-                all_windows = NSApp.windows()
-                logger.info(f"[QS] Total NSApp windows: {len(all_windows)}")
-                for i, win in enumerate(all_windows):
-                    try:
-                        title = win.title() if hasattr(win, 'title') else 'N/A'
-                        is_visible = win.isVisible() if hasattr(win, 'isVisible') else 'N/A'
-                        level = win.level() if hasattr(win, 'level') else 'N/A'
-                        logger.info(f"[QS]   Window {i}: title='{title}', visible={is_visible}, level={level}, class={type(win).__name__}")
-                    except Exception as e:
-                        logger.info(f"[QS]   Window {i}: Error getting info: {e}")
-                
-                # Find our popup window by title
-                popup_window = None
-                main_window = None
-                for ns_window in all_windows:
-                    try:
-                        title = ns_window.title()
-                        if title == "Quick Search":
-                            popup_window = ns_window
-                            logger.info(f"[QS] Found popup window: {type(popup_window).__name__}")
-                        elif "Lumina" in title:
-                            main_window = ns_window
-                            logger.info(f"[QS] Found main window: title='{title}'")
-                    except:
-                        continue
-                
-                if popup_window:
-                    # Set window level high so it floats above everything
-                    try:
-                        popup_window.setLevel_(8)  # NSModalPanelWindowLevel = 8
-                        logger.info(f"[QS] Set popup level to 8")
-                    except Exception as e:
-                        logger.error(f"[QS] Error setting level: {e}")
-                    
-                    # Ensure main window stays hidden
-                    if main_window and main_window.isVisible():
-                        try:
-                            main_window.orderOut_(None)
-                            logger.info("[QS] Hid main window with orderOut_")
-                        except Exception as e:
-                            logger.error(f"[QS] Error hiding main window: {e}")
-                    
-                    # NOW activate the app - since main window is hidden, only popup will show
-                    try:
-                        NSApp.activateIgnoringOtherApps_(True)
-                        logger.info("[QS] Activated app with activateIgnoringOtherApps_")
-                    except Exception as e:
-                        logger.error(f"[QS] Error activating app: {e}")
-                    
-                    # Make popup the key window (should work now that app is active)
-                    try:
-                        # Try setting canBecomeKeyWindow first (for panels)
-                        if hasattr(popup_window, 'setCanBecomeKeyWindow_'):
-                            popup_window.setCanBecomeKeyWindow_(True)
-                            logger.info("[QS] Set canBecomeKeyWindow to True")
-                        
-                        popup_window.makeKeyAndOrderFront_(None)
-                        is_key = popup_window.isKeyWindow()
-                        logger.info(f"[QS] Called makeKeyAndOrderFront_, isKeyWindow={is_key}")
-                        
-                        # If still not key, try alternative methods
-                        if not is_key:
-                            # Try becoming first responder
-                            popup_window.makeFirstResponder_(popup_window.contentView())
-                            logger.info("[QS] Called makeFirstResponder on contentView")
-                    except Exception as e:
-                        logger.error(f"[QS] Error calling makeKeyAndOrderFront_: {e}")
-                    
-                    logger.info("[QS] macOS: Popup window configuration complete")
-                else:
-                    logger.warning("[QS] macOS: Could not find Quick Search window in NSApp.windows()")
-                    self.raise_()
-                
-                # Schedule a delayed focus to ensure input receives keyboard
-                QTimer.singleShot(50, self._macos_focus_input)
-                
-            except ImportError as e:
-                logger.warning(f"[QS] AppKit not available for window activation: {e}")
-                self.raise_()
-            except Exception as e:
-                logger.error(f"[QS] Error activating window on macOS: {e}", exc_info=True)
-                self.raise_()
+            self._bring_to_front_macos()
         else:
             # Windows/Linux - standard Qt should work
             self.raise_()
             self.activateWindow()
             self.setFocus()
+    
+    def _bring_to_front_macos(self):
+        """
+        macOS-specific window handling for fullscreen overlay.
+        
+        Since the app is now an agent app (LSUIElement), it can appear over
+        fullscreen apps. We use private CGS APIs to move the window to the
+        active space (including fullscreen spaces).
+        """
+        try:
+            from AppKit import NSApp
+            
+            logger.info("[QS] _bring_to_front_macos: Starting (agent app mode)")
+            
+            # Find our popup window
+            popup_window = None
+            for ns_window in NSApp.windows():
+                try:
+                    if ns_window.title() == "Quick Search":
+                        popup_window = ns_window
+                        break
+                except:
+                    continue
+            
+            if not popup_window:
+                logger.warning("[QS] Could not find Quick Search window")
+                self.raise_()
+                return
+            
+            logger.info(f"[QS] Found popup window: {type(popup_window).__name__}")
+            
+            # Configure the panel for fullscreen compatibility
+            self._configure_macos_panel(popup_window)
+            
+            # CRITICAL: Use private CGS API to move window to active space
+            # This is what makes the popup appear on fullscreen spaces!
+            try:
+                window_number = popup_window.windowNumber()
+                logger.info(f"[QS] Window number: {window_number}")
+                
+                if move_window_to_active_space(window_number):
+                    logger.info("[QS] Successfully moved window to active space via CGS API")
+                else:
+                    logger.warning("[QS] CGS API failed, window may not appear on fullscreen space")
+            except Exception as e:
+                logger.error(f"[QS] Error with CGS API: {e}")
+            
+            # Order front - as an agent app, this should work in fullscreen Spaces
+            try:
+                popup_window.orderFrontRegardless()
+                logger.info("[QS] Called orderFrontRegardless()")
+            except Exception as e:
+                logger.error(f"[QS] Error with orderFrontRegardless: {e}")
+            
+            # Make it the key window for keyboard input
+            try:
+                popup_window.makeKeyAndOrderFront_(None)
+                is_key = popup_window.isKeyWindow()
+                logger.info(f"[QS] makeKeyAndOrderFront_() called, isKeyWindow={is_key}")
+                
+                # If not key window yet, try makeKeyWindow() directly
+                if not is_key:
+                    popup_window.makeKeyWindow()
+                    is_key = popup_window.isKeyWindow()
+                    logger.info(f"[QS] makeKeyWindow() called, isKeyWindow={is_key}")
+            except Exception as e:
+                logger.error(f"[QS] Error making key window: {e}")
+            
+            # Schedule delayed focus with activation fix
+            # This is critical: after a short delay, we allow activation and claim keyboard focus
+            QTimer.singleShot(50, self._macos_claim_keyboard_focus)
+            QTimer.singleShot(100, self._macos_focus_input)
+            
+            logger.info("[QS] macOS fullscreen overlay configuration complete")
+            
+        except ImportError as e:
+            logger.warning(f"[QS] AppKit not available: {e}")
+            self.raise_()
+        except Exception as e:
+            logger.error(f"[QS] Error in _bring_to_front_macos: {e}", exc_info=True)
+            self.raise_()
+    
+    def _configure_macos_panel(self, ns_window):
+        """
+        Configure NSPanel/NSWindow for fullscreen overlay capability.
+        
+        Key settings based on research:
+        - NSWindowCollectionBehaviorCanJoinAllSpaces (1 << 0 = 1) - appears on ALL spaces
+        - NSWindowCollectionBehaviorFullScreenAuxiliary (1 << 8 = 256) - can appear in fullscreen
+        Note: CanJoinAllSpaces and MoveToActiveSpace are MUTUALLY EXCLUSIVE!
+        - High window level (above fullscreen apps)
+        - hidesOnDeactivate = False (critical!)
+        """
+        try:
+            # Collection behavior flags
+            # NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0 = 1 (appears on all spaces)
+            # NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 = 256 (can appear in fullscreen)
+            # Combined = 257
+            COLLECTION_BEHAVIOR = (1 << 0) | (1 << 8)  # 257 - CanJoinAllSpaces | FullScreenAuxiliary
+            
+            # Window level - use a high level to ensure visibility
+            # NSScreenSaverWindowLevel = 1000 (very high, above most things)
+            # NSStatusWindowLevel = 25
+            # NSMainMenuWindowLevel = 24
+            # Try NSScreenSaverWindowLevel for maximum visibility
+            WINDOW_LEVEL = 1000  # NSScreenSaverWindowLevel
+            
+            # Set collection behavior
+            current_behavior = ns_window.collectionBehavior()
+            ns_window.setCollectionBehavior_(COLLECTION_BEHAVIOR)
+            new_behavior = ns_window.collectionBehavior()
+            logger.info(f"[QS] Collection behavior: {current_behavior} -> {new_behavior} (target: {COLLECTION_BEHAVIOR})")
+            
+            # Set window level
+            current_level = ns_window.level()
+            ns_window.setLevel_(WINDOW_LEVEL)
+            new_level = ns_window.level()
+            logger.info(f"[QS] Window level: {current_level} -> {new_level} (target: {WINDOW_LEVEL})")
+            
+            # CRITICAL: Prevent panel from hiding when app loses focus
+            if hasattr(ns_window, 'setHidesOnDeactivate_'):
+                ns_window.setHidesOnDeactivate_(False)
+                logger.info("[QS] Set hidesOnDeactivate=False (CRITICAL)")
+            
+            # CRITICAL: Set the prevents-activation tag that AppKit normally sets during init
+            # This is the workaround for Qt not setting nonactivatingPanel style mask at creation
+            # Without this, the window cannot appear over fullscreen apps properly
+            # NOTE: Only set this on FIRST call - once we've claimed keyboard focus, don't re-set it!
+            if not getattr(self, '_keyboard_focus_claimed', False):
+                try:
+                    # Use objc to call the private method _setPreventsActivation:
+                    import objc
+                    if hasattr(ns_window, '_setPreventsActivation_'):
+                        ns_window._setPreventsActivation_(True)
+                        logger.info("[QS] Called _setPreventsActivation_(True) - CRITICAL for fullscreen")
+                    else:
+                        # Try using objc.objc_msgSend as fallback
+                        try:
+                            objc.objc_msgSend(ns_window, objc.selector(None, selector=b'_setPreventsActivation:', signature=b'v@:c'), True)
+                            logger.info("[QS] Called _setPreventsActivation_ via objc_msgSend")
+                        except Exception as e2:
+                            logger.warning(f"[QS] Could not call _setPreventsActivation: {e2}")
+                except Exception as e:
+                    logger.error(f"[QS] Error calling _setPreventsActivation: {e}")
+            else:
+                logger.info("[QS] Skipping _setPreventsActivation_ - keyboard focus already claimed")
+            
+            # Try to set nonactivating panel style if this is an NSPanel
+            try:
+                class_name = type(ns_window).__name__
+                logger.info(f"[QS] Window class: {class_name}")
+                
+                if hasattr(ns_window, 'setFloatingPanel_'):
+                    ns_window.setFloatingPanel_(True)
+                    logger.info("[QS] Set floatingPanel=True")
+                
+                if hasattr(ns_window, 'setBecomesKeyOnlyIfNeeded_'):
+                    ns_window.setBecomesKeyOnlyIfNeeded_(False)  # False = always become key window
+                    logger.info("[QS] Set becomesKeyOnlyIfNeeded=False (force key window)")
+                
+                if hasattr(ns_window, 'setWorksWhenModal_'):
+                    ns_window.setWorksWhenModal_(True)
+                    logger.info("[QS] Set worksWhenModal=True")
+                    
+            except Exception as e:
+                logger.debug(f"[QS] Could not set panel-specific properties: {e}")
+            
+            try:
+                can_become_key = ns_window.canBecomeKeyWindow()
+                logger.info(f"[QS] canBecomeKeyWindow: {can_become_key}")
+            except Exception as e:
+                logger.debug(f"[QS] Could not check canBecomeKeyWindow: {e}")
+            
+            self._macos_panel_configured = True
+            
+        except Exception as e:
+            logger.error(f"[QS] Error configuring macOS panel: {e}")
+    
+    def _macos_claim_keyboard_focus(self):
+        """
+        Delayed method to claim keyboard focus after window is visible.
+        This reverses _setPreventsActivation_ and makes the window the key window.
+        """
+        try:
+            from AppKit import NSApp
+            
+            # Find our popup window
+            popup_window = None
+            for ns_window in NSApp.windows():
+                try:
+                    if ns_window.title() == "Quick Search":
+                        popup_window = ns_window
+                        break
+                except:
+                    continue
+            
+            if not popup_window:
+                logger.warning("[QS] _macos_claim_keyboard_focus: Could not find window")
+                return
+            
+            # CRITICAL: Now allow activation so we can receive keyboard input
+            # The window is already visible on the correct space, so this won't cause a switch
+            try:
+                import objc
+                if hasattr(popup_window, '_setPreventsActivation_'):
+                    popup_window._setPreventsActivation_(False)
+                    self._keyboard_focus_claimed = True  # Set flag to prevent re-setting to True
+                    logger.info("[QS] Called _setPreventsActivation_(False) - enabling keyboard input")
+            except Exception as e:
+                logger.warning(f"[QS] Could not reverse _setPreventsActivation: {e}")
+            
+            # Activate the app - this is safe now that the window is on the correct space
+            try:
+                NSApp.activateIgnoringOtherApps_(True)
+                logger.info("[QS] Called activateIgnoringOtherApps_(True)")
+            except Exception as e:
+                logger.warning(f"[QS] Could not activate app: {e}")
+            
+            # Now make it the key window
+            try:
+                popup_window.makeKeyWindow()
+                is_key = popup_window.isKeyWindow()
+                logger.info(f"[QS] makeKeyWindow() in delayed focus, isKeyWindow={is_key}")
+                
+                # If still not key, try more aggressive approach
+                if not is_key:
+                    popup_window.makeKeyAndOrderFront_(None)
+                    is_key = popup_window.isKeyWindow()
+                    logger.info(f"[QS] makeKeyAndOrderFront_() retry, isKeyWindow={is_key}")
+            except Exception as e:
+                logger.error(f"[QS] Error making key window in delayed focus: {e}")
+            
+        except Exception as e:
+            logger.error(f"[QS] Error in _macos_claim_keyboard_focus: {e}")
     
     def _macos_focus_input(self):
         """Delayed focus for macOS to ensure window is ready."""
@@ -670,7 +1059,43 @@ class QuickSearchOverlay(QDialog):
         self.activateWindow()
         self.input.setFocus()
 
+    def showEvent(self, e):
+        """Called every time the window is shown. Set window level permanently."""
+        super().showEvent(e)
+        import sys
+        if sys.platform == 'darwin':
+            # Set window level immediately and start enforcement timer
+            self._enforce_window_level()
+            # Start a timer to keep enforcing the level while visible
+            if not hasattr(self, '_level_timer'):
+                self._level_timer = QTimer(self)
+                self._level_timer.timeout.connect(self._enforce_window_level)
+            self._level_timer.start(100)  # Check every 100ms
+
+    def _enforce_window_level(self):
+        """Continuously enforce window level to prevent Qt from resetting it."""
+        try:
+            from AppKit import NSApp
+            for ns_window in NSApp.windows():
+                try:
+                    if ns_window.title() == "Quick Search":
+                        current_level = ns_window.level()
+                        if current_level < 1000:
+                            ns_window.setLevel_(1000)
+                            ns_window.setHidesOnDeactivate_(False)
+                            ns_window.setCollectionBehavior_((1 << 0) | (1 << 8))  # 257
+                        break
+                except:
+                    continue
+        except Exception as e:
+            logger.debug(f"[QS] _enforce_window_level error: {e}")
+
     def hideEvent(self, e):
+        # Stop the level enforcement timer
+        if hasattr(self, '_level_timer'):
+            self._level_timer.stop()
+        # Reset keyboard focus flag so next show can properly configure the panel
+        self._keyboard_focus_claimed = False
         # Persist geometry on close/hide
         try:
             g = self.geometry()

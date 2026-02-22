@@ -64,6 +64,21 @@ def main():
     # Setup logging
     setup_logging()
     
+    # On macOS, set the app as an agent (LSUIElement) BEFORE creating QApplication
+    # This allows the app to appear over fullscreen apps like Spotlight/Alfred
+    if sys.platform == 'darwin':
+        try:
+            from AppKit import NSApp, NSApplication, NSApplicationActivationPolicyAccessory
+            # Initialize NSApplication if not already done
+            NSApplication.sharedApplication()
+            # Set as agent app - no dock icon, can appear over fullscreen
+            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            print("macOS: Set activation policy to ACCESSORY (agent app)")
+        except ImportError:
+            print("macOS: AppKit not available, running as regular app")
+        except Exception as e:
+            print(f"macOS: Error setting activation policy: {e}")
+    
     # Create Qt application
     app = QApplication(sys.argv)
     app.setApplicationName("Lumina")

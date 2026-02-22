@@ -2954,15 +2954,10 @@ class MainWindow(QMainWindow):
                 self._prev_foreground_hwnd = 0
                 self._rel_click_point = None
             
-            # On macOS, hide the main window before showing popup to prevent it from coming forward
-            if sys.platform == 'darwin':
-                # Check if main window is currently visible and not minimized
-                if self.isVisible() and not self.isMinimized():
-                    # Store that we need to keep main window hidden during popup
-                    self._main_was_visible_before_popup = True
-                    logger.info("[QS] macOS: Main window is visible, will hide it")
-                else:
-                    self._main_was_visible_before_popup = False
+            # NOTE: Do NOT hide the main window on macOS!
+            # Hiding/showing windows causes Space transitions which is exactly what we want to avoid.
+            # The popup is configured as a non-activating panel that floats over fullscreen apps
+            # without affecting the main window's state.
             
             logger.info("[QS] Calling show_centered_bottom...")
             self.quick_overlay.show_centered_bottom()
