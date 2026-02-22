@@ -359,7 +359,7 @@ class QuickSearchOverlay(QDialog):
         self.results.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.results.setSelectionMode(QAbstractItemView.SingleSelection)
         self.results.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.results.setFocusPolicy(Qt.StrongFocus)
+        self.results.setFocusPolicy(Qt.ClickFocus)  # Only focus when clicked, not when items added
         self.results.setShowGrid(False)
         
         # Disable mouse tracking to prevent hover-based selection changes
@@ -1132,6 +1132,7 @@ class QuickSearchOverlay(QDialog):
         for i, r in enumerate(rows):
             # Column 0: Open button fills entire cell
             open_btn = QPushButton("Open")
+            open_btn.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus from input
             open_btn.setCursor(Qt.PointingHandCursor)
             open_btn.setToolTip("Open file")
             open_btn.clicked.connect(lambda checked, row=i: self._open_row(row))
@@ -1195,6 +1196,10 @@ class QuickSearchOverlay(QDialog):
             if pending == self.input.text().strip():
                 self._search_worker.set_query(pending, limit=20)
                 self._search_worker.start()
+        
+        # CRITICAL: Restore focus to input after populating results
+        # This prevents the table/buttons from stealing focus
+        self.input.setFocus()
     
     def _open_row(self, row: int):
         """Open the file at the specified row. Popup stays open to allow viewing multiple files."""
@@ -1301,8 +1306,17 @@ class QuickSearchOverlay(QDialog):
             logger.info("[QS] === STARTING AUTOFILL SEQUENCE ===")
             self.create_comprehensive_debug_report()
             
+            # Stop level enforcement timer before hiding (critical for macOS)
+            if hasattr(self, '_level_timer'):
+                self._level_timer.stop()
+                logger.info("[QS] Stopped level enforcement timer")
+            
+            # Reset keyboard focus flag
+            self._keyboard_focus_claimed = False
+            
             # Hide the popup first
             self.hide()
+            logger.info("[QS] Called hide() on popup")
             
             # IMPORTANT: Wait for Enter key to be fully released before restoring focus
             # Otherwise the Enter keypress leaks to the file dialog and briefly opens files

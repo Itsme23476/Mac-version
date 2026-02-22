@@ -1440,7 +1440,7 @@ def copy_path_to_clipboard(path: str) -> bool:
         return False
 
 
-def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = None) -> Tuple[bool, str]:
+def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = None, press_enter: bool = True) -> Tuple[bool, str]:
     """
     Try multiple macOS autofill strategies in order of reliability.
     
@@ -1448,6 +1448,7 @@ def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = N
         path: The file path to fill
         hwnd: Optional PID of target app
         app_name: Optional name of target app
+        press_enter: If True, press Enter after successful fill to confirm/open
     
     Returns:
         Tuple of (success: bool, method_used: str)
@@ -1463,6 +1464,8 @@ def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = N
     # Strategy 1: Clipboard + Paste (most reliable)
     logger.info("[QS] Trying strategy 1: Clipboard + Paste")
     if autofill_via_clipboard_paste(path):
+        if press_enter:
+            _press_enter_to_confirm()
         return (True, "clipboard_paste")
     
     time.sleep(0.2)
@@ -1470,11 +1473,14 @@ def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = N
     # Strategy 2: AppleScript keystroke
     logger.info("[QS] Trying strategy 2: AppleScript keystroke")
     if autofill_via_applescript(path, app_name):
+        if press_enter:
+            _press_enter_to_confirm()
         return (True, "applescript")
     
     time.sleep(0.2)
     
     # Strategy 3: Go to Folder (for native file dialogs)
+    # Note: This strategy already presses Enter internally
     logger.info("[QS] Trying strategy 3: Go to Folder (Cmd+Shift+G)")
     if autofill_via_go_to_folder(path):
         return (True, "go_to_folder")
@@ -1484,6 +1490,8 @@ def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = N
     # Strategy 4: Direct keyboard simulation
     logger.info("[QS] Trying strategy 4: Keyboard simulation")
     if autofill_via_keyboard_simulation(path):
+        if press_enter:
+            _press_enter_to_confirm()
         return (True, "keyboard_simulation")
     
     # All strategies failed - at least copy to clipboard
@@ -1491,6 +1499,35 @@ def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = N
     copy_path_to_clipboard(path)
     
     return (False, "all_failed_clipboard_fallback")
+
+
+def _press_enter_to_confirm() -> bool:
+    """
+    Press Enter key to confirm the file selection in a file dialog.
+    Called after path is filled to automatically open/select the file.
+    """
+    import time
+    try:
+        from pynput.keyboard import Controller, Key
+        
+        keyboard = Controller()
+        
+        # Small delay to let the path be fully entered
+        time.sleep(0.2)
+        
+        # Press Enter to confirm
+        keyboard.press(Key.enter)
+        keyboard.release(Key.enter)
+        
+        logger.info("[QS] Pressed Enter to confirm file selection")
+        return True
+        
+    except ImportError:
+        logger.warning("[QS] pynput not available - cannot press Enter")
+        return False
+    except Exception as e:
+        logger.error(f"[QS] Error pressing Enter: {e}")
+        return False
 
 
 # ============================================================================
