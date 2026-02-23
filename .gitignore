@@ -58,3 +58,6 @@ Output/
 *.exe
 *.dll
 *.dylib
+
+# Secrets
+.github_token
