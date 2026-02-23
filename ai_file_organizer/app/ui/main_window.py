@@ -1014,8 +1014,8 @@ class MainWindow(QMainWindow):
         self.custom_folders_list = QWidget()
         self.custom_folders_list_layout = QVBoxLayout(self.custom_folders_list)
         
-        # View Indexed Files button - prominent and centered
-        self.view_files_btn = QPushButton("View Indexed Files (0)")
+        # View Analyzed Files button - prominent and centered
+        self.view_files_btn = QPushButton("View Analyzed Files (0)")
         self.view_files_btn.setObjectName("viewFilesButton")
         self.view_files_btn.setCursor(Qt.PointingHandCursor)
         self.view_files_btn.setMinimumHeight(52)
@@ -1763,10 +1763,10 @@ class MainWindow(QMainWindow):
             indexer = FileIndexer()
             files = indexer.get_all_indexed_files()
             count = len(files)
-            self.view_files_btn.setText(f"View Indexed Files ({count})")
+            self.view_files_btn.setText(f"View Analyzed Files ({count})")
         except Exception as e:
             logger.error(f"Error updating file count: {e}")
-            self.view_files_btn.setText("View Indexed Files (0)")
+            self.view_files_btn.setText("View Analyzed Files (0)")
 
     def setup_organize_page(self):
         """Setup the AI-powered file organization page."""
@@ -7599,7 +7599,7 @@ Move Plan Summary:
             
             # Update the View Files button count
             if hasattr(self, 'view_files_btn'):
-                self.view_files_btn.setText(f"View Indexed Files ({len(rows)})")
+                self.view_files_btn.setText(f"View Analyzed Files ({len(rows)})")
             
         except Exception as e:
             QMessageBox.critical(self, "Debug Error", f"Error refreshing debug view:\n{e}")
