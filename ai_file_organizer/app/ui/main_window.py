@@ -522,7 +522,7 @@ class MainWindow(QMainWindow):
         nav_items = [
             ("🔍", "Search", 0),
             ("🗂️", "Organize", 1),
-            ("📁", "Index Files", 2),
+            ("📁", "Analyze Files", 2),
             ("⚙️", "Settings", 3),
         ]
         
@@ -1208,7 +1208,7 @@ class MainWindow(QMainWindow):
         
         # Create overlay dialog
         overlay = QDialog(self)
-        overlay.setWindowTitle("Indexed Files")
+        overlay.setWindowTitle("Analyzed Files")
         overlay.setObjectName("filesOverlay")
         overlay.setModal(True)
         overlay.resize(int(self.width() * 0.92), int(self.height() * 0.88))
@@ -1271,7 +1271,7 @@ class MainWindow(QMainWindow):
         title_container.setSpacing(2)
         title_container.setContentsMargins(0, 0, 0, 0)
         
-        title = QLabel("Indexed Files")
+        title = QLabel("Analyzed Files")
         title.setStyleSheet(f"font-size: 24px; font-weight: 600; color: #7C4DFF; background: transparent;")
         title_container.addWidget(title)
         
@@ -1687,7 +1687,7 @@ class MainWindow(QMainWindow):
                 if dialog:
                     dialog.close()
                 
-                self.status_bar.showMessage("Index cleared successfully", 3000)
+                self.status_bar.showMessage("Analysis data cleared successfully", 3000)
                 logger.info("Index cleared by user")
                 
             except Exception as e:
@@ -2649,17 +2649,17 @@ class MainWindow(QMainWindow):
                 ModernInfoDialog.show_info(
                     self,
                     title="Success",
-                    message="Search index rebuilt successfully!",
-                    details=[f"Indexed: {stats['indexed']} files"]
+                    message="Search data rebuilt successfully!",
+                    details=[f"Analyzed: {stats['indexed']} files"]
                 )
-                self.status_bar.showMessage("Search index rebuilt successfully", 5000)
+                self.status_bar.showMessage("Search data rebuilt successfully", 5000)
             else:
                 ModernInfoDialog.show_warning(
                     self,
                     title="Partial Success",
-                    message="Search index rebuilt with some errors.",
+                    message="Search data rebuilt with some errors.",
                     details=[
-                        f"Indexed: {stats['indexed']} files",
+                        f"Analyzed: {stats['indexed']} files",
                         f"Errors: {stats['errors']}"
                     ]
                 )
@@ -4770,10 +4770,10 @@ Move Plan Summary:
         
         if folder:
             self.index_path = Path(folder)
-            self.index_label.setText(f"Index folder: {self.index_path}")
+            self.index_label.setText(f"Selected: {self.index_path}")
             self.index_label.setStyleSheet("")
             self.index_button_action.setEnabled(True)
-            self.status_bar.showMessage(f"Index folder selected: {self.index_path}")
+            self.status_bar.showMessage(f"Folder selected: {self.index_path}")
     
     def index_directory(self):
         """Index the selected directory for search."""
@@ -4846,7 +4846,7 @@ Move Plan Summary:
         self.is_indexing = True
         self.index_path = path
         self._current_user_instructions = user_instructions  # Store for this indexing session
-        self.index_label.setText(f"Indexing: {path.name}")
+        self.index_label.setText(f"Analyzing: {path.name}")
         self.index_button_action.setText("➕ Add to Queue")
         self.index_button_action.setEnabled(True)  # Allow adding more
         
@@ -4864,7 +4864,7 @@ Move Plan Summary:
         self.progress_bar.style().polish(self.progress_bar)
         
         # Update drop zone text instead of hiding it completely
-        self._update_drop_zone(f"Indexing: {path.name}", "Drop more folders to add to queue")
+        self._update_drop_zone(f"Analyzing: {path.name}", "Drop more folders to add to queue")
         
         self.index_percent_label.setVisible(True)
         self.index_percent_label.setText("0%")
@@ -4874,7 +4874,7 @@ Move Plan Summary:
         self.index_progress_label.setVisible(True)
         # Keep button enabled so user can add more files to queue
         # self.index_button_action.setEnabled(False)  # Removed - allow adding to queue
-        self.status_bar.showMessage("Indexing directory...")
+        self.status_bar.showMessage("Analyzing files...")
         
         # Create the worker
         self.index_worker = IndexWorker(self.index_path)
@@ -4923,7 +4923,7 @@ Move Plan Summary:
             # Resume
             search_service.resume_indexing()
             self.index_pause_btn.setText("⏸ Pause")
-            self.status_bar.showMessage("Indexing resumed...")
+            self.status_bar.showMessage("Analysis resumed...")
             self.index_progress_label.setStyleSheet("")  # Normal color
             self.index_percent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #7C4DFF;")
             # Reset progress bar to normal color using property
@@ -4947,8 +4947,8 @@ Move Plan Summary:
         """Cancel the current indexing operation - IMMEDIATE UI response."""
         reply = QMessageBox.question(
             self,
-            "Cancel Indexing",
-            "Are you sure you want to cancel indexing?\n\nFiles already indexed will be kept.",
+            "Cancel Analysis",
+            "Are you sure you want to cancel the analysis?\n\nFiles already analyzed will be kept.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -4966,7 +4966,7 @@ Move Plan Summary:
                 self._pc_index_queue = []
             
             self._hide_index_controls()
-            self.status_bar.showMessage("Indexing cancelled. Files already indexed have been saved.")
+            self.status_bar.showMessage("Analysis cancelled. Files already analyzed have been saved.")
             
             # Refresh views with what was indexed
             stats = search_service.get_index_statistics()
@@ -5021,7 +5021,7 @@ Move Plan Summary:
             self.more_options_header.setVisible(True)
         
         # Reset drop zone text
-        self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
+        self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
         self.index_button_action.setEnabled(True)
         
         # Update indexed paths list
@@ -5039,24 +5039,24 @@ Move Plan Summary:
         
         # No more items - finish up
         self.is_indexing = False
-        self.index_button_action.setText("Add Folder")
+        self.index_button_action.setText("Analyze Folder")
         self._hide_index_controls()
         
         if 'error' in result:
-            QMessageBox.critical(self, "Index Error", f"Error indexing directory:\n{result['error']}")
-            self.status_bar.showMessage("Indexing failed")
+            QMessageBox.critical(self, "Analysis Error", f"Error analyzing files:\n{result['error']}")
+            self.status_bar.showMessage("Analysis failed")
             return
         
         # Check if index limit was exceeded
         if result.get('limit_exceeded'):
             limit_info = result.get('limit_info', {})
             self._show_upgrade_dialog(limit_info)
-            self.status_bar.showMessage("Index limit reached - upgrade for more")
+            self.status_bar.showMessage("Analysis limit reached - upgrade for more")
             return
         
         if result.get('cancelled'):
             self.status_bar.showMessage(
-                f"Indexing cancelled. Indexed {result.get('indexed_files', 0)} files before cancellation."
+                f"Analysis cancelled. Analyzed {result.get('indexed_files', 0)} files before cancellation."
             )
             # Still update stats for what was indexed
             stats = search_service.get_index_statistics()
@@ -5108,7 +5108,7 @@ Move Plan Summary:
             # Ultra users hit their 5000 limit - no upgrade available
             ModernInfoDialog.show_info(
                 self,
-                title="Index Limit Reached",
+                title="Analysis Limit Reached",
                 message=f"You've reached your Ultra plan limit of {INDEX_LIMIT_ULTRA} media files this month.",
                 details=[
                     "Your limit will reset at the start of your next billing cycle.",
@@ -5119,7 +5119,7 @@ Move Plan Summary:
             # Starter users - offer upgrade to Ultra
             confirmed = ModernConfirmDialog.ask(
                 self,
-                title="Index Limit Reached",
+                title="Analysis Limit Reached",
                 message=f"You've reached your monthly limit of {limit} media files.",
                 info_text=f"Upgrade to Ultra for {INDEX_LIMIT_ULTRA} media files per month!",
                 highlight_text=f"Current plan: {plan.title()} | Used: {limit - remaining}/{limit}",
@@ -5138,11 +5138,11 @@ Move Plan Summary:
         
         # Check if it was a cancellation
         if "cancelled" in error.lower() or "interrupted" in error.lower():
-            self.status_bar.showMessage("Indexing cancelled")
+            self.status_bar.showMessage("Analysis cancelled")
             return
         
-        QMessageBox.critical(self, "Index Error", f"Error indexing directory:\n{error}")
-        self.status_bar.showMessage("Indexing failed")
+        QMessageBox.critical(self, "Analysis Error", f"Error analyzing files:\n{error}")
+        self.status_bar.showMessage("Analysis failed")
     
     def on_index_entire_pc(self):
         """Handle 'Search Entire PC' button click with styled warning dialog."""
@@ -5173,7 +5173,7 @@ Move Plan Summary:
         
         # Create custom styled dialog
         dialog = QDialog(self)
-        dialog.setWindowTitle("Index Entire PC")
+        dialog.setWindowTitle("Analyze Entire PC")
         dialog.setObjectName("styledWarningDialog")
         dialog.setFixedSize(460, 420)
         dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
@@ -5234,7 +5234,7 @@ Move Plan Summary:
         cancel_btn.clicked.connect(dialog.reject)
         btn_row.addWidget(cancel_btn)
         
-        confirm_btn = QPushButton("Start Indexing")
+        confirm_btn = QPushButton("Start Analysis")
         confirm_btn.setObjectName("warningDialogConfirmBtn")
         confirm_btn.setCursor(Qt.PointingHandCursor)
         confirm_btn.setMinimumHeight(44)
@@ -5275,7 +5275,7 @@ Move Plan Summary:
             # Restore drop zone and options
             self.drop_zone.setVisible(True)
             self.more_options_header.setVisible(True)
-            self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
+            self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
             self.status_bar.showMessage("PC indexing complete!", 5000)
             
             # Refresh file count
@@ -5284,8 +5284,8 @@ Move Plan Summary:
             # Show completion dialog
             total_indexed = getattr(self, '_pc_total_indexed', 0)
             QMessageBox.information(
-                self, "Indexing Complete",
-                f"Successfully indexed {total_indexed} files from your PC."
+                self, "Analysis Complete",
+                f"Successfully analyzed {total_indexed} files from your PC."
             )
             return
         
@@ -5298,7 +5298,7 @@ Move Plan Summary:
         self.more_options_header.setVisible(False)
         self.more_options_content.setVisible(False)
         
-        self.status_bar.showMessage(f"Indexing: {folder}")
+        self.status_bar.showMessage(f"Analyzing: {folder}")
         
         # Show progress container with pause/cancel buttons
         if hasattr(self, 'index_progress_container'):
@@ -5307,7 +5307,7 @@ Move Plan Summary:
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         self.index_progress_label.setVisible(True)
-        self.index_progress_label.setText(f"Indexing: {folder.name} ({remaining} folder(s) remaining)")
+        self.index_progress_label.setText(f"Analyzing: {folder.name} ({remaining} folder(s) remaining)")
         self.index_percent_label.setVisible(True)
         self.index_percent_label.setText("0%")
         self.index_pause_btn.setVisible(True)
@@ -5903,7 +5903,7 @@ Move Plan Summary:
                     continue
                 
                 logger.info(f"New file detected in {folder_path.name}: {new_file.name}")
-                self.watch_status_label.setText(f"📥 Indexing: {new_file.name}")
+                self.watch_status_label.setText(f"📥 Analyzing: {new_file.name}")
                 
                 # Add to background worker queue (non-blocking)
                 if hasattr(self, '_auto_index_worker'):
@@ -6883,7 +6883,7 @@ Move Plan Summary:
             # Count files/folders being dragged
             urls = event.mimeData().urls()
             count = len(urls)
-            self._update_drop_zone(f"📥 Drop to index {count} item{'s' if count > 1 else ''}", "Release to start indexing")
+            self._update_drop_zone(f"📥 Drop to analyze {count} item{'s' if count > 1 else ''}", "Release to start analysis")
         else:
             event.ignore()
     
@@ -6945,7 +6945,7 @@ Move Plan Summary:
                 file_index.clear_index()
                 self.refresh_debug_view()
                 self._update_view_files_button_count()
-                self.status_bar.showMessage("Index cleared successfully", 3000)
+                self.status_bar.showMessage("Analysis data cleared successfully", 3000)
                 logger.info("Index cleared by user")
                 
             except Exception as e:
@@ -6961,7 +6961,7 @@ Move Plan Summary:
         """Reset drop zone to default styling."""
         # Use object name selector for consistency with QSS
         self.drop_zone.setStyleSheet("")  # Let QSS handle styling
-        self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
+        self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
     
     def _handle_dropped_paths(self, paths: list):
         """Handle dropped file/folder paths and start indexing."""
@@ -6983,67 +6983,114 @@ Move Plan Summary:
         if files_to_index:
             msg_parts.append(f"{len(files_to_index)} file{'s' if len(files_to_index) > 1 else ''}")
         
-        msg = f"Index {' and '.join(msg_parts)}?"
+        msg = f"Analyze {' and '.join(msg_parts)}?"
         
-        # Modern styled confirmation dialog
+        # Modern styled confirmation dialog matching app design
         from PySide6.QtWidgets import QDialog, QFrame, QGraphicsDropShadowEffect, QPlainTextEdit
+        from PySide6.QtGui import QColor
         from app.ui.theme_manager import get_theme_colors
         c = get_theme_colors()
         
         confirm_dialog = QDialog(self)
-        confirm_dialog.setWindowTitle("Index Files")
+        confirm_dialog.setWindowTitle("Analyze Files")
         confirm_dialog.setModal(True)
-        confirm_dialog.setFixedSize(450, 340)
+        confirm_dialog.setMinimumWidth(480)
+        confirm_dialog._drag_pos = None
         
-        # Center on parent
-        confirm_dialog.move(
-            self.x() + (self.width() - 450) // 2,
-            self.y() + (self.height() - 340) // 2
-        )
+        # Remove default window frame for custom styling
+        confirm_dialog.setWindowFlags(confirm_dialog.windowFlags() | Qt.FramelessWindowHint)
+        confirm_dialog.setAttribute(Qt.WA_TranslucentBackground)
         
-        # Style the entire dialog
-        confirm_dialog.setStyleSheet(f"""
-            QDialog {{
+        # Main container with rounded corners and shadow
+        container = QFrame(confirm_dialog)
+        container.setObjectName("analyzeDialogContainer")
+        container.setStyleSheet(f"""
+            QFrame#analyzeDialogContainer {{
                 background-color: {c['surface']};
-                border-radius: 16px;
+                border-radius: 24px;
+                border: 1px solid {c['border']};
             }}
         """)
         
-        dialog_layout = QVBoxLayout(confirm_dialog)
-        dialog_layout.setContentsMargins(28, 24, 28, 24)
-        dialog_layout.setSpacing(16)
+        # Add drop shadow effect
+        shadow = QGraphicsDropShadowEffect(confirm_dialog)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        container.setGraphicsEffect(shadow)
         
-        # Icon + text header
+        main_layout = QVBoxLayout(confirm_dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.addWidget(container)
+        
+        dialog_layout = QVBoxLayout(container)
+        dialog_layout.setContentsMargins(32, 28, 32, 28)
+        dialog_layout.setSpacing(20)
+        
+        # Header with icon and title
         header_row = QHBoxLayout()
-        header_row.setSpacing(14)
-        icon_lbl = QLabel("📂")
-        icon_lbl.setStyleSheet("font-size: 28px; background: transparent;")
+        header_row.setSpacing(16)
+        
+        # Styled icon with background
+        icon_lbl = QLabel("🔍")
+        icon_lbl.setStyleSheet("""
+            font-size: 26px;
+            background-color: rgba(124, 77, 255, 0.08);
+            border-radius: 22px;
+            border: 1px solid rgba(124, 77, 255, 0.20);
+        """)
+        icon_lbl.setFixedSize(52, 52)
+        icon_lbl.setAlignment(Qt.AlignCenter)
         header_row.addWidget(icon_lbl)
         
         msg_label = QLabel(msg)
         msg_label.setStyleSheet(f"""
-            font-size: 18px;
-            font-weight: 600;
+            font-family: "Segoe UI", "SF Pro Display", sans-serif;
+            font-size: 20px;
+            font-weight: 700;
             color: {c['text']};
+            letter-spacing: -0.3px;
             background: transparent;
         """)
         header_row.addWidget(msg_label)
         header_row.addStretch()
+        
+        # Close button
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(36, 36)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7C4DFF;
+                color: white;
+                border: none;
+                border-radius: 18px;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5E35B1;
+            }
+        """)
+        close_btn.clicked.connect(confirm_dialog.reject)
+        header_row.addWidget(close_btn)
+        
         dialog_layout.addLayout(header_row)
         
         # Subtitle
-        sub_label = QLabel("Files will be scanned and made searchable.")
+        sub_label = QLabel("AI will scan your files and generate searchable tags.")
         sub_label.setStyleSheet(f"color: {c['text_muted']}; font-size: 13px; background: transparent;")
         dialog_layout.addWidget(sub_label)
         
         # Optional instructions section
-        instructions_header = QLabel("Custom Instructions (Optional)")
+        instructions_header = QLabel("Custom AI Instructions (Optional)")
         instructions_header.setStyleSheet(f"""
             color: {c['text']};
             font-size: 13px;
             font-weight: 600;
             background: transparent;
-            margin-top: 8px;
+            margin-top: 4px;
         """)
         dialog_layout.addWidget(instructions_header)
         
@@ -7057,13 +7104,14 @@ Move Plan Summary:
             QPlainTextEdit {{
                 background-color: {c['input_bg']};
                 border: 1px solid {c['border']};
-                border-radius: 8px;
-                padding: 8px;
+                border-radius: 12px;
+                padding: 12px;
                 color: {c['text']};
-                font-size: 12px;
+                font-size: 13px;
             }}
             QPlainTextEdit:focus {{
                 border-color: #7C4DFF;
+                border-width: 2px;
             }}
         """)
         dialog_layout.addWidget(instructions_input)
@@ -7076,40 +7124,41 @@ Move Plan Summary:
         btn_row.addStretch()
         
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setMinimumHeight(40)
-        cancel_btn.setMinimumWidth(100)
+        cancel_btn.setMinimumHeight(44)
+        cancel_btn.setMinimumWidth(110)
         cancel_btn.setCursor(Qt.PointingHandCursor)
         cancel_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: transparent;
+                background-color: {c['input_bg']};
                 border: 1px solid {c['border_strong']};
-                border-radius: 10px;
+                border-radius: 12px;
                 color: {c['text_muted']};
                 font-size: 14px;
                 font-weight: 600;
-                padding: 8px 20px;
+                padding: 10px 24px;
             }}
             QPushButton:hover {{
+                background-color: rgba(124, 77, 255, 0.08);
                 border-color: #7C4DFF;
-                color: #7C4DFF;
+                color: #B39DFF;
             }}
         """)
         cancel_btn.clicked.connect(confirm_dialog.reject)
         btn_row.addWidget(cancel_btn)
         
-        confirm_btn = QPushButton("Index Now")
-        confirm_btn.setMinimumHeight(40)
-        confirm_btn.setMinimumWidth(120)
+        confirm_btn = QPushButton("✨ Analyze Now")
+        confirm_btn.setMinimumHeight(44)
+        confirm_btn.setMinimumWidth(140)
         confirm_btn.setCursor(Qt.PointingHandCursor)
         confirm_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7C4DFF, stop:1 #9575FF);
                 color: white;
                 border: none;
-                border-radius: 10px;
+                border-radius: 12px;
                 font-size: 14px;
                 font-weight: 600;
-                padding: 8px 24px;
+                padding: 10px 28px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9575FF, stop:1 #B39DFF);
@@ -7119,6 +7168,29 @@ Move Plan Summary:
         btn_row.addWidget(confirm_btn)
         
         dialog_layout.addLayout(btn_row)
+        
+        # Make dialog draggable
+        def mousePressEvent(event):
+            if event.button() == Qt.LeftButton:
+                confirm_dialog._drag_pos = event.globalPosition().toPoint() - confirm_dialog.frameGeometry().topLeft()
+                event.accept()
+        def mouseMoveEvent(event):
+            if confirm_dialog._drag_pos is not None and event.buttons() == Qt.LeftButton:
+                confirm_dialog.move(event.globalPosition().toPoint() - confirm_dialog._drag_pos)
+                event.accept()
+        def mouseReleaseEvent(event):
+            confirm_dialog._drag_pos = None
+            event.accept()
+        confirm_dialog.mousePressEvent = mousePressEvent
+        confirm_dialog.mouseMoveEvent = mouseMoveEvent
+        confirm_dialog.mouseReleaseEvent = mouseReleaseEvent
+        
+        # Center on parent
+        confirm_dialog.adjustSize()
+        confirm_dialog.move(
+            self.x() + (self.width() - confirm_dialog.width()) // 2,
+            self.y() + (self.height() - confirm_dialog.height()) // 2
+        )
         
         # Apply dark/light title bar
         from app.ui.theme_manager import apply_titlebar_theme
@@ -7143,7 +7215,7 @@ Move Plan Summary:
                 for folder in folders_to_index[1:]:
                     self._add_to_index_queue(folder)
                 self.index_path = first
-                self.index_label.setText(f"Index folder: {first}")
+                self.index_label.setText(f"Selected: {first}")
                 self.index_button_action.setEnabled(True)
                 self._start_indexing_path(first, user_instructions=user_instructions)
         
@@ -7167,7 +7239,7 @@ Move Plan Summary:
             self.index_progress_container.setVisible(True)
         
         # Update drop zone to show status
-        self._update_drop_zone(f"Indexing {total} files...", "Drop more files to add to queue")
+        self._update_drop_zone(f"Analyzing {total} files...", "Drop more files to add to queue")
         
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, total)
@@ -7183,7 +7255,7 @@ Move Plan Summary:
                 percent = int((indexed / total) * 100)
                 self.progress_bar.setValue(indexed)
                 self.index_percent_label.setText(f"{percent}%")
-                self.index_progress_label.setText(f"Indexing file {indexed} of {total}")
+                self.index_progress_label.setText(f"Analyzing file {indexed} of {total}")
                 QApplication.processEvents()  # Keep UI responsive
             except Exception as e:
                 logger.error(f"Error indexing {file_path}: {e}")
@@ -7197,12 +7269,12 @@ Move Plan Summary:
         self.index_progress_label.setVisible(False)
         
         # Reset drop zone
-        self._update_drop_zone("Add folder to index", "Drag and drop or click to browse")
+        self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
         
         QMessageBox.information(
             self,
-            "Indexing Complete",
-            f"Successfully indexed {indexed} of {total} files."
+            "Analysis Complete",
+            f"Successfully analyzed {indexed} of {total} files."
         )
         
         # Refresh views and update paths list
@@ -7224,7 +7296,7 @@ Move Plan Summary:
         files_with_ocr = stats.get('files_with_ocr', 0)
         total_size_mb = stats.get('total_size_mb', 0)
         
-        stats_text = f"Indexed: {total_files} files ({files_with_ocr} with OCR) - {total_size_mb} MB"
+        stats_text = f"Analyzed: {total_files} files ({files_with_ocr} with OCR) - {total_size_mb} MB"
         self.search_stats_label.setText(stats_text)
 
     def _update_usage_labels(self):
