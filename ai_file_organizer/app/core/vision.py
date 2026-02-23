@@ -204,6 +204,47 @@ SYSTEM_PROMPT = (
     "- No trailing commas, no duplicates, JSON only."
 )
 
+# Template for adding user-provided focus instructions to the analysis
+USER_INSTRUCTIONS_TEMPLATE = """
+
+=== ADDITIONAL USER FOCUS ===
+The user has provided specific guidance for what they want emphasized in the analysis and tags.
+Their instructions: "{user_instructions}"
+
+IMPORTANT RULES FOR HANDLING USER INSTRUCTIONS:
+- You MUST still generate all standard tags (type, platform, subjects, objects, layout, style, colors, mood, branding, etc.)
+- In ADDITION to standard tags, pay special attention to the user's focus areas mentioned above
+- If the user mentions specific things to look for (e.g., "client names", "project codes", "invoice numbers", "brand names"), actively scan for these and include them as tags if they are visible in the content
+- If the user's focus areas are NOT visible or NOT applicable to this content, simply ignore them and proceed with standard analysis
+- The user's instructions should ENHANCE your tagging, not REPLACE your standard comprehensive analysis
+- Aim for 25-45 tags total, blending thorough standard analysis with the user's specific focus areas
+- If you find elements matching the user's focus, prioritize including those as tags
+"""
+
+
+def build_analysis_prompt(base_prompt: str, user_instructions: str = None) -> str:
+    """
+    Build the full analysis prompt, optionally including user instructions.
+    
+    Args:
+        base_prompt: The base system prompt (SYSTEM_PROMPT or DETAILED_SYSTEM_PROMPT)
+        user_instructions: Optional user-provided focus instructions
+    
+    Returns:
+        Combined prompt with user instructions appended if provided
+    """
+    if user_instructions and user_instructions.strip():
+        # Sanitize user input to prevent prompt injection
+        clean_instructions = user_instructions.strip()[:500]  # Limit to 500 chars
+        clean_instructions = clean_instructions.replace('"', "'")  # Escape quotes
+        clean_instructions = clean_instructions.replace('\n', ' ')  # Remove newlines
+        
+        addon = USER_INSTRUCTIONS_TEMPLATE.format(user_instructions=clean_instructions)
+        logger.info(f"[Vision] Adding user instructions to prompt: {clean_instructions[:100]}...")
+        return base_prompt + addon
+    
+    return base_prompt
+
 
 # Detailed vision model/prompt for rich descriptions and explicit type
 def get_detailed_vision_model() -> str:
@@ -332,11 +373,16 @@ def _ensure_model(model: str = None) -> None:
     return None
 
 
-def analyze_image(image_path: Path, model: str = None) -> Optional[Dict[str, Any]]:
+def analyze_image(image_path: Path, model: str = None, user_instructions: str = None) -> Optional[Dict[str, Any]]:
     """Return label/tags/caption/confidence using configured AI provider.
     
     Uses OpenAI by default (recommended). Falls back to local Ollama if configured.
     Returns None if no AI provider is available.
+    
+    Args:
+        image_path: Path to the image file
+        model: Optional model name for local Ollama provider
+        user_instructions: Optional user-provided focus instructions for tag generation
     """
     try:
         # Check which AI provider to use
@@ -346,7 +392,7 @@ def analyze_image(image_path: Path, model: str = None) -> Optional[Dict[str, Any
         if provider == 'openai':
             image_b64 = _file_to_b64(image_path)
             if image_b64:
-                result = gpt_vision_fallback(image_b64, image_path.name)
+                result = gpt_vision_fallback(image_b64, image_path.name, user_instructions)
                 if result:
                     logger.info(f"OpenAI vision analysis successful for {image_path.name}")
                     return result
@@ -381,7 +427,9 @@ def analyze_image(image_path: Path, model: str = None) -> Optional[Dict[str, Any
             if width and height:
                 ctx.append(f"dimensions: {width}x{height}, aspect={aspect}")
             ctx_str = "\n".join(ctx)
-            prompt = SYSTEM_PROMPT + "\n" + ctx_str + "\nReturn STRICT JSON only (no markdown)."
+            # Build prompt with optional user instructions
+            base_prompt = build_analysis_prompt(SYSTEM_PROMPT, user_instructions)
+            prompt = base_prompt + "\n" + ctx_str + "\nReturn STRICT JSON only (no markdown)."
             payload = {
                 "model": model,
                 "prompt": prompt,
@@ -445,8 +493,14 @@ def analyze_image(image_path: Path, model: str = None) -> Optional[Dict[str, Any
         return None
 
 
-def _gpt_text_analysis(text: str, filename: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Analyze text content using OpenAI GPT via Supabase Edge Function proxy."""
+def _gpt_text_analysis(text: str, filename: Optional[str] = None, user_instructions: str = None) -> Optional[Dict[str, Any]]:
+    """Analyze text content using OpenAI GPT via Supabase Edge Function proxy.
+    
+    Args:
+        text: The text content to analyze
+        filename: Optional filename for context
+        user_instructions: Optional user-provided focus instructions for tag generation
+    """
     try:
         name_part = f"Filename: {filename}\n" if filename else ""
         snippet = (text or "").strip()
@@ -459,8 +513,11 @@ def _gpt_text_analysis(text: str, filename: Optional[str] = None) -> Optional[Di
             + "Content snippet:\n" + snippet
         )
         
+        # Build system prompt with optional user instructions
+        system_prompt = build_analysis_prompt(SYSTEM_PROMPT, user_instructions)
+        
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         
@@ -518,18 +575,24 @@ def _gpt_text_analysis(text: str, filename: Optional[str] = None) -> Optional[Di
         return None
 
 
-def analyze_text(text: str, filename: Optional[str] = None, model: str = None) -> Optional[Dict[str, Any]]:
+def analyze_text(text: str, filename: Optional[str] = None, model: str = None, user_instructions: str = None) -> Optional[Dict[str, Any]]:
     """Classify non-image files using configured AI provider.
 
     Uses OpenAI by default (recommended). Falls back to local Ollama if configured.
     Returns: dict with label, tags, caption, vision_confidence (score), or None on failure.
+    
+    Args:
+        text: The text content to analyze
+        filename: Optional filename for context
+        model: Optional model name for local Ollama provider
+        user_instructions: Optional user-provided focus instructions for tag generation
     """
     try:
         provider = settings.ai_provider
         
         # OpenAI is the primary/default provider
         if provider == 'openai':
-            result = _gpt_text_analysis(text, filename)
+            result = _gpt_text_analysis(text, filename, user_instructions)
             if result:
                 logger.info(f"OpenAI text analysis successful for {filename or 'unknown'}")
                 return result
@@ -551,8 +614,10 @@ def analyze_text(text: str, filename: Optional[str] = None, model: str = None) -
             snippet = (text or "").strip()
             if len(snippet) > 5000:
                 snippet = snippet[:5000]
+            # Build prompt with optional user instructions
+            base_prompt = build_analysis_prompt(SYSTEM_PROMPT, user_instructions)
             prompt = (
-                SYSTEM_PROMPT
+                base_prompt
                 + "\nClassify the following file content. Return STRICT JSON only.\n"
                 + name_part
                 + "Content snippet:\n" + snippet
@@ -695,14 +760,20 @@ def _salvage_from_content(content: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None, user_instructions: str = None) -> Optional[Dict[str, Any]]:
     """Cloud vision analysis using OpenAI GPT-4o-mini via Supabase Edge Function proxy.
     
     The API key is securely stored in Supabase and accessed through the proxy.
     image_b64 should be raw base64 without data URI prefix.
+    
+    Args:
+        image_b64: Base64 encoded image data
+        filename: Optional filename for context
+        user_instructions: Optional user-provided focus instructions for tag generation
     """
     try:
-        system = DETAILED_SYSTEM_PROMPT
+        # Build prompt with optional user instructions
+        system = build_analysis_prompt(DETAILED_SYSTEM_PROMPT, user_instructions)
         # Build data URL for inline base64 image
         data_url = f"data:image/png;base64,{image_b64}"
         user_content: List[Dict[str, Any]] = []
@@ -777,8 +848,14 @@ def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None) -> Optio
 
 
 
-def describe_image_detailed(image_path: Path, model: str = None) -> Optional[Dict[str, Any]]:
-    """Produce a rich paragraph, type classification, and extras via configured AI provider."""
+def describe_image_detailed(image_path: Path, model: str = None, user_instructions: str = None) -> Optional[Dict[str, Any]]:
+    """Produce a rich paragraph, type classification, and extras via configured AI provider.
+    
+    Args:
+        image_path: Path to the image file
+        model: Optional model name for local Ollama provider
+        user_instructions: Optional user-provided focus instructions for tag generation
+    """
     try:
         provider = settings.ai_provider
         
@@ -786,7 +863,7 @@ def describe_image_detailed(image_path: Path, model: str = None) -> Optional[Dic
         if provider == 'openai':
             image_b64 = _file_to_b64(image_path)
             if image_b64:
-                result = gpt_vision_fallback(image_b64, image_path.name)
+                result = gpt_vision_fallback(image_b64, image_path.name, user_instructions)
                 if result:
                     logger.info(f"OpenAI detailed vision successful for {image_path.name}")
                     return result
@@ -822,7 +899,9 @@ def describe_image_detailed(image_path: Path, model: str = None) -> Optional[Dic
             if width and height:
                 ctx.append(f"dimensions: {width}x{height}, aspect={aspect}")
             ctx_str = "\n".join(ctx)
-            prompt = DETAILED_SYSTEM_PROMPT + "\n" + ctx_str + "\nReturn STRICT JSON only."
+            # Build prompt with optional user instructions
+            base_prompt = build_analysis_prompt(DETAILED_SYSTEM_PROMPT, user_instructions)
+            prompt = base_prompt + "\n" + ctx_str + "\nReturn STRICT JSON only."
 
             payload = {
                 "model": model,
