@@ -2980,13 +2980,13 @@ class MainWindow(QMainWindow):
         # Check for Accessibility permission on macOS
         # Only try to register global hotkey if permission is granted
         # This prevents showing two dialogs (system + custom)
-        if not check_accessibility_permission():
-            logger.warning("[QS] Accessibility permission not granted - skipping global hotkey registration")
-            # Show permission dialog after a short delay (so main window is visible)
-            QTimer.singleShot(1500, self._show_accessibility_permission_dialog)
-            # Don't try to register with pynput - it would trigger the system dialog
-            # The app-focus shortcut below will still work when app is focused
-        else:
+        if check_accessibility_permission():
+            # Permission is granted - reset the "don't show" flag
+            # This ensures if permission is revoked later, the dialog can show again
+            if settings.accessibility_dialog_shown:
+                logger.info("[QS] Permission granted - resetting accessibility dialog flag")
+                settings.reset_accessibility_dialog()
+            
             # Register global hotkey using pynput (works on macOS)
             # Use signal.emit() to safely trigger UI from background thread
             try:
@@ -3002,6 +3002,12 @@ class MainWindow(QMainWindow):
                     logger.warning("[QS] Global hotkey registration returned None")
             except Exception as e:
                 logger.error(f"[QS] Failed to register global hotkey: {e}")
+        else:
+            logger.warning("[QS] Accessibility permission not granted - skipping global hotkey registration")
+            # Show permission dialog after a short delay (so main window is visible)
+            QTimer.singleShot(1500, self._show_accessibility_permission_dialog)
+            # Don't try to register with pynput - it would trigger the system dialog
+            # The app-focus shortcut below will still work when app is focused
         
         # App-focus fallback using QShortcut (works when app is focused)
         try:
@@ -3018,7 +3024,9 @@ class MainWindow(QMainWindow):
         """Show a dialog prompting the user to grant Accessibility permission."""
         # Don't show if permission was already granted
         if check_accessibility_permission():
-            logger.info("[QS] Accessibility permission now granted")
+            logger.info("[QS] Accessibility permission now granted - resetting dialog flag")
+            # Reset the flag so it can show again if permission is revoked later
+            settings.reset_accessibility_dialog()
             return
         
         # Don't show if user chose "Don't show again"
