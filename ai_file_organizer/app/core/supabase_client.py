@@ -588,7 +588,7 @@ class SupabaseAuth:
 
 def get_latest_app_version() -> Optional[Dict[str, Any]]:
     """
-    Fetch the latest app version from Supabase (public access, no auth required).
+    Fetch the latest app version for the current platform from Supabase.
     
     Returns:
         Dict with version info: {version, download_url, release_notes, release_name, is_required}
@@ -605,16 +605,20 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
             headers={"apikey": SUPABASE_ANON_KEY}
         )
         
-        # Query latest version (order by published_at desc, limit 1)
-        response = client.from_("app_version").select("*").order("published_at", desc=True).limit(1).execute()
+        # Determine current platform
+        platform = 'mac' if sys.platform == 'darwin' else 'windows'
+        
+        # Query latest version for this platform (order by published_at desc, limit 1)
+        response = client.from_("app_version").select("*").eq(
+            "platform", platform
+        ).order("published_at", desc=True).limit(1).execute()
         
         if response.data and len(response.data) > 0:
             version_data = response.data[0]
-            logger.info(f"Fetched app version from Supabase: {version_data.get('version')}")
+            logger.info(f"Fetched app version from Supabase: {version_data.get('version')} (platform: {platform})")
             
-            # Get platform-specific download URL
-            # Falls back to generic download_url if platform-specific not available
-            if sys.platform == 'darwin':
+            # Get download URL (platform-specific or generic fallback)
+            if platform == 'mac':
                 download_url = version_data.get('download_url_mac') or version_data.get('download_url')
             else:
                 download_url = version_data.get('download_url_windows') or version_data.get('download_url')
@@ -628,7 +632,7 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
                 'is_required': version_data.get('is_required', False)
             }
         else:
-            logger.info("No app version found in Supabase")
+            logger.info(f"No app version found in Supabase for platform: {platform}")
             return None
             
     except Exception as e:

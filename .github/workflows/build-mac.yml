@@ -142,25 +142,28 @@ jobs:
           TAG_NAME="${{ github.event.release.tag_name }}"
           RELEASE_NAME="${{ github.event.release.name }}"
           DMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Lumina-${VERSION}-mac.dmg"
+          PLATFORM="mac"
           
-          echo "Updating Supabase with Mac download URL..."
+          echo "Updating Supabase with Mac release..."
           echo "Version: ${VERSION}"
+          echo "Platform: ${PLATFORM}"
           echo "DMG URL: ${DMG_URL}"
           
-          # Check if version already exists
-          EXISTING=$(curl -s "${SUPABASE_URL}/rest/v1/app_version?version=eq.${VERSION}" \
+          # Check if this version for this platform already exists
+          EXISTING=$(curl -s "${SUPABASE_URL}/rest/v1/app_version?version=eq.${VERSION}&platform=eq.${PLATFORM}" \
             -H "apikey: ${SUPABASE_SERVICE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}")
           
           if [ "$EXISTING" = "[]" ]; then
-            # Insert new version
-            echo "Inserting new version record..."
+            # Insert new version for Mac platform
+            echo "Inserting new Mac version record..."
             curl -X POST "${SUPABASE_URL}/rest/v1/app_version" \
               -H "apikey: ${SUPABASE_SERVICE_KEY}" \
               -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
               -H "Content-Type: application/json" \
               -d "{
                 \"version\": \"${VERSION}\",
+                \"platform\": \"${PLATFORM}\",
                 \"download_url\": \"${DMG_URL}\",
                 \"download_url_mac\": \"${DMG_URL}\",
                 \"release_name\": \"${RELEASE_NAME:-Lumina ${VERSION}}\",
@@ -169,14 +172,15 @@ jobs:
                 \"is_required\": false
               }"
           else
-            # Update existing version with Mac URL
-            echo "Updating existing version with Mac URL..."
-            curl -X PATCH "${SUPABASE_URL}/rest/v1/app_version?version=eq.${VERSION}" \
+            # Update existing Mac version record
+            echo "Updating existing Mac version record..."
+            curl -X PATCH "${SUPABASE_URL}/rest/v1/app_version?version=eq.${VERSION}&platform=eq.${PLATFORM}" \
               -H "apikey: ${SUPABASE_SERVICE_KEY}" \
               -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
               -H "Content-Type: application/json" \
               -d "{
-                \"download_url_mac\": \"${DMG_URL}\"
+                \"download_url_mac\": \"${DMG_URL}\",
+                \"published_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
               }"
           fi
           
