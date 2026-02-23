@@ -109,6 +109,9 @@ datas += collect_data_files('PySide6', include_py_files=False)
 # Collect certifi certificates
 datas += collect_data_files('certifi')
 
+# Collect spellchecker language dictionaries
+datas += collect_data_files('spellchecker')
+
 a = Analysis(
     [os.path.join(APP_DIR, 'main.py')],
     pathex=[APP_DIR, SPEC_DIR],
