@@ -41,7 +41,8 @@ jobs:
             VERSION="${{ github.event.inputs.version }}"
           elif [ -n "${{ github.event.release.tag_name }}" ]; then
             VERSION="${{ github.event.release.tag_name }}"
-            VERSION="${VERSION#v}"
+            # Remove 'v' or 'V' prefix and any leading dots
+            VERSION=$(echo "$VERSION" | sed 's/^[vV]//; s/^\.//')
           else
             # Use sed instead of grep -P (macOS compatible)
             VERSION=$(sed -n 's/.*VERSION = "\([^"]*\)".*/\1/p' ai_file_organizer/app/version.py | head -1)
@@ -51,6 +52,22 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
+      
+      - name: Update version.py with release version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Updating version.py to version: $VERSION"
+          
+          # Update VERSION in version.py
+          sed -i '' "s/^VERSION = .*/VERSION = \"$VERSION\"/" ai_file_organizer/app/version.py
+          
+          # Update BUILD_DATE
+          BUILD_DATE=$(date +%Y-%m-%d)
+          sed -i '' "s/^BUILD_DATE = .*/BUILD_DATE = \"$BUILD_DATE\"/" ai_file_organizer/app/version.py
+          
+          # Verify the update
+          echo "Updated version.py:"
+          cat ai_file_organizer/app/version.py
       
       - name: Build with PyInstaller
         run: |
