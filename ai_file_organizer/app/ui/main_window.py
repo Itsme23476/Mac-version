@@ -3016,39 +3016,114 @@ class MainWindow(QMainWindow):
     
     def _show_accessibility_permission_dialog(self):
         """Show a dialog prompting the user to grant Accessibility permission."""
-        # Don't show if permission was already granted (user might have granted it quickly)
+        # Don't show if permission was already granted
         if check_accessibility_permission():
             logger.info("[QS] Accessibility permission now granted")
             return
         
-        # Don't show if we've already shown this dialog before
-        # (macOS may report false negatives for unsigned apps even after permission is granted)
+        # Don't show if user chose "Don't show again"
         if settings.accessibility_dialog_shown:
-            logger.info("[QS] Accessibility dialog already shown before - skipping")
+            logger.info("[QS] User chose not to show accessibility dialog again")
             return
         
-        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+                                        QPushButton, QCheckBox, QFrame)
+        from PySide6.QtCore import Qt
         
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Accessibility Permission Required")
-        msg.setText("Quick Search Global Hotkey Needs Permission")
-        msg.setInformativeText(
+        c = self._theme_colors
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Accessibility Permission Required")
+        dialog.setFixedWidth(450)
+        dialog.setModal(True)
+        
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+        
+        # Title
+        title = QLabel("Quick Search Global Hotkey Needs Permission")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {c['text']};")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        
+        # Description
+        desc = QLabel(
             "To use the Quick Search hotkey (Ctrl+Shift+Space) from anywhere on your Mac, "
             "this app needs Accessibility permission.\n\n"
             "Click 'Open Settings' to grant permission, then restart the app.\n\n"
             "Note: The hotkey will still work when the app is focused without this permission."
         )
-        msg.setIcon(QMessageBox.Information)
+        desc.setStyleSheet(f"font-size: 13px; color: {c['text_secondary']};")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
         
-        open_btn = msg.addButton("Open Settings", QMessageBox.AcceptRole)
-        msg.addButton("Later", QMessageBox.RejectRole)
+        # Checkbox for "Don't show again"
+        dont_show_checkbox = QCheckBox("Don't show this again")
+        dont_show_checkbox.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 12px;
+                color: {c['text_secondary']};
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+            }}
+        """)
+        layout.addWidget(dont_show_checkbox)
         
-        # Mark as shown so we don't show it again
-        settings.set_accessibility_dialog_shown(True)
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
         
-        msg.exec()
+        later_btn = QPushButton("Later")
+        later_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['button_bg']};
+                color: {c['text']};
+                border: 1px solid {c['border']};
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {c['hover']};
+            }}
+        """)
+        later_btn.clicked.connect(dialog.reject)
         
-        if msg.clickedButton() == open_btn:
+        open_btn = QPushButton("Open Settings")
+        open_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c['accent']};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {c['accent_hover']};
+            }}
+        """)
+        open_btn.clicked.connect(dialog.accept)
+        
+        btn_layout.addStretch()
+        btn_layout.addWidget(later_btn)
+        btn_layout.addWidget(open_btn)
+        layout.addLayout(btn_layout)
+        
+        dialog.setStyleSheet(f"background-color: {c['surface']};")
+        
+        result = dialog.exec()
+        
+        # Save preference if checkbox is checked
+        if dont_show_checkbox.isChecked():
+            settings.set_accessibility_dialog_shown(True)
+            logger.info("[QS] User chose not to show accessibility dialog again")
+        
+        if result == QDialog.Accepted:
             request_accessibility_permission()
     
     def _unregister_quick_search_hotkey(self):
