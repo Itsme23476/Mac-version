@@ -77,10 +77,16 @@ def download_update(
     try:
         update_dir = get_update_dir()
         
-        # Determine filename from URL
+        # Determine filename from URL based on platform
         filename = download_url.split('/')[-1]
-        if not filename.endswith('.exe'):
-            filename = "Lumina-Setup.exe"
+        if sys.platform == 'darwin':
+            # macOS: expect .dmg file
+            if not filename.endswith('.dmg'):
+                filename = "Lumina.dmg"
+        else:
+            # Windows: expect .exe file
+            if not filename.endswith('.exe'):
+                filename = "Lumina-Setup.exe"
         
         installer_path = update_dir / filename
         
@@ -310,6 +316,159 @@ def _download_with_urllib(
         return None
 
 
+def _install_mac_update(dmg_path: Path) -> bool:
+    """
+    Install update from DMG on macOS.
+    
+    1. Mount the DMG
+    2. Find the .app inside
+    3. Copy it to /Applications (replacing old version)
+    4. Unmount DMG
+    5. Relaunch the new app
+    6. Quit current app
+    
+    Args:
+        dmg_path: Path to the downloaded .dmg file
+        
+    Returns:
+        True if update was applied successfully
+    """
+    import re
+    
+    mount_point = None
+    
+    try:
+        logger.info(f"[MAC UPDATE] Starting macOS update from: {dmg_path}")
+        
+        # Step 1: Mount the DMG
+        logger.info("[MAC UPDATE] Mounting DMG...")
+        mount_result = subprocess.run(
+            ['hdiutil', 'attach', str(dmg_path), '-nobrowse', '-plist'],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if mount_result.returncode != 0:
+            logger.error(f"[MAC UPDATE] Failed to mount DMG: {mount_result.stderr}")
+            return False
+        
+        # Parse plist output to find mount point
+        # Look for the mount point in the output
+        import plistlib
+        try:
+            plist_data = plistlib.loads(mount_result.stdout.encode())
+            for entity in plist_data.get('system-entities', []):
+                if 'mount-point' in entity:
+                    mount_point = entity['mount-point']
+                    break
+        except Exception as e:
+            logger.warning(f"[MAC UPDATE] Could not parse plist, trying regex: {e}")
+            # Fallback: use regex to find mount point
+            match = re.search(r'/Volumes/[^\s]+', mount_result.stdout)
+            if match:
+                mount_point = match.group(0)
+        
+        if not mount_point:
+            logger.error("[MAC UPDATE] Could not find mount point")
+            return False
+        
+        logger.info(f"[MAC UPDATE] DMG mounted at: {mount_point}")
+        
+        # Step 2: Find the .app inside the mounted volume
+        mount_path = Path(mount_point)
+        app_files = list(mount_path.glob('*.app'))
+        
+        if not app_files:
+            logger.error(f"[MAC UPDATE] No .app found in mounted DMG at {mount_point}")
+            _unmount_dmg(mount_point)
+            return False
+        
+        source_app = app_files[0]  # Use first .app found (should be Lumina.app)
+        logger.info(f"[MAC UPDATE] Found app: {source_app.name}")
+        
+        # Step 3: Determine destination (usually /Applications)
+        dest_app = Path('/Applications') / source_app.name
+        
+        # Step 4: Remove old version if exists
+        if dest_app.exists():
+            logger.info(f"[MAC UPDATE] Removing old version: {dest_app}")
+            try:
+                shutil.rmtree(dest_app)
+            except PermissionError:
+                logger.error("[MAC UPDATE] Permission denied removing old app. May need admin privileges.")
+                _unmount_dmg(mount_point)
+                return False
+        
+        # Step 5: Copy new app to /Applications
+        logger.info(f"[MAC UPDATE] Copying {source_app.name} to /Applications...")
+        try:
+            shutil.copytree(source_app, dest_app, symlinks=True)
+        except PermissionError:
+            logger.error("[MAC UPDATE] Permission denied copying to /Applications")
+            _unmount_dmg(mount_point)
+            return False
+        
+        logger.info("[MAC UPDATE] App copied successfully")
+        
+        # Step 6: Unmount DMG
+        _unmount_dmg(mount_point)
+        
+        # Step 7: Create a script to relaunch the app after current app quits
+        relaunch_script = dmg_path.parent / "relaunch.sh"
+        script_content = f'''#!/bin/bash
+sleep 2
+open "{dest_app}"
+rm -f "$0"
+'''
+        with open(relaunch_script, 'w') as f:
+            f.write(script_content)
+        os.chmod(relaunch_script, 0o755)
+        
+        # Launch relaunch script in background
+        subprocess.Popen(
+            ['/bin/bash', str(relaunch_script)],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        
+        logger.info("[MAC UPDATE] Update complete - quitting current app to relaunch new version")
+        
+        # Step 8: Quit current app
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            app.quit()
+        
+        return True
+        
+    except subprocess.TimeoutExpired:
+        logger.error("[MAC UPDATE] Operation timed out")
+        if mount_point:
+            _unmount_dmg(mount_point)
+        return False
+    except Exception as e:
+        logger.error(f"[MAC UPDATE] Update failed: {e}", exc_info=True)
+        if mount_point:
+            _unmount_dmg(mount_point)
+        return False
+
+
+def _unmount_dmg(mount_point: str) -> None:
+    """Unmount a DMG volume."""
+    try:
+        logger.info(f"[MAC UPDATE] Unmounting: {mount_point}")
+        subprocess.run(
+            ['hdiutil', 'detach', mount_point, '-quiet'],
+            capture_output=True,
+            timeout=30
+        )
+    except Exception as e:
+        logger.warning(f"[MAC UPDATE] Could not unmount DMG: {e}")
+
+
 def run_installer_and_exit(installer_path: Path) -> bool:
     """
     Run the installer and exit the current app.
@@ -381,8 +540,11 @@ fso.DeleteFile WScript.ScriptFullName
             if app:
                 logger.info("Closing application for update...")
                 app.quit()
+        elif sys.platform == 'darwin':
+            # macOS: Mount DMG, copy app to /Applications, unmount, and relaunch
+            return _install_mac_update(installer_path)
         else:
-            # Non-Windows: just open the installer
+            # Other platforms: just open the installer
             subprocess.Popen(
                 [str(installer_path)],
                 start_new_session=True,

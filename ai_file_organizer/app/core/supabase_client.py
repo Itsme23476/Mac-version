@@ -610,9 +610,17 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
         if response.data and len(response.data) > 0:
             version_data = response.data[0]
             logger.info(f"Fetched app version from Supabase: {version_data.get('version')}")
+            
+            # Get platform-specific download URL
+            # Falls back to generic download_url if platform-specific not available
+            if sys.platform == 'darwin':
+                download_url = version_data.get('download_url_mac') or version_data.get('download_url')
+            else:
+                download_url = version_data.get('download_url_windows') or version_data.get('download_url')
+            
             return {
                 'version': version_data.get('version'),
-                'download_url': version_data.get('download_url'),
+                'download_url': download_url,
                 'release_notes': version_data.get('release_notes', ''),
                 'release_name': version_data.get('release_name', ''),
                 'published_at': version_data.get('published_at', ''),

@@ -1892,8 +1892,8 @@ class UpdateNotificationDialog(QDialog):
         if not url:
             return
         
-        # Check if it's a direct download link (zip/exe) or a page
-        if url.endswith('.zip') or url.endswith('.exe') or 'releases/download' in url:
+        # Check if it's a direct download link (zip/exe/dmg) or a page
+        if url.endswith('.zip') or url.endswith('.exe') or url.endswith('.dmg') or 'releases/download' in url:
             # Direct download - use auto-updater
             self._start_auto_update(url)
         else:
