@@ -10,6 +10,10 @@ on:
         required: false
         default: ''
 
+# Grant write permissions for uploading to releases
+permissions:
+  contents: write
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -37,9 +41,13 @@ jobs:
             VERSION="${{ github.event.inputs.version }}"
           elif [ -n "${{ github.event.release.tag_name }}" ]; then
             VERSION="${{ github.event.release.tag_name }}"
-            VERSION="${VERSION#v}"  # Remove 'v' prefix if present
+            VERSION="${VERSION#v}"
           else
-            VERSION=$(grep -oP 'VERSION = "\K[^"]+' ai_file_organizer/app/version.py || echo "1.0.0")
+            # Use sed instead of grep -P (macOS compatible)
+            VERSION=$(sed -n 's/.*VERSION = "\([^"]*\)".*/\1/p' ai_file_organizer/app/version.py | head -1)
+            if [ -z "$VERSION" ]; then
+              VERSION="1.0.0"
+            fi
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
@@ -53,72 +61,11 @@ jobs:
         run: |
           if [ ! -d "dist/Lumina.app" ]; then
             echo "Error: Lumina.app was not created"
+            ls -la dist/ || echo "dist folder doesn't exist"
             exit 1
           fi
           echo "Build successful!"
           du -sh dist/Lumina.app
-      
-      # Code signing (only if secrets are configured)
-      - name: Import Code Signing Certificate
-        if: ${{ env.MACOS_CERTIFICATE != '' }}
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          # Create keychain
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          
-          # Import certificate
-          echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
-          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
-          
-          # Clean up
-          rm certificate.p12
-      
-      - name: Code Sign App
-        if: ${{ env.MACOS_CERTIFICATE != '' }}
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
-        run: |
-          codesign --force --deep --sign "$SIGNING_IDENTITY" \
-            --entitlements build/entitlements.plist \
-            --options runtime \
-            dist/Lumina.app
-          
-          # Verify signature
-          codesign --verify --deep --strict dist/Lumina.app
-          echo "Code signing successful!"
-      
-      # Notarization (only if secrets are configured)
-      - name: Notarize App
-        if: ${{ env.APPLE_ID != '' }}
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          # Create ZIP for notarization
-          ditto -c -k --keepParent dist/Lumina.app dist/Lumina.zip
-          
-          # Submit for notarization
-          xcrun notarytool submit dist/Lumina.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-          
-          # Staple the notarization ticket
-          xcrun stapler staple dist/Lumina.app
-          
-          # Clean up
-          rm dist/Lumina.zip
-          
-          echo "Notarization successful!"
       
       - name: Create DMG
         run: |
@@ -152,7 +99,7 @@ jobs:
               rm -rf dist/dmg_temp
             }
           
-          echo "DMG created: dist/${DMG_NAME}.dmg"
+          echo "DMG created:"
           ls -la dist/*.dmg
       
       - name: Upload DMG Artifact
@@ -164,81 +111,6 @@ jobs:
       
       - name: Upload to Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*.dmg
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Build for both Intel and Apple Silicon
-  build-macos-universal:
-    runs-on: macos-latest
-    if: github.event_name == 'release'
-    
-    strategy:
-      matrix:
-        arch: [x64, arm64]
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install -r ai_file_organizer/requirements.txt
-      
-      - name: Get version
-        id: version
-        run: |
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION="${VERSION#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-      
-      - name: Build for ${{ matrix.arch }}
-        run: |
-          cd ${{ github.workspace }}
-          python -m PyInstaller --clean --noconfirm \
-            --target-arch ${{ matrix.arch }} \
-            Lumina.spec
-      
-      - name: Create DMG
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          DMG_NAME="Lumina-${VERSION}-mac-${{ matrix.arch }}"
-          
-          brew install create-dmg || true
-          
-          create-dmg \
-            --volname "Lumina $VERSION" \
-            --volicon "ai_file_organizer/resources/icon.icns" \
-            --window-pos 200 120 \
-            --window-size 600 400 \
-            --icon-size 100 \
-            --icon "Lumina.app" 150 190 \
-            --hide-extension "Lumina.app" \
-            --app-drop-link 450 185 \
-            "dist/${DMG_NAME}.dmg" \
-            "dist/Lumina.app" || {
-              mkdir -p dist/dmg_temp
-              cp -R dist/Lumina.app dist/dmg_temp/
-              ln -s /Applications dist/dmg_temp/Applications
-              hdiutil create -volname "Lumina $VERSION" \
-                -srcfolder dist/dmg_temp \
-                -ov -format UDZO \
-                "dist/${DMG_NAME}.dmg"
-              rm -rf dist/dmg_temp
-            }
-      
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: dist/*.dmg
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
