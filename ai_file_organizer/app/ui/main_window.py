@@ -4548,6 +4548,12 @@ class MainWindow(QMainWindow):
                 # Update the table cell
                 item.setText(new_text)
                 self.status_bar.showMessage(f"Updated {column_name}")
+        
+        # Clear selection after dialog closes (for both Save and Cancel)
+        self.debug_table.clearSelection()
+        self.debug_table.setCurrentCell(-1, -1)
+        self.debug_table.clearFocus()
+        self.debug_table.viewport().update()
     
     def select_source_folder(self):
         """Select source folder."""
