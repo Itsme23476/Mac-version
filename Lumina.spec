@@ -50,6 +50,7 @@ hidden_imports = [
     'app.ui.quick_search_overlay',
     'app.ui.file_preview_window',
     'app.ui.mac_hotkey',
+    'app.ui.win_hotkey',
     'app.ui.contextual_tips',
     'app.version',
     
@@ -81,6 +82,8 @@ hidden_imports = [
     'pynput.keyboard',
     'pynput.mouse',
     'dateparser',
+    'dateparser.data',
+    'regex',
     'PyPDF2',
     'rapidfuzz',
     'spellchecker',
@@ -111,6 +114,15 @@ datas += collect_data_files('certifi')
 
 # Collect spellchecker language dictionaries
 datas += collect_data_files('spellchecker')
+
+# Collect dateparser data files (language definitions)
+datas += collect_data_files('dateparser')
+
+# Collect regex data files (used by dateparser)
+try:
+    datas += collect_data_files('regex')
+except Exception:
+    pass  # regex might not have data files in all versions
 
 a = Analysis(
     [os.path.join(APP_DIR, 'main.py')],
