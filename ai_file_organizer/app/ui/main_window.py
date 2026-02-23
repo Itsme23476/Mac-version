@@ -2978,26 +2978,30 @@ class MainWindow(QMainWindow):
         logger.info(f"[QS] Registering global hotkey: {hotkey}")
         
         # Check for Accessibility permission on macOS
+        # Only try to register global hotkey if permission is granted
+        # This prevents showing two dialogs (system + custom)
         if not check_accessibility_permission():
-            logger.warning("[QS] Accessibility permission not granted - global hotkey may not work")
+            logger.warning("[QS] Accessibility permission not granted - skipping global hotkey registration")
             # Show permission dialog after a short delay (so main window is visible)
             QTimer.singleShot(1500, self._show_accessibility_permission_dialog)
-        
-        # Register global hotkey using pynput (works on macOS)
-        # Use signal.emit() to safely trigger UI from background thread
-        try:
-            hk = register_global_hotkey(
-                self,
-                hotkey,
-                lambda: self._trigger_quick_overlay.emit()
-            )
-            if hk:
-                self._global_hotkey = hk
-                logger.info(f"[QS] Registered global hotkey: {hotkey}")
-            else:
-                logger.warning("[QS] Global hotkey registration returned None")
-        except Exception as e:
-            logger.error(f"[QS] Failed to register global hotkey: {e}")
+            # Don't try to register with pynput - it would trigger the system dialog
+            # The app-focus shortcut below will still work when app is focused
+        else:
+            # Register global hotkey using pynput (works on macOS)
+            # Use signal.emit() to safely trigger UI from background thread
+            try:
+                hk = register_global_hotkey(
+                    self,
+                    hotkey,
+                    lambda: self._trigger_quick_overlay.emit()
+                )
+                if hk:
+                    self._global_hotkey = hk
+                    logger.info(f"[QS] Registered global hotkey: {hotkey}")
+                else:
+                    logger.warning("[QS] Global hotkey registration returned None")
+            except Exception as e:
+                logger.error(f"[QS] Failed to register global hotkey: {e}")
         
         # App-focus fallback using QShortcut (works when app is focused)
         try:
