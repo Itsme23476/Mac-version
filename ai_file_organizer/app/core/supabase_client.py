@@ -4,6 +4,7 @@ Uses individual packages (supabase-auth, postgrest) instead of full supabase pac
 """
 
 import logging
+import sys
 import webbrowser
 from datetime import datetime
 from typing import Optional, Dict, Any
