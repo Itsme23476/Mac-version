@@ -17,15 +17,23 @@ def compare_versions(current: str, latest: str) -> bool:
     Returns:
         True if latest is newer than current
     """
+    def clean_version(v: str) -> str:
+        """Remove 'v' or 'V' prefix and any leading dots."""
+        v = v.strip()
+        if v.upper().startswith('V'):
+            v = v[1:]
+        return v.lstrip('.')
+    
     try:
         from packaging import version
-        # Strip 'v' prefix if present
-        current_clean = current.lstrip('v')
-        latest_clean = latest.lstrip('v')
+        current_clean = clean_version(current)
+        latest_clean = clean_version(latest)
         return version.parse(latest_clean) > version.parse(current_clean)
     except Exception:
         # Fallback to string comparison
-        return latest.lstrip('v') > current.lstrip('v')
+        current_clean = clean_version(current)
+        latest_clean = clean_version(latest)
+        return latest_clean > current_clean
 
 
 def check_for_updates_supabase(current_version: str) -> Optional[Dict[str, Any]]:
@@ -52,7 +60,10 @@ def check_for_updates_supabase(current_version: str) -> Optional[Dict[str, Any]]
             logger.info("No version info found in Supabase")
             return None
         
-        latest_version = version_info.get('version', '').lstrip('v')
+        raw_version = version_info.get('version', '')
+        # Strip 'v' or 'V' prefix
+        latest_version = raw_version[1:] if raw_version.upper().startswith('V') else raw_version
+        latest_version = latest_version.lstrip('.')
         
         if not latest_version:
             logger.info("No version found in Supabase response")
