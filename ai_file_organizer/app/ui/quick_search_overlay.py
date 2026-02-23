@@ -14,6 +14,7 @@ from app.ui.win_hotkey import (
     restore_dialog_focus_hybrid, window_still_exists,
     log_system_state, create_autofill_debug_report, log_window_hierarchy
 )
+from app.ui.file_preview_window import FilePreviewWindow
 import logging
 import sys
 
@@ -374,11 +375,14 @@ class QuickSearchOverlay(QDialog):
         self.results.viewport().installEventFilter(self)
         
         # Column widths: Open btn fixed, others stretch
-        self.results.setColumnWidth(0, 90)  # Open button column - wide enough for full label
+        self.results.setColumnWidth(0, 70)  # Open button column
         self.results.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.results.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.results.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.results.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        
+        # Create the preview window (lazy-loaded on first use)
+        self._preview_window = None
         
         layout.addWidget(self.results)
 
@@ -1096,6 +1100,9 @@ class QuickSearchOverlay(QDialog):
             self._level_timer.stop()
         # Reset keyboard focus flag so next show can properly configure the panel
         self._keyboard_focus_claimed = False
+        # Hide the preview window if it's open
+        if self._preview_window is not None and self._preview_window.isVisible():
+            self._preview_window.hide()
         # Persist geometry on close/hide
         try:
             g = self.geometry()
@@ -1130,11 +1137,11 @@ class QuickSearchOverlay(QDialog):
         self._rows = rows
         self.results.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            # Column 0: Open button fills entire cell
+            # Column 0: Open button (shows preview window)
             open_btn = QPushButton("Open")
-            open_btn.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus from input
+            open_btn.setFocusPolicy(Qt.NoFocus)
             open_btn.setCursor(Qt.PointingHandCursor)
-            open_btn.setToolTip("Open file")
+            open_btn.setToolTip("Preview file")
             open_btn.clicked.connect(lambda checked, row=i: self._open_row(row))
             open_btn.setStyleSheet("""
                 QPushButton {
@@ -1202,15 +1209,24 @@ class QuickSearchOverlay(QDialog):
         self.input.setFocus()
     
     def _open_row(self, row: int):
-        """Open the file at the specified row. Popup stays open to allow viewing multiple files."""
+        """Open/preview the file at the specified row in the preview window."""
         try:
             if 0 <= row < len(self._rows):
                 path = self._rows[row].get('file_path') or ''
                 if path:
-                    self.pathSelected.emit(path + "||OPEN")
-                    # Don't hide - let user open multiple files
+                    logger.info(f"[QS] Opening preview for: {path}")
+                    preview_window = self._get_preview_window()
+                    preview_window.position_near_popup(self.geometry())
+                    preview_window.preview_file(path)
         except Exception as e:
             logger.error(f"Error opening row {row}: {e}")
+    
+    def _get_preview_window(self):
+        """Get or create the preview window (lazy initialization)."""
+        if self._preview_window is None:
+            self._preview_window = FilePreviewWindow(None)
+            logger.info("[QS] Created FilePreviewWindow instance")
+        return self._preview_window
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
