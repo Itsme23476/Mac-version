@@ -114,3 +114,53 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.dmg
+      
+      - name: Update Supabase app_version
+        if: github.event_name == 'release'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          RELEASE_NAME="${{ github.event.release.name }}"
+          DMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Lumina-${VERSION}-mac.dmg"
+          
+          echo "Updating Supabase with Mac download URL..."
+          echo "Version: ${VERSION}"
+          echo "DMG URL: ${DMG_URL}"
+          
+          # Check if version already exists
+          EXISTING=$(curl -s "${SUPABASE_URL}/rest/v1/app_version?version=eq.${VERSION}" \
+            -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}")
+          
+          if [ "$EXISTING" = "[]" ]; then
+            # Insert new version
+            echo "Inserting new version record..."
+            curl -X POST "${SUPABASE_URL}/rest/v1/app_version" \
+              -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"version\": \"${VERSION}\",
+                \"download_url\": \"${DMG_URL}\",
+                \"download_url_mac\": \"${DMG_URL}\",
+                \"release_name\": \"${RELEASE_NAME:-Lumina ${VERSION}}\",
+                \"release_notes\": \"macOS release ${VERSION}\",
+                \"published_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+                \"is_required\": false
+              }"
+          else
+            # Update existing version with Mac URL
+            echo "Updating existing version with Mac URL..."
+            curl -X PATCH "${SUPABASE_URL}/rest/v1/app_version?version=eq.${VERSION}" \
+              -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"download_url_mac\": \"${DMG_URL}\"
+              }"
+          fi
+          
+          echo "Supabase update complete!"
