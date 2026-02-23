@@ -1518,6 +1518,14 @@ class MainWindow(QMainWindow):
                 background-color: rgba(124, 77, 255, 0.25);
                 color: {tbl_text};
             }}
+            QTableWidget::item:focus {{
+                background-color: transparent;
+                border: none;
+                outline: none;
+            }}
+            QTableWidget {{
+                outline: none;
+            }}
             QHeaderView {{
                 background-color: {tbl_header_bg};
             }}
@@ -4551,9 +4559,15 @@ class MainWindow(QMainWindow):
         
         # Clear selection after dialog closes (for both Save and Cancel)
         self.debug_table.clearSelection()
+        self.debug_table.setCurrentItem(None)
         self.debug_table.setCurrentCell(-1, -1)
         self.debug_table.clearFocus()
+        # Force the table to exit any edit state and repaint
+        self.debug_table.setFocus()
+        self.debug_table.clearFocus()
         self.debug_table.viewport().update()
+        self.debug_table.repaint()
+        QApplication.processEvents()
     
     def select_source_folder(self):
         """Select source folder."""

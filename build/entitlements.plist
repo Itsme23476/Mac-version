@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Allow the app to be debugged (remove for production if desired) -->
+    <key>com.apple.security.get-task-allow</key>
+    <false/>
+    
+    <!-- Allow automation/AppleEvents (for autofill functionality) -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    
+    <!-- Allow reading/writing user-selected files -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    
+    <!-- Allow reading/writing to Downloads folder -->
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+    
+    <!-- Allow outgoing network connections (for API calls, updates) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    
+    <!-- Allow the app to capture keyboard input (for global hotkeys) -->
+    <key>com.apple.security.device.input-monitoring</key>
+    <true/>
+    
+    <!-- Allow accessibility features (for autofill in other apps) -->
+    <key>com.apple.security.temporary-exception.apple-events</key>
+    <array>
+        <string>com.apple.systemevents</string>
+        <string>com.apple.finder</string>
+    </array>
+</dict>
+</plist>
