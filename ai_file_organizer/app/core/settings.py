@@ -73,6 +73,8 @@ class Settings:
         self.onboarding_remind_count: int = 0
         # List of contextual tip IDs that have been seen/dismissed
         self.seen_tips: List[str] = []
+        # Whether we've shown the macOS accessibility permission dialog
+        self.accessibility_dialog_shown: bool = False
         
         # Load persisted config if available
         try:
@@ -323,6 +325,9 @@ class Settings:
         self.has_completed_onboarding = bool(data.get('has_completed_onboarding', False))
         self.onboarding_remind_count = int(data.get('onboarding_remind_count', 0))
         self.seen_tips = list(data.get('seen_tips', []))
+        
+        # Accessibility dialog (macOS)
+        self.accessibility_dialog_shown = bool(data.get('accessibility_dialog_shown', False))
 
     def _save_config(self) -> None:
         cfg = {
@@ -358,6 +363,8 @@ class Settings:
             'has_completed_onboarding': self.has_completed_onboarding,
             'onboarding_remind_count': self.onboarding_remind_count,
             'seen_tips': self.seen_tips,
+            # Accessibility dialog (macOS)
+            'accessibility_dialog_shown': self.accessibility_dialog_shown,
         }
         try:
             with open(self._config_file(), 'w', encoding='utf-8') as f:
@@ -710,6 +717,16 @@ class Settings:
     def reset_tips(self) -> None:
         """Reset all contextual tips to show them again"""
         self.seen_tips = []
+        self._save_config()
+    
+    def set_accessibility_dialog_shown(self, shown: bool = True) -> None:
+        """Mark the macOS accessibility permission dialog as shown."""
+        self.accessibility_dialog_shown = shown
+        self._save_config()
+    
+    def reset_accessibility_dialog(self) -> None:
+        """Reset so the accessibility dialog will show again."""
+        self.accessibility_dialog_shown = False
         self._save_config()
 
 

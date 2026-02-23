@@ -3021,6 +3021,12 @@ class MainWindow(QMainWindow):
             logger.info("[QS] Accessibility permission now granted")
             return
         
+        # Don't show if we've already shown this dialog before
+        # (macOS may report false negatives for unsigned apps even after permission is granted)
+        if settings.accessibility_dialog_shown:
+            logger.info("[QS] Accessibility dialog already shown before - skipping")
+            return
+        
         from PySide6.QtWidgets import QMessageBox
         
         msg = QMessageBox(self)
@@ -3036,6 +3042,9 @@ class MainWindow(QMainWindow):
         
         open_btn = msg.addButton("Open Settings", QMessageBox.AcceptRole)
         msg.addButton("Later", QMessageBox.RejectRole)
+        
+        # Mark as shown so we don't show it again
+        settings.set_accessibility_dialog_shown(True)
         
         msg.exec()
         
