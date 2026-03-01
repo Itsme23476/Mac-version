@@ -94,50 +94,94 @@ jobs:
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
           
           # Decode certificate
+          echo "Decoding certificate..."
           echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
           
+          # Verify the file was created and has content
+          if [ ! -s $RUNNER_TEMP/certificate.p12 ]; then
+            echo "ERROR: Certificate file is empty. Check APPLE_CERTIFICATE_BASE64 secret."
+            exit 1
+          fi
+          echo "Certificate file size: $(wc -c < $RUNNER_TEMP/certificate.p12) bytes"
+          
           # Create and configure keychain
+          echo "Creating keychain..."
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           
           # Import certificate
-          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          echo "Importing certificate..."
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH || {
+            echo "ERROR: Failed to import certificate. Check APPLE_CERTIFICATE_PASSWORD secret."
+            exit 1
+          }
+          
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
           
-          # Verify certificate
-          echo "Certificates in keychain:"
+          # List ALL certificates in keychain (for debugging)
+          echo "=== All certificates in keychain ==="
+          security find-identity -v $KEYCHAIN_PATH
+          
+          echo "=== Codesigning certificates ==="
           security find-identity -v -p codesigning $KEYCHAIN_PATH
           
-          # Save keychain path for later steps
+          # Find and save the certificate name
+          CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          
+          if [ -z "$CERT_NAME" ]; then
+            echo "WARNING: No 'Developer ID Application' certificate found."
+            echo "Looking for any valid signing identity..."
+            CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -v "^$" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
+          
+          if [ -z "$CERT_NAME" ]; then
+            echo "ERROR: No valid code signing certificate found in the keychain."
+            echo "Make sure you exported a 'Developer ID Application' certificate as .p12"
+            exit 1
+          fi
+          
+          echo "Found certificate: $CERT_NAME"
+          
+          # Save for later steps
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          echo "CERT_NAME=$CERT_NAME" >> $GITHUB_ENV
       
       - name: Sign Application
-        env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # Find the Developer ID certificate
-          CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "Signing with certificate: $CERT_NAME"
           
-          # Sign all frameworks and dylibs first (deep sign)
-          find dist/Lumina.app -name "*.dylib" -o -name "*.so" -o -name "*.framework" | while read file; do
-            codesign --force --options runtime --timestamp --sign "$CERT_NAME" "$file" 2>/dev/null || true
+          if [ -z "$CERT_NAME" ]; then
+            echo "ERROR: CERT_NAME is empty"
+            exit 1
+          fi
+          
+          # Sign all nested code first
+          echo "Signing nested components..."
+          find dist/Lumina.app/Contents -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
+            codesign --force --options runtime --timestamp --sign "$CERT_NAME" {} \; 2>/dev/null || true
+          
+          # Sign frameworks
+          find dist/Lumina.app/Contents/Frameworks -type d -name "*.framework" 2>/dev/null | while read fw; do
+            echo "Signing framework: $fw"
+            codesign --force --options runtime --timestamp --sign "$CERT_NAME" "$fw" || true
           done
           
           # Sign the main executable
+          echo "Signing main executable..."
           codesign --force --options runtime --timestamp --sign "$CERT_NAME" "dist/Lumina.app/Contents/MacOS/Lumina"
           
           # Sign the entire app bundle
+          echo "Signing app bundle..."
           codesign --force --deep --options runtime --timestamp --sign "$CERT_NAME" \
             --entitlements build/entitlements.plist \
             "dist/Lumina.app"
           
           # Verify signature
           echo "Verifying signature..."
-          codesign --verify --verbose=4 dist/Lumina.app
-          spctl --assess --verbose=4 --type execute dist/Lumina.app || echo "spctl check (may fail before notarization)"
+          codesign --verify --verbose=2 dist/Lumina.app
+          echo "Signature verification complete"
       
       - name: Create DMG
         run: |
@@ -178,9 +222,6 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
-          
-          # Find the Developer ID certificate
-          CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           
           echo "Signing DMG with: $CERT_NAME"
           codesign --force --sign "$CERT_NAME" "$DMG_PATH"
