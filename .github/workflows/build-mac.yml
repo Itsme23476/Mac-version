@@ -91,7 +91,7 @@ jobs:
         run: |
           # Create temporary keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          KEYCHAIN_PASSWORD="temppassword123"
           
           # Decode certificate
           echo "Decoding certificate..."
@@ -104,11 +104,18 @@ jobs:
           fi
           echo "Certificate file size: $(wc -c < $RUNNER_TEMP/certificate.p12) bytes"
           
+          # Delete existing keychain if present
+          security delete-keychain $KEYCHAIN_PATH 2>/dev/null || true
+          
           # Create and configure keychain
           echo "Creating keychain..."
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+          # Add to search list and make default
+          security list-keychains -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s $KEYCHAIN_PATH
           
           # Import certificate
           echo "Importing certificate..."
@@ -117,8 +124,8 @@ jobs:
             exit 1
           }
           
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
+          # Allow codesign to access the keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           
           # List ALL certificates in keychain (for debugging)
           echo "=== All certificates in keychain ==="
@@ -127,54 +134,48 @@ jobs:
           echo "=== Codesigning certificates ==="
           security find-identity -v -p codesigning $KEYCHAIN_PATH
           
-          # Find and save the certificate name
+          # Find and save the certificate SHA-1 hash (more reliable than name)
+          CERT_SHA=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application" | head -1 | awk '{print $2}')
           CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           
-          if [ -z "$CERT_NAME" ]; then
+          if [ -z "$CERT_SHA" ]; then
             echo "WARNING: No 'Developer ID Application' certificate found."
             echo "Looking for any valid signing identity..."
-            CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -v "^$" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            CERT_SHA=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -E "^[[:space:]]+[0-9]" | head -1 | awk '{print $2}')
+            CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -E "^[[:space:]]+[0-9]" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           fi
           
-          if [ -z "$CERT_NAME" ]; then
+          if [ -z "$CERT_SHA" ]; then
             echo "ERROR: No valid code signing certificate found in the keychain."
             echo "Make sure you exported a 'Developer ID Application' certificate as .p12"
             exit 1
           fi
           
           echo "Found certificate: $CERT_NAME"
+          echo "Certificate SHA-1: $CERT_SHA"
           
-          # Save for later steps
+          # Save for later steps - use SHA-1 for signing (more reliable)
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> $GITHUB_ENV
           echo "CERT_NAME=$CERT_NAME" >> $GITHUB_ENV
+          echo "CERT_SHA=$CERT_SHA" >> $GITHUB_ENV
       
       - name: Sign Application
         run: |
-          echo "Signing with certificate: $CERT_NAME"
+          echo "Signing with certificate: $CERT_NAME ($CERT_SHA)"
           
-          if [ -z "$CERT_NAME" ]; then
-            echo "ERROR: CERT_NAME is empty"
+          if [ -z "$CERT_SHA" ]; then
+            echo "ERROR: CERT_SHA is empty"
             exit 1
           fi
           
-          # Sign all nested code first
-          echo "Signing nested components..."
-          find dist/Lumina.app/Contents -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
-            codesign --force --options runtime --timestamp --sign "$CERT_NAME" {} \; 2>/dev/null || true
+          # Unlock keychain before signing
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           
-          # Sign frameworks
-          find dist/Lumina.app/Contents/Frameworks -type d -name "*.framework" 2>/dev/null | while read fw; do
-            echo "Signing framework: $fw"
-            codesign --force --options runtime --timestamp --sign "$CERT_NAME" "$fw" || true
-          done
-          
-          # Sign the main executable
-          echo "Signing main executable..."
-          codesign --force --options runtime --timestamp --sign "$CERT_NAME" "dist/Lumina.app/Contents/MacOS/Lumina"
-          
-          # Sign the entire app bundle
-          echo "Signing app bundle..."
-          codesign --force --deep --options runtime --timestamp --sign "$CERT_NAME" \
+          # Use --deep signing for the entire app (simpler and more reliable)
+          echo "Signing app bundle with deep signing..."
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$CERT_SHA" \
             --entitlements build/entitlements.plist \
             "dist/Lumina.app"
           
@@ -223,8 +224,11 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
           
-          echo "Signing DMG with: $CERT_NAME"
-          codesign --force --sign "$CERT_NAME" "$DMG_PATH"
+          # Unlock keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+          echo "Signing DMG with: $CERT_NAME ($CERT_SHA)"
+          codesign --force --sign "$CERT_SHA" "$DMG_PATH"
           
           echo "DMG signed successfully"
       
