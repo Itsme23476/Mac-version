@@ -127,11 +127,20 @@ jobs:
           # Allow codesign to access the keychain
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           
-          # List ALL certificates in keychain (for debugging)
-          echo "=== All certificates in keychain ==="
+          # List what was imported
+          echo "=== All items in keychain ==="
+          security dump-keychain $KEYCHAIN_PATH 2>/dev/null | head -50 || echo "(dump limited)"
+          
+          echo ""
+          echo "=== Private keys in keychain ==="
+          security find-key -a $KEYCHAIN_PATH 2>/dev/null || echo "No private keys found!"
+          
+          echo ""
+          echo "=== All identities (cert + key pairs) ==="
           security find-identity -v $KEYCHAIN_PATH
           
-          echo "=== Codesigning certificates ==="
+          echo ""
+          echo "=== Codesigning identities ==="
           security find-identity -v -p codesigning $KEYCHAIN_PATH
           
           # Find and save the certificate SHA-1 hash (more reliable than name)
