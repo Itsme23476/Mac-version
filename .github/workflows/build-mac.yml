@@ -171,6 +171,21 @@ jobs:
           echo "CERT_NAME=$CERT_NAME" >> $GITHUB_ENV
           echo "CERT_SHA=$CERT_SHA" >> $GITHUB_ENV
       
+      - name: Clean up PySide6 helper apps
+        run: |
+          # Remove PySide6 helper apps that cause signing issues (symlinks in nested .app bundles)
+          # These are Qt development tools not needed at runtime
+          echo "Removing PySide6 helper apps..."
+          FRAMEWORKS_PATH="dist/Lumina.app/Contents/Frameworks/PySide6"
+          if [ -d "$FRAMEWORKS_PATH" ]; then
+            # Find and remove all nested .app bundles (Assistant, Designer, Linguist, etc.)
+            find "$FRAMEWORKS_PATH" -name "*__dot__app" -type d -exec rm -rf {} + 2>/dev/null || true
+            find "$FRAMEWORKS_PATH" -name "*.app" -type d -exec rm -rf {} + 2>/dev/null || true
+            echo "Cleaned up PySide6 helper apps"
+          else
+            echo "No PySide6 frameworks directory found, skipping cleanup"
+          fi
+      
       - name: Sign Application
         run: |
           echo "Signing with certificate: $CERT_NAME ($CERT_SHA)"
