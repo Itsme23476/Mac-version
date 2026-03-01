@@ -84,6 +84,61 @@ jobs:
           echo "Build successful!"
           du -sh dist/Lumina.app
       
+      - name: Import Apple Certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          
+          # Decode certificate
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          
+          # Create and configure keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+          # Import certificate
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          
+          # Verify certificate
+          echo "Certificates in keychain:"
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
+          
+          # Save keychain path for later steps
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+      
+      - name: Sign Application
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Find the Developer ID certificate
+          CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Signing with certificate: $CERT_NAME"
+          
+          # Sign all frameworks and dylibs first (deep sign)
+          find dist/Lumina.app -name "*.dylib" -o -name "*.so" -o -name "*.framework" | while read file; do
+            codesign --force --options runtime --timestamp --sign "$CERT_NAME" "$file" 2>/dev/null || true
+          done
+          
+          # Sign the main executable
+          codesign --force --options runtime --timestamp --sign "$CERT_NAME" "dist/Lumina.app/Contents/MacOS/Lumina"
+          
+          # Sign the entire app bundle
+          codesign --force --deep --options runtime --timestamp --sign "$CERT_NAME" \
+            --entitlements build/entitlements.plist \
+            "dist/Lumina.app"
+          
+          # Verify signature
+          echo "Verifying signature..."
+          codesign --verify --verbose=4 dist/Lumina.app
+          spctl --assess --verbose=4 --type execute dist/Lumina.app || echo "spctl check (may fail before notarization)"
+      
       - name: Create DMG
         run: |
           # Install create-dmg
@@ -118,6 +173,51 @@ jobs:
           
           echo "DMG created:"
           ls -la dist/*.dmg
+      
+      - name: Sign DMG
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
+          
+          # Find the Developer ID certificate
+          CERT_NAME=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          
+          echo "Signing DMG with: $CERT_NAME"
+          codesign --force --sign "$CERT_NAME" "$DMG_PATH"
+          
+          echo "DMG signed successfully"
+      
+      - name: Notarize App
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
+          
+          echo "Submitting for notarization..."
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 30m
+          
+          echo "Notarization complete!"
+      
+      - name: Staple Notarization Ticket
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
+          
+          echo "Stapling notarization ticket..."
+          xcrun stapler staple "$DMG_PATH"
+          
+          echo "Verifying stapled DMG..."
+          spctl --assess --verbose=4 --type open --context context:primary-signature "$DMG_PATH"
+          
+          echo "DMG is signed, notarized, and ready for distribution!"
       
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@v4
