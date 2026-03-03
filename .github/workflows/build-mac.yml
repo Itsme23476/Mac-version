@@ -268,14 +268,63 @@ jobs:
           DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
           
           echo "Submitting for notarization..."
-          xcrun notarytool submit "$DMG_PATH" \
+          # Submit without waiting - get the submission ID
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait \
-            --timeout 60m
+            --team-id "$APPLE_TEAM_ID" 2>&1)
           
-          echo "Notarization complete!"
+          echo "$SUBMIT_OUTPUT"
+          
+          # Extract submission ID
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
+          
+          if [ -z "$SUBMISSION_ID" ]; then
+            echo "ERROR: Failed to get submission ID"
+            exit 1
+          fi
+          
+          echo "Submission ID: $SUBMISSION_ID"
+          echo "Polling for notarization completion (this may take a while)..."
+          
+          # Poll every 10 minutes for up to 6 hours (36 attempts)
+          MAX_ATTEMPTS=36
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Check $ATTEMPT/$MAX_ATTEMPTS ($(date))"
+            
+            STATUS_OUTPUT=$(xcrun notarytool info "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_ID_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" 2>&1)
+            
+            STATUS=$(echo "$STATUS_OUTPUT" | grep "status:" | awk '{print $2}')
+            echo "Status: $STATUS"
+            
+            if [ "$STATUS" = "Accepted" ]; then
+              echo "Notarization successful!"
+              exit 0
+            elif [ "$STATUS" = "Invalid" ] || [ "$STATUS" = "Rejected" ]; then
+              echo "Notarization failed with status: $STATUS"
+              echo "Fetching log..."
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+              exit 1
+            fi
+            
+            # Wait 10 minutes before next check
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              echo "Still in progress. Waiting 10 minutes..."
+              sleep 600
+            fi
+          done
+          
+          echo "ERROR: Notarization timed out after 6 hours"
+          exit 1
       
       - name: Staple Notarization Ticket
         run: |

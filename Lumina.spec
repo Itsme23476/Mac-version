@@ -99,7 +99,6 @@ hidden_imports = [
 datas = [
     # Resources
     (os.path.join(APP_DIR, 'resources', 'icon.icns'), 'resources'),
-    (os.path.join(APP_DIR, 'resources', 'iconnn.ico'), 'resources'),
     (os.path.join(APP_DIR, 'resources', 'category_defaults.json'), 'resources'),
     
     # App modules (ensure they're found)
