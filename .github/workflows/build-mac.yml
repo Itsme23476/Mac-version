@@ -171,20 +171,34 @@ jobs:
           echo "CERT_NAME=$CERT_NAME" >> $GITHUB_ENV
           echo "CERT_SHA=$CERT_SHA" >> $GITHUB_ENV
       
-      - name: Clean up PySide6 helper apps
+      - name: Clean up PySide6 helper apps and broken symlinks
         run: |
-          # Remove PySide6 helper apps that cause signing issues (symlinks in nested .app bundles)
+          # Remove PySide6 helper apps that cause signing issues
           # These are Qt development tools not needed at runtime
           echo "Removing PySide6 helper apps..."
-          FRAMEWORKS_PATH="dist/Lumina.app/Contents/Frameworks/PySide6"
-          if [ -d "$FRAMEWORKS_PATH" ]; then
-            # Find and remove all nested .app bundles (Assistant, Designer, Linguist, etc.)
-            find "$FRAMEWORKS_PATH" -name "*__dot__app" -type d -exec rm -rf {} + 2>/dev/null || true
-            find "$FRAMEWORKS_PATH" -name "*.app" -type d -exec rm -rf {} + 2>/dev/null || true
-            echo "Cleaned up PySide6 helper apps"
+          APP_PATH="dist/Lumina.app"
+          
+          # Remove .app directories and symlinks in Frameworks/PySide6
+          find "$APP_PATH/Contents/Frameworks/PySide6" -name "*__dot__app" -exec rm -rf {} + 2>/dev/null || true
+          find "$APP_PATH/Contents/Frameworks/PySide6" -name "*.app" -exec rm -rf {} + 2>/dev/null || true
+          
+          # Remove .app directories and symlinks in Resources/PySide6
+          find "$APP_PATH/Contents/Resources/PySide6" -name "*.app" -exec rm -rf {} + 2>/dev/null || true
+          
+          # Remove ALL broken symlinks in the entire app bundle (critical for Gatekeeper)
+          echo "Removing broken symlinks..."
+          find "$APP_PATH" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
+          
+          # Verify no broken symlinks remain
+          BROKEN_COUNT=$(find "$APP_PATH" -type l ! -exec test -e {} \; -print 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$BROKEN_COUNT" -gt 0 ]; then
+            echo "WARNING: $BROKEN_COUNT broken symlinks still exist"
+            find "$APP_PATH" -type l ! -exec test -e {} \; -print 2>/dev/null
           else
-            echo "No PySide6 frameworks directory found, skipping cleanup"
+            echo "All broken symlinks removed"
           fi
+          
+          echo "Cleanup complete"
       
       - name: Sign Application
         run: |
