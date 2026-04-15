@@ -297,14 +297,25 @@ class SupabaseAuth:
                 logger.warning("[SUB CHECK] Database client not available")
                 return {'has_subscription': False, 'status': None, 'error': 'Database not available'}
             
-            # Query subscriptions table
+            # Query subscriptions table - prioritize active/trialing subscriptions
+            # Order by created_at DESC to get the most recent subscription
             logger.info(f"[SUB CHECK] Querying subscriptions table for user_id: {user_id}")
-            response = db_client.from_('subscriptions').select('*').eq('user_id', user_id).execute()
+            response = db_client.from_('subscriptions').select('*').eq('user_id', user_id).order('created_at', desc=True).execute()
             
             logger.info(f"[SUB CHECK] Query response: {response.data}")
             
             if response.data and len(response.data) > 0:
-                sub = response.data[0]
+                # First, look for any active or trialing subscription
+                sub = None
+                for s in response.data:
+                    if s.get('status') in ('active', 'trialing'):
+                        sub = s
+                        break
+                
+                # If no active subscription found, use the most recent one
+                if not sub:
+                    sub = response.data[0]
+                
                 self._subscription = sub
                 logger.info(f"[SUB CHECK] Found subscription: {sub}")
                 
