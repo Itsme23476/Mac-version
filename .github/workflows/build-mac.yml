@@ -283,15 +283,22 @@ jobs:
           
           echo "Submitting for notarization..."
           # Submit without waiting - get the submission ID
+          set +e
           SUBMIT_OUTPUT=$(xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" 2>&1)
+          SUBMIT_EXIT=$?
+          set -e
           
           echo "$SUBMIT_OUTPUT"
+          if [ $SUBMIT_EXIT -ne 0 ]; then
+            echo "ERROR: notarytool submit failed (exit $SUBMIT_EXIT)"
+            exit $SUBMIT_EXIT
+          fi
           
           # Extract submission ID
-          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | sed -n 's/^[[:space:]]*id:[[:space:]]*//p' | head -1)
           
           if [ -z "$SUBMISSION_ID" ]; then
             echo "ERROR: Failed to get submission ID"
@@ -309,12 +316,27 @@ jobs:
             ATTEMPT=$((ATTEMPT + 1))
             echo "Check $ATTEMPT/$MAX_ATTEMPTS ($(date))"
             
+            set +e
             STATUS_OUTPUT=$(xcrun notarytool info "$SUBMISSION_ID" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_ID_PASSWORD" \
               --team-id "$APPLE_TEAM_ID" 2>&1)
+            STATUS_EXIT=$?
+            set -e
+            echo "$STATUS_OUTPUT"
             
-            STATUS=$(echo "$STATUS_OUTPUT" | grep "status:" | awk '{print $2}')
+            if [ $STATUS_EXIT -ne 0 ]; then
+              echo "WARNING: notarytool info failed on attempt $ATTEMPT (exit $STATUS_EXIT)"
+              if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+                echo "Retrying in 10 minutes..."
+                sleep 600
+                continue
+              fi
+              echo "ERROR: Unable to get notarization status after retries"
+              exit $STATUS_EXIT
+            fi
+            
+            STATUS=$(echo "$STATUS_OUTPUT" | sed -n 's/^[[:space:]]*status:[[:space:]]*//p' | head -1)
             echo "Status: $STATUS"
             
             if [ "$STATUS" = "Accepted" ]; then
