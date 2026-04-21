@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for Lumina - macOS build
+PyInstaller spec file for Filect - macOS build
 """
 
 import sys
@@ -151,7 +151,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Lumina',
+    name='Filect',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -172,13 +172,13 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Lumina',
+    name='Filect',
 )
 
 app = BUNDLE(
     coll,
-    name='Lumina.app',
+    name='Filect.app',
     icon=os.path.join(APP_DIR, 'resources', 'icon.icns'),
-    bundle_identifier='com.lumina.filesearch',
+    bundle_identifier='com.filect.filesearch',
     info_plist=os.path.join(SPEC_DIR, 'build', 'Info.plist'),
 )

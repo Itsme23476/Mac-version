@@ -72,17 +72,17 @@ jobs:
       - name: Build with PyInstaller
         run: |
           cd ${{ github.workspace }}
-          python -m PyInstaller --clean --noconfirm Lumina.spec
+          python -m PyInstaller --clean --noconfirm Filect.spec
       
       - name: Verify build
         run: |
-          if [ ! -d "dist/Lumina.app" ]; then
-            echo "Error: Lumina.app was not created"
+          if [ ! -d "dist/Filect.app" ]; then
+            echo "Error: Filect.app was not created"
             ls -la dist/ || echo "dist folder doesn't exist"
             exit 1
           fi
           echo "Build successful!"
-          du -sh dist/Lumina.app
+          du -sh dist/Filect.app
       
       - name: Import Apple Certificate
         env:
@@ -176,7 +176,7 @@ jobs:
           # Remove PySide6 helper apps that cause signing issues
           # These are Qt development tools not needed at runtime
           echo "Removing PySide6 helper apps..."
-          APP_PATH="dist/Lumina.app"
+          APP_PATH="dist/Filect.app"
           
           # Remove .app directories and symlinks in Frameworks/PySide6
           find "$APP_PATH/Contents/Frameworks/PySide6" -name "*__dot__app" -exec rm -rf {} + 2>/dev/null || true
@@ -217,11 +217,11 @@ jobs:
           codesign --force --deep --options runtime --timestamp \
             --sign "$CERT_SHA" \
             --entitlements build/entitlements.plist \
-            "dist/Lumina.app"
+            "dist/Filect.app"
           
           # Verify signature
           echo "Verifying signature..."
-          codesign --verify --verbose=2 dist/Lumina.app
+          codesign --verify --verbose=2 dist/Filect.app
           echo "Signature verification complete"
       
       - name: Create DMG
@@ -230,26 +230,26 @@ jobs:
           brew install create-dmg || true
           
           VERSION="${{ steps.version.outputs.version }}"
-          DMG_NAME="Lumina-${VERSION}-mac"
+          DMG_NAME="Filect-${VERSION}-mac"
           
           # Create DMG
           create-dmg \
-            --volname "Lumina $VERSION" \
+            --volname "Filect $VERSION" \
             --volicon "ai_file_organizer/resources/icon.icns" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
-            --icon "Lumina.app" 150 190 \
-            --hide-extension "Lumina.app" \
+            --icon "Filect.app" 150 190 \
+            --hide-extension "Filect.app" \
             --app-drop-link 450 185 \
             "dist/${DMG_NAME}.dmg" \
-            "dist/Lumina.app" || {
+            "dist/Filect.app" || {
               # Fallback to hdiutil if create-dmg fails
               echo "create-dmg failed, using hdiutil..."
               mkdir -p dist/dmg_temp
-              cp -R dist/Lumina.app dist/dmg_temp/
+              cp -R dist/Filect.app dist/dmg_temp/
               ln -s /Applications dist/dmg_temp/Applications
-              hdiutil create -volname "Lumina $VERSION" \
+              hdiutil create -volname "Filect $VERSION" \
                 -srcfolder dist/dmg_temp \
                 -ov -format UDZO \
                 "dist/${DMG_NAME}.dmg"
@@ -262,7 +262,7 @@ jobs:
       - name: Sign DMG
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
+          DMG_PATH="dist/Filect-${VERSION}-mac.dmg"
           
           # Unlock keychain
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
@@ -279,7 +279,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
+          DMG_PATH="dist/Filect-${VERSION}-mac.dmg"
           
           echo "Submitting for notarization..."
           # Submit without waiting - get the submission ID
@@ -365,7 +365,7 @@ jobs:
       - name: Staple Notarization Ticket
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          DMG_PATH="dist/Lumina-${VERSION}-mac.dmg"
+          DMG_PATH="dist/Filect-${VERSION}-mac.dmg"
           
           echo "Stapling notarization ticket..."
           xcrun stapler staple "$DMG_PATH"
@@ -378,7 +378,7 @@ jobs:
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Lumina-mac-dmg
+          name: Filect-mac-dmg
           path: dist/*.dmg
           retention-days: 30
       
@@ -397,7 +397,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TAG_NAME="${{ github.event.release.tag_name }}"
           RELEASE_NAME="${{ github.event.release.name }}"
-          DMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Lumina-${VERSION}-mac.dmg"
+          DMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Filect-${VERSION}-mac.dmg"
           PLATFORM="mac"
           
           echo "Updating Supabase with Mac release..."
@@ -422,7 +422,7 @@ jobs:
                 \"platform\": \"${PLATFORM}\",
                 \"download_url\": \"${DMG_URL}\",
                 \"download_url_mac\": \"${DMG_URL}\",
-                \"release_name\": \"${RELEASE_NAME:-Lumina ${VERSION}}\",
+                \"release_name\": \"${RELEASE_NAME:-Filect ${VERSION}}\",
                 \"release_notes\": \"macOS release ${VERSION}\",
                 \"published_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
                 \"is_required\": false

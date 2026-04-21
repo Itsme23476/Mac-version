@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Lumina macOS Build Script
+# Filect macOS Build Script
 # Builds the app bundle and optionally creates a DMG installer
 #
 
@@ -20,7 +20,7 @@ BUILD_DIR="$SCRIPT_DIR/build"
 DIST_DIR="$SCRIPT_DIR/dist"
 
 # App info
-APP_NAME="Lumina"
+APP_NAME="Filect"
 VERSION=$(grep -oP 'VERSION = "\K[^"]+' "$APP_DIR/app/version.py" 2>/dev/null || echo "1.0.0")
 
 echo -e "${BLUE}============================================${NC}"
@@ -57,7 +57,7 @@ cd "$SCRIPT_DIR"
 python3 -m PyInstaller \
     --clean \
     --noconfirm \
-    Lumina.spec
+    Filect.spec
 
 # Check if build succeeded
 if [ ! -d "$DIST_DIR/$APP_NAME.app" ]; then

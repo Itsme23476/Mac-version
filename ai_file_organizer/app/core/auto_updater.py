@@ -1,5 +1,5 @@
 """
-Auto-updater for the Lumina app.
+Auto-updater for the Filect app.
 Downloads installer from releases and runs it to apply updates.
 """
 
@@ -82,11 +82,11 @@ def download_update(
         if sys.platform == 'darwin':
             # macOS: expect .dmg file
             if not filename.endswith('.dmg'):
-                filename = "Lumina.dmg"
+                filename = "Filect.dmg"
         else:
             # Windows: expect .exe file
             if not filename.endswith('.exe'):
-                filename = "Lumina-Setup.exe"
+                filename = "Filect-Setup.exe"
         
         installer_path = update_dir / filename
         
@@ -126,7 +126,7 @@ def _download_with_requests(
             stream=True,
             timeout=(30, 300),  # (connect timeout, read timeout)
             headers={
-                'User-Agent': 'Lumina-Updater/2.0',
+                'User-Agent': 'Filect-Updater/2.0',
                 'Accept': 'application/octet-stream'
             },
             allow_redirects=True
@@ -213,7 +213,7 @@ def _download_with_requests_no_verify(
             stream=True,
             timeout=(30, 300),
             headers={
-                'User-Agent': 'Lumina-Updater/2.0',
+                'User-Agent': 'Filect-Updater/2.0',
                 'Accept': 'application/octet-stream'
             },
             allow_redirects=True,
@@ -267,7 +267,7 @@ def _download_with_urllib(
         request = urllib.request.Request(
             download_url,
             headers={
-                'User-Agent': 'Lumina-Updater/2.0',
+                'User-Agent': 'Filect-Updater/2.0',
                 'Accept': 'application/octet-stream'
             }
         )
@@ -384,7 +384,7 @@ def _install_mac_update(dmg_path: Path) -> bool:
             _unmount_dmg(mount_point)
             return False
         
-        source_app = app_files[0]  # Use first .app found (should be Lumina.app)
+        source_app = app_files[0]  # Use first .app found (should be Filect.app)
         logger.info(f"[MAC UPDATE] Found app: {source_app.name}")
         
         # Step 3: Determine destination (usually /Applications)
