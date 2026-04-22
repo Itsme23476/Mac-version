@@ -1985,7 +1985,7 @@ class MainWindow(QMainWindow):
         shortcut_label.setStyleSheet(settings_label_style)
         qs_row2.addWidget(shortcut_label)
         self.qs_shortcut_input = QLineEdit(settings.quick_search_shortcut)
-        self.qs_shortcut_input.setPlaceholderText("e.g., cmd+shift+space")
+        self.qs_shortcut_input.setPlaceholderText("e.g., ctrl+shift+space")
         self.qs_shortcut_input.setMinimumHeight(36)
         self.qs_shortcut_input.setMaximumWidth(180)
         self.qs_shortcut_input.setStyleSheet("""
@@ -2974,7 +2974,7 @@ class MainWindow(QMainWindow):
     
     def _register_quick_search_hotkey(self):
         """Register the global hotkey for quick search."""
-        hotkey = settings.quick_search_shortcut or 'cmd+shift+space'
+        hotkey = settings.quick_search_shortcut or 'ctrl+shift+space'
         logger.info(f"[QS] Registering global hotkey: {hotkey}")
         
         # Check for Accessibility permission on macOS
@@ -3011,8 +3011,8 @@ class MainWindow(QMainWindow):
         
         # App-focus fallback using QShortcut (works when app is focused)
         try:
-            # Convert to Qt format: cmd+shift+space -> Meta+Shift+Space (Qt uses Meta for Cmd on macOS)
-            ks = hotkey.replace('cmd', 'Meta').replace('ctrl', 'Ctrl').replace('alt', 'Alt').replace('shift', 'Shift').replace('space', 'Space')
+            # Convert to Qt format: ctrl+shift+space -> Ctrl+Shift+Space
+            ks = hotkey.replace('ctrl', 'Ctrl').replace('alt', 'Alt').replace('shift', 'Shift').replace('space', 'Space')
             self._focus_quick_shortcut = QShortcut(QKeySequence(ks), self)
             self._focus_quick_shortcut.setContext(Qt.ApplicationShortcut)
             self._focus_quick_shortcut.activated.connect(self._show_quick_overlay)
@@ -3057,7 +3057,7 @@ class MainWindow(QMainWindow):
         
         # Description
         desc = QLabel(
-            "To use the Quick Search hotkey (Cmd+Shift+Space) from anywhere on your Mac, "
+            "To use the Quick Search hotkey (Ctrl+Shift+Space) from anywhere on your Mac, "
             "this app needs Accessibility permission.\n\n"
             "Click 'Open Settings' to grant permission, then restart the app.\n\n"
             "Note: The hotkey will still work when the app is focused without this permission."
@@ -4425,7 +4425,7 @@ class MainWindow(QMainWindow):
         sc = (self.qs_shortcut_input.text() or '').strip().lower()
         if not sc:
             from app.ui.organize_page import ModernInfoDialog
-            ModernInfoDialog.show_warning(self, "Shortcut", "Please enter a shortcut (e.g., cmd+shift+space)")
+            ModernInfoDialog.show_warning(self, "Shortcut", "Please enter a shortcut (e.g., ctrl+shift+space)")
             return
         
         # Validate the shortcut format
@@ -4434,7 +4434,7 @@ class MainWindow(QMainWindow):
         if len(parts) < 2:
             from app.ui.organize_page import ModernInfoDialog
             ModernInfoDialog.show_warning(self, "Invalid Shortcut", 
-                "Shortcut must include at least one modifier and a key.\nExample: cmd+shift+space")
+                "Shortcut must include at least one modifier and a key.\nExample: ctrl+shift+space")
             return
         
         # Update the hotkey live (unregister old, register new)
