@@ -28,7 +28,7 @@ class Settings:
         self.local_model: str = 'qwen2.5vl:3b'
         # Quick search overlay
         self.use_quick_search: bool = True
-        self.quick_search_shortcut: str = 'ctrl+shift+space'
+        self.quick_search_shortcut: str = 'cmd+shift+space'
         self.quick_search_autopaste: bool = True
         self.quick_search_auto_confirm: bool = True
         self.quick_search_geometry: Dict[str, int] = {}
@@ -379,7 +379,7 @@ class Settings:
 
     # Quick search setters
     def set_quick_search_shortcut(self, shortcut: str) -> None:
-        sc = (shortcut or '').strip().lower() or 'ctrl+shift+space'
+        sc = (shortcut or '').strip().lower() or 'cmd+shift+space'
         self.quick_search_shortcut = sc
         self._save_config()
 
