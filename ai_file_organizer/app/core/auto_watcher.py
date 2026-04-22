@@ -1029,7 +1029,9 @@ class AutoOrganizeWatcher(QObject):
     
     def _periodic_full_scan(self) -> None:
         """
-        Periodic full scan of all watched folders (including subfolders).
+        Periodic full scan of watched folders.
+        - For "Organize New Only" (action=3): Only scans ROOT folder files
+        - For other modes: Scans ALL files including subfolders
         Checks if any files are missing from the database and queues them for indexing.
         Called every 60 seconds and once on startup.
         """
@@ -1054,29 +1056,52 @@ class AutoOrganizeWatcher(QObject):
                 continue
             
             try:
-                # Scan ALL files including subfolders
-                for root, dirs, files in os.walk(folder):
-                    # Skip hidden directories
-                    dirs[:] = [d for d in dirs if not d.startswith('.')]
-                    
-                    for file_name in files:
-                        file_path = os.path.join(root, file_name)
-                        # Use lowercase for case-insensitive comparison (macOS)
+                # Get the action for this folder (1=Reorganize All, 2=As-Is, 3=Organize New Only)
+                from app.core.settings import settings
+                folder_action = settings.get_auto_organize_action(folder)
+                
+                if folder_action == 3:
+                    # ORGANIZE NEW ONLY: Only scan files in the ROOT folder, not subfolders
+                    # This preserves existing folder structure
+                    for item in os.listdir(folder):
+                        file_path = os.path.join(folder, item)
+                        if not os.path.isfile(file_path):
+                            continue  # Skip directories
+                        
                         normalized_path = os.path.normpath(file_path).lower()
                         total_scanned += 1
                         
-                        # Skip ignored files
                         if self._should_ignore(file_path):
                             continue
-                        
-                        # Skip files already being processed
                         if file_path in self._processed_files:
                             continue
-                        
-                        # Check if file is NOT in database (case-insensitive)
                         if normalized_path not in indexed_paths:
                             unindexed_files_by_folder[folder].append(file_path)
                             total_unindexed += 1
+                else:
+                    # REORGANIZE ALL or ORGANIZE AS-IS: Scan ALL files including subfolders
+                    for root, dirs, files in os.walk(folder):
+                        # Skip hidden directories
+                        dirs[:] = [d for d in dirs if not d.startswith('.')]
+                        
+                        for file_name in files:
+                            file_path = os.path.join(root, file_name)
+                            # Use lowercase for case-insensitive comparison (macOS)
+                            normalized_path = os.path.normpath(file_path).lower()
+                            total_scanned += 1
+                            
+                            # Skip ignored files
+                            if self._should_ignore(file_path):
+                                continue
+                            
+                            # Skip files already being processed
+                            if file_path in self._processed_files:
+                                continue
+                            
+                            # Check if file is NOT in database (case-insensitive)
+                            if normalized_path not in indexed_paths:
+                                unindexed_files_by_folder[folder].append(file_path)
+                                total_unindexed += 1
                             
             except Exception as e:
                 logger.error(f"[FullScan] Error scanning folder {folder}: {e}")

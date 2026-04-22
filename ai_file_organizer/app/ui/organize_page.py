@@ -3954,11 +3954,11 @@ class ApplyInstructionsDialogSingleFolder(QDialog):
         organize_btn.clicked.connect(self._on_organize)
         options_layout.addWidget(organize_btn)
         
-        # Option 3: Skip / Watch Only
+        # Option 3: Organize New Only
         is_selected_3 = (self.preselected_action == self.SKIP)
         skip_btn = self._create_option_button(
-            "⏭️ Watch Only",
-            "Only apply to new files going forward",
+            "✨ Organize New Only",
+            "Keep existing structure, only organize new files in root",
             selected=is_selected_3
         )
         skip_btn.clicked.connect(self._on_skip)
@@ -4506,7 +4506,7 @@ class WatchConfigDialog(QDialog):
         action_configs = {
             1: ("🔄 Re-organize All", "#7C4DFF", "rgba(124, 77, 255, 0.15)"),  # Purple
             2: ("📂 Organize As-Is", "#2196F3", "rgba(33, 150, 243, 0.15)"),   # Blue
-            3: ("⏭️ Watch Only", "#4CAF50", "rgba(76, 175, 80, 0.15)"),        # Green
+            3: ("✨ Organize New Only", "#4CAF50", "rgba(76, 175, 80, 0.15)"),  # Green
         }
         
         config = action_configs.get(action, action_configs[3])
