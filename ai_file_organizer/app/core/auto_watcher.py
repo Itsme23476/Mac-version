@@ -94,10 +94,10 @@ class AutoWatcherWorker(QThread):
         from app.core.search import SearchService
         
         # First pass: identify files that need indexing
-        # Simple logic: if a file (by filename) already has tags, don't re-index
-        # Get all filenames that have tags upfront for fast lookup
-        filenames_with_tags = file_index.get_filenames_with_tags()
-        logger.info(f"[Worker] Found {len(filenames_with_tags)} files with tags in database")
+        # Check by FULL PATH - if file at this exact path is already indexed, skip it
+        # This prevents re-indexing when watcher restarts
+        indexed_paths = file_index.get_indexed_file_paths()
+        logger.info(f"[Worker] Found {len(indexed_paths)} indexed file paths in database")
         
         files_to_index = []
         files_skipped = 0
@@ -107,41 +107,54 @@ class AutoWatcherWorker(QThread):
                 self.finished_processing.emit(all_processed_files)
                 return
             
-            file_name = os.path.basename(file_path)
+            # Normalize path for consistent comparison (case-insensitive for macOS)
+            normalized_path = os.path.normpath(file_path).lower()
             
-            # Simple check: does this filename have tags?
-            if file_name in filenames_with_tags:
-                # File already has tags - skip indexing
+            # Check by full path: is this exact file already indexed?
+            if normalized_path in indexed_paths:
+                # File at this path already indexed - skip
                 files_skipped += 1
-                logger.debug(f"[Worker] Skipping {file_name} - already has tags")
+                logger.debug(f"[Worker] Skipping {os.path.basename(file_path)} - already indexed at this path")
             else:
-                # File doesn't have tags - needs indexing
+                # File not indexed at this path - needs indexing
                 files_to_index.append(file_path)
         
         if files_skipped > 0:
             logger.info(f"[Worker] Skipped {files_skipped} file(s) that already have tags")
         
-        # Index unindexed files first
+        # Index unindexed files first - use parallel processing for speed
         if files_to_index:
-            logger.info(f"[Worker] Auto-indexing {len(files_to_index)} unindexed file(s)...")
+            logger.info(f"[Worker] Auto-indexing {len(files_to_index)} unindexed file(s) in parallel...")
             self.status_changed.emit(f"Indexing {len(files_to_index)} new file(s)...")
             
             search_service = SearchService()
             indexed_count = 0
-            
             limit_reached = False
-            for i, file_path in enumerate(files_to_index):
-                if self._should_stop:
-                    self.finished_processing.emit(all_processed_files)
-                    return
-                
-                # Stop indexing if limit was reached on a previous file
-                if limit_reached:
-                    logger.info(f"[Worker] Skipping remaining {len(files_to_index) - i} files due to index limit")
-                    break
-                    
+            
+            # Use parallel processing like normal indexing (up to 20 concurrent)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            MAX_PARALLEL = 20  # Fewer than normal indexing to be safe
+            
+            def index_one_file(fp):
+                """Index a single file, return (path, result)."""
                 try:
-                    result = search_service.index_single_file(Path(file_path), force_ai=False)
+                    result = search_service.index_single_file(Path(fp), force_ai=False)
+                    return (fp, result)
+                except Exception as e:
+                    return (fp, {'error': str(e)})
+            
+            with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as executor:
+                futures = {executor.submit(index_one_file, fp): fp for fp in files_to_index}
+                
+                for future in as_completed(futures):
+                    if self._should_stop:
+                        # Cancel remaining futures
+                        for f in futures:
+                            f.cancel()
+                        self.finished_processing.emit(all_processed_files)
+                        return
+                    
+                    file_path, result = future.result()
                     
                     if result.get('success'):
                         indexed_count += 1
@@ -149,20 +162,13 @@ class AutoWatcherWorker(QThread):
                         self.file_indexed.emit(file_path)
                         self.status_changed.emit(f"Indexed {indexed_count}/{len(files_to_index)} files...")
                     elif result.get('limit_reached'):
-                        # Index limit reached - stop trying to index more media files
-                        limit_reached = True
-                        logger.warning(f"[Worker] Index limit reached: {result.get('error')}")
-                        self.status_changed.emit("Index limit reached - upgrade for more")
-                        self.error_occurred.emit(file_path, result.get('error', 'Index limit reached'))
+                        if not limit_reached:
+                            limit_reached = True
+                            logger.warning(f"[Worker] Index limit reached: {result.get('error')}")
+                            self.status_changed.emit("Index limit reached - upgrade for more")
+                            self.error_occurred.emit(file_path, result.get('error', 'Index limit reached'))
                     elif result.get('error'):
                         logger.warning(f"[Worker] Failed to index {file_path}: {result.get('error')}")
-                    
-                    # Small delay between files
-                    if i < len(files_to_index) - 1:
-                        time.sleep(0.3)
-                        
-                except Exception as e:
-                    logger.error(f"[Worker] Error auto-indexing {file_path}: {e}")
             
             if indexed_count > 0:
                 self.status_changed.emit(f"Indexed {indexed_count} file(s), now organizing...")
@@ -289,9 +295,10 @@ class AutoWatcherWorker(QThread):
                     dest_path = os.path.join(dest_folder, os.path.basename(file_path))
                     
                     # CRITICAL: Check if file is ALREADY in the correct location
-                    # This prevents the _1 suffix bug and unnecessary moves
-                    source_normalized = os.path.normpath(file_path)
-                    dest_normalized = os.path.normpath(dest_path)
+                    # Use CASE-INSENSITIVE comparison for macOS compatibility
+                    # macOS file system is case-insensitive, so "Images" == "images"
+                    source_normalized = os.path.normpath(file_path).lower()
+                    dest_normalized = os.path.normpath(dest_path).lower()
                     
                     if source_normalized == dest_normalized:
                         # File is already exactly where it should be - skip move but track as processed
@@ -300,22 +307,31 @@ class AutoWatcherWorker(QThread):
                         logger.debug(f"[Worker] File already in place, skipping: {os.path.basename(file_path)}")
                         continue
                     
-                    # Check if file is already in the destination folder (even if paths differ slightly)
-                    source_folder = os.path.normpath(os.path.dirname(file_path))
-                    dest_folder_normalized = os.path.normpath(dest_folder)
+                    # Check if file is already in the destination folder (case-insensitive)
+                    source_folder = os.path.normpath(os.path.dirname(file_path)).lower()
+                    dest_folder_normalized = os.path.normpath(dest_folder).lower()
                     
                     if source_folder == dest_folder_normalized:
                         # File is already in the correct folder - skip move but track as processed
                         skipped_count += 1
                         all_processed_files.append(file_path)
-                        logger.debug(f"[Worker] File already in correct folder, skipping: {os.path.basename(file_path)}")
+                        logger.debug(f"[Worker] File already in correct folder (case-insensitive), skipping: {os.path.basename(file_path)}")
                         continue
                     
                     # Create destination folder only if we're actually going to move something
                     os.makedirs(dest_folder, exist_ok=True)
                     
-                    # Handle duplicates - only if dest_path is a DIFFERENT file
+                    # Handle duplicates - check case-insensitively if this is the SAME file
+                    # On macOS, if source and dest only differ by case, it's the same file
                     if os.path.exists(dest_path):
+                        # Check if it's actually the same file (case-insensitive path match)
+                        if os.path.normpath(file_path).lower() == os.path.normpath(dest_path).lower():
+                            # Same file, just different case - skip
+                            skipped_count += 1
+                            all_processed_files.append(file_path)
+                            logger.debug(f"[Worker] Same file (case difference), skipping: {os.path.basename(file_path)}")
+                            continue
+                        # Actually a different file - add counter suffix
                         base, ext = os.path.splitext(os.path.basename(file_path))
                         counter = 1
                         while os.path.exists(dest_path):
@@ -506,10 +522,18 @@ class AutoOrganizeWatcher(QObject):
         if organize_existing:
             self._organize_existing_files()
         
-        # Start periodic file check
+        # Start periodic file check (for new files in root folder - quick detection)
         self._file_check_timer = QTimer(self)
         self._file_check_timer.timeout.connect(self._check_for_new_files)
         self._file_check_timer.start(3000)  # Check every 3 seconds
+        
+        # Start periodic full scan timer (checks all files including subfolders against database)
+        self._full_scan_timer = QTimer(self)
+        self._full_scan_timer.timeout.connect(self._periodic_full_scan)
+        self._full_scan_timer.start(60000)  # Full scan every 60 seconds
+        
+        # Do an immediate full scan to catch any unindexed files
+        QTimer.singleShot(2000, self._periodic_full_scan)  # 2 second delay to let UI settle
         
         self.status_changed.emit(f"Watching {folder_count} folder(s) for new files...")
     
@@ -523,6 +547,11 @@ class AutoOrganizeWatcher(QObject):
         if self._file_check_timer:
             self._file_check_timer.stop()
             self._file_check_timer = None
+        
+        # Stop the full scan timer
+        if hasattr(self, '_full_scan_timer') and self._full_scan_timer:
+            self._full_scan_timer.stop()
+            self._full_scan_timer = None
         
         # Stop any running worker
         if self._current_worker is not None and self._current_worker.isRunning():
@@ -938,6 +967,10 @@ class AutoOrganizeWatcher(QObject):
                     if deleted > 0:
                         logger.info(f"Periodic cleanup: removed {deleted} empty folder(s)")
         
+        # Get currently indexed paths from database for validation
+        from app.core.database import file_index
+        indexed_paths = file_index.get_indexed_file_paths()
+        
         for folder in self.watched_folders:
             folder = os.path.normpath(folder)
             if not os.path.isdir(folder):
@@ -946,6 +979,8 @@ class AutoOrganizeWatcher(QObject):
             try:
                 for item in os.listdir(folder):
                     item_path = os.path.join(folder, item)
+                    # Use lowercase for case-insensitive comparison (macOS)
+                    normalized_path = os.path.normpath(item_path).lower()
                     
                     if not os.path.isfile(item_path):
                         continue
@@ -954,9 +989,16 @@ class AutoOrganizeWatcher(QObject):
                     if self._should_ignore(item_path):
                         continue
                     
-                    # Skip already processed files
+                    # Skip already processed files ONLY if they're still in the database
+                    # If user deleted them from indexing, they should be re-indexed
                     if item_path in self._processed_files:
-                        continue
+                        if normalized_path in indexed_paths:
+                            continue  # File is processed AND still indexed - skip
+                        else:
+                            # File was deleted from database - remove from processed set
+                            self._processed_files.discard(item_path)
+                            self._organized_files.discard(normalized_path)
+                            logger.info(f"File removed from DB, will re-index: {os.path.basename(item_path)}")
                     
                     # Track pending files for debounce
                     if item_path not in self._pending_files:
@@ -973,6 +1015,74 @@ class AutoOrganizeWatcher(QObject):
                             
             except Exception as e:
                 logger.error(f"Error checking folder {folder}: {e}")
+    
+    def _periodic_full_scan(self) -> None:
+        """
+        Periodic full scan of all watched folders (including subfolders).
+        Checks if any files are missing from the database and queues them for indexing.
+        Called every 60 seconds and once on startup.
+        """
+        if not self._is_running:
+            return
+        
+        logger.info("[FullScan] Starting periodic full scan of watched folders...")
+        
+        # Get currently indexed paths from database
+        from app.core.database import file_index
+        indexed_paths = file_index.get_indexed_file_paths()
+        logger.info(f"[FullScan] Database has {len(indexed_paths)} indexed files")
+        
+        # Collect all unindexed files from all watched folders
+        unindexed_files_by_folder: Dict[str, List[str]] = defaultdict(list)
+        total_scanned = 0
+        total_unindexed = 0
+        
+        for folder in self.watched_folders:
+            folder = os.path.normpath(folder)
+            if not os.path.isdir(folder):
+                continue
+            
+            try:
+                # Scan ALL files including subfolders
+                for root, dirs, files in os.walk(folder):
+                    # Skip hidden directories
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    
+                    for file_name in files:
+                        file_path = os.path.join(root, file_name)
+                        # Use lowercase for case-insensitive comparison (macOS)
+                        normalized_path = os.path.normpath(file_path).lower()
+                        total_scanned += 1
+                        
+                        # Skip ignored files
+                        if self._should_ignore(file_path):
+                            continue
+                        
+                        # Skip files already being processed
+                        if file_path in self._processed_files:
+                            continue
+                        
+                        # Check if file is NOT in database (case-insensitive)
+                        if normalized_path not in indexed_paths:
+                            unindexed_files_by_folder[folder].append(file_path)
+                            total_unindexed += 1
+                            
+            except Exception as e:
+                logger.error(f"[FullScan] Error scanning folder {folder}: {e}")
+        
+        logger.info(f"[FullScan] Scanned {total_scanned} files, found {total_unindexed} unindexed")
+        
+        # Process unindexed files for each folder
+        if total_unindexed > 0:
+            self.status_changed.emit(f"Found {total_unindexed} unindexed file(s), processing...")
+            
+            for folder, files in unindexed_files_by_folder.items():
+                if files and self._is_running:
+                    logger.info(f"[FullScan] Queuing {len(files)} unindexed files from {os.path.basename(folder)}")
+                    instruction = self._get_instruction_for_folder(folder)
+                    self._process_files_with_ai(files, folder, instruction)
+        else:
+            logger.info("[FullScan] All files are indexed")
     
     def _process_files_with_ai(self, file_paths: List[str], folder: str, instruction: str, 
                                 existing_folders: List[str] = None) -> None:

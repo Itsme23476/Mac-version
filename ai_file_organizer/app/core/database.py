@@ -2,6 +2,7 @@
 Database management for file indexing and search functionality.
 """
 
+import os
 import sqlite3
 import json
 import logging
@@ -878,6 +879,29 @@ class FileIndex:
                 return {row[0] for row in rows}
         except Exception as e:
             logger.error(f"Error getting filenames with tags: {e}")
+            return set()
+
+    def get_indexed_file_paths(self) -> set:
+        """
+        Get a set of all indexed file paths in the database.
+        Used for quick lookup to determine if a file needs indexing.
+        Paths are normalized and lowercased for case-insensitive comparison (macOS).
+        
+        Returns:
+            Set of normalized, lowercased full file paths that are indexed (have tags)
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT file_path FROM files 
+                    WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'
+                """)
+                rows = cursor.fetchall()
+                # Normalize and lowercase paths for case-insensitive comparison (macOS)
+                return {os.path.normpath(row[0]).lower() for row in rows if row[0]}
+        except Exception as e:
+            logger.error(f"Error getting indexed file paths: {e}")
             return set()
 
     def get_file_count(self) -> int:

@@ -477,25 +477,31 @@ class Settings:
 
     def update_auto_organize_action(self, folder_path: str, action: int) -> None:
         """Update the organization action for a folder.
-        
+
         Args:
             folder_path: Path to the folder
             action: 1=Re-organize All, 2=Organize As-Is, 3=Watch Only
         """
+        # Normalize path for consistent comparison
+        normalized_path = os.path.normpath(folder_path)
         for folder in self.auto_organize_folders:
-            if folder.get('path') == folder_path:
+            saved_path = os.path.normpath(folder.get('path', ''))
+            if saved_path == normalized_path:
                 folder['action'] = action
                 self._save_config()
                 return
-    
+
     def get_auto_organize_action(self, folder_path: str) -> int:
         """Get the organization action for a folder.
-        
+
         Returns:
             action: 1=Re-organize All, 2=Organize As-Is, 3=Watch Only (default)
         """
+        # Normalize path for consistent comparison
+        normalized_path = os.path.normpath(folder_path)
         for folder in self.auto_organize_folders:
-            if folder.get('path') == folder_path:
+            saved_path = os.path.normpath(folder.get('path', ''))
+            if saved_path == normalized_path:
                 return folder.get('action', 3)  # Default to Watch Only
         return 3
 
