@@ -2454,6 +2454,13 @@ class HistoryDialog(QDialog):
         except:
             formatted_date = timestamp_str[:19] if timestamp_str else "Unknown date"
         
+        # Check if this organization was reverted
+        is_reverted = item.get("reverted", False)
+        
+        # Date row with optional "Reverted" badge
+        date_row = QHBoxLayout()
+        date_row.setSpacing(8)
+        
         date_label = QLabel(formatted_date)
         date_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
@@ -2463,10 +2470,27 @@ class HistoryDialog(QDialog):
             background: transparent;
             border: none;
         """)
-        info_layout.addWidget(date_label)
+        date_row.addWidget(date_label)
+        
+        if is_reverted:
+            reverted_badge = QLabel("Reverted")
+            reverted_badge.setStyleSheet("""
+                font-family: "Segoe UI", sans-serif;
+                font-size: 10px;
+                font-weight: 600;
+                color: white;
+                background: #9E9E9E;
+                border-radius: 4px;
+                padding: 2px 6px;
+            """)
+            date_row.addWidget(reverted_badge)
+        
+        date_row.addStretch()
+        info_layout.addLayout(date_row)
         
         files_count = item.get("successful_moves", item.get("total_files", 0))
-        details_label = QLabel(f"{files_count} file(s) organized")
+        reverted_text = " (reverted)" if is_reverted else ""
+        details_label = QLabel(f"{files_count} file(s) organized{reverted_text}")
         details_label.setStyleSheet(f"""
             font-family: "Segoe UI", sans-serif;
             font-size: 12px;
@@ -2514,6 +2538,7 @@ class HistoryDialog(QDialog):
             
             moves = log_data.get("moves", [])
             renamed = log_data.get("renamed_files", [])
+            is_reverted = log_data.get("reverted", False)
             
             # Create a custom scrollable details dialog
             dialog = QDialog(self)
@@ -2639,6 +2664,32 @@ class HistoryDialog(QDialog):
             
             # Footer
             footer = QHBoxLayout()
+            
+            # Revert button - moves files back to original locations
+            if is_reverted:
+                # Show "Already Reverted" label instead of button
+                reverted_label = QLabel("✓ Already Reverted")
+                reverted_label.setStyleSheet("""
+                    font-family: "Segoe UI", sans-serif;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #9E9E9E;
+                    padding: 8px 16px;
+                """)
+                footer.addWidget(reverted_label)
+            else:
+                revert_btn = QPushButton("↩ Revert")
+                revert_btn.setMinimumHeight(40)
+                revert_btn.setCursor(Qt.PointingHandCursor)
+                revert_btn.setStyleSheet("""
+                    QPushButton { background: transparent; color: #7C4DFF; border: 2px solid #7C4DFF; border-radius: 10px;
+                                  font-weight: 600; font-size: 14px; padding: 8px 24px; }
+                    QPushButton:hover { background: #7C4DFF; color: white; }
+                """)
+                revert_btn.setToolTip("Move all files back to their original locations")
+                revert_btn.clicked.connect(lambda: self._revert_organization(log_file, moves, dialog))
+                footer.addWidget(revert_btn)
+            
             footer.addStretch()
             
             ok_btn = QPushButton("Close")
@@ -2680,6 +2731,151 @@ class HistoryDialog(QDialog):
                 message="Could not load operation details.",
                 details=[str(e)]
             )
+    
+    def _revert_organization(self, log_file: str, moves: list, details_dialog: QDialog):
+        """Revert an organization by moving files back to their original locations."""
+        from pathlib import Path
+        import shutil
+        import os
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"[REVERT] Starting revert operation for {len(moves)} moves from {log_file}")
+        
+        if not moves:
+            ModernInfoDialog.show_info(
+                self,
+                title="Nothing to Revert",
+                message="No file moves to revert."
+            )
+            return
+        
+        # Check which files can be reverted
+        can_revert = []
+        cannot_revert = []
+        
+        for move in moves:
+            dest_path = Path(move.get("to", ""))
+            source_path = Path(move.get("from", ""))
+            
+            if not dest_path.exists():
+                cannot_revert.append(f"File not found: {dest_path.name}")
+            elif source_path.exists():
+                cannot_revert.append(f"Original location occupied: {source_path.name}")
+            else:
+                can_revert.append(move)
+        
+        if not can_revert:
+            details_list = cannot_revert[:5]
+            if len(cannot_revert) > 5:
+                details_list.append(f"... and {len(cannot_revert) - 5} more issues")
+            ModernInfoDialog.show_warning(
+                self,
+                title="Cannot Revert",
+                message="Cannot revert this organization.",
+                details=details_list
+            )
+            return
+        
+        # Build confirmation message
+        warning_details = []
+        if cannot_revert:
+            warning_details.append(f"{len(cannot_revert)} file(s) cannot be reverted (moved or deleted)")
+        warning_details.append(f"{len(can_revert)} file(s) will be moved back to original locations")
+        
+        confirmed = ModernConfirmDialog.ask(
+            self,
+            title="Confirm Revert",
+            message=f"Move {len(can_revert)} file(s) back to original locations?",
+            details=warning_details,
+            yes_text="Revert",
+            no_text="Cancel"
+        )
+        
+        if not confirmed:
+            return
+        
+        # Perform the revert
+        reverted = 0
+        errors = []
+        
+        for move in can_revert:
+            try:
+                dest_path = Path(move.get("to", ""))
+                source_path = Path(move.get("from", ""))
+                
+                # Create source directory if needed
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Move file back
+                shutil.move(str(dest_path), str(source_path))
+                reverted += 1
+                logger.info(f"[REVERT] Moved back: {dest_path.name} -> {source_path.parent.name}/")
+                
+                # Update database path if file_index is available
+                try:
+                    from app.core.database import file_index
+                    if file_index.update_file_path_by_old_path(str(dest_path), str(source_path)):
+                        logger.info(f"[REVERT] DB path updated: {dest_path.name}")
+                    else:
+                        logger.debug(f"[REVERT] DB path update skipped (file not in DB)")
+                except Exception as db_err:
+                    logger.warning(f"[REVERT] DB path update failed: {db_err}")
+                    
+            except Exception as e:
+                errors.append(f"{dest_path.name}: {str(e)}")
+        
+        # Close the details dialog
+        details_dialog.accept()
+        
+        # Log final result
+        logger.info(f"[REVERT] Completed: {reverted} files reverted, {len(errors)} errors, {len(cannot_revert)} skipped")
+        
+        # Show result
+        if errors:
+            ModernInfoDialog.show_warning(
+                self,
+                title="Revert Partially Completed",
+                message=f"Reverted {reverted} of {len(can_revert)} files.",
+                details=errors[:5] + ([f"... and {len(errors) - 5} more errors"] if len(errors) > 5 else [])
+            )
+        else:
+            ModernInfoDialog.show_info(
+                self,
+                title="Revert Complete",
+                message=f"Successfully moved {reverted} file(s) back to original locations.",
+                details=["Files have been restored to their original locations"]
+            )
+        
+        # Mark the log file as reverted
+        if reverted > 0:
+            try:
+                import json
+                from datetime import datetime
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    log_data = json.load(f)
+                log_data['reverted'] = True
+                log_data['reverted_count'] = reverted
+                log_data['reverted_at'] = datetime.now().isoformat()
+                with open(log_file, 'w', encoding='utf-8') as f:
+                    json.dump(log_data, f, indent=2)
+                logger.info(f"[REVERT] Marked log as reverted: {log_file}")
+            except Exception as e:
+                logger.warning(f"[REVERT] Could not mark log as reverted: {e}")
+        
+        # Refresh the history list
+        self._refresh_history()
+    
+    def _refresh_history(self):
+        """Refresh the history list after a revert."""
+        # Clear existing items
+        while self.history_layout.count() > 0:
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Reload history
+        self._load_history()
     
     def _clear_history(self):
         """Clear all history log files."""
@@ -4754,8 +4950,6 @@ class OrganizePage(QWidget):
         self.files_by_id = {}
         self.destination_path = None
         self.plan_worker = None
-        # Undo tracking - stores the last completed organization
-        self.last_organization = None  # List of {source, destination, file_id}
         # Refinement tracking
         self.original_instruction = None
         
@@ -5114,54 +5308,6 @@ class OrganizePage(QWidget):
         self.apply_button.clicked.connect(self.apply_organization)
         action_layout.addWidget(self.apply_button)
         
-        self.clear_button = QPushButton("Clear")
-        self.clear_button.setMinimumHeight(48)
-        self.clear_button.setCursor(Qt.PointingHandCursor)
-        self.clear_button.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #7C4DFF;
-                border: 1px solid rgba(124, 77, 255, 0.30);
-                border-radius: 12px;
-                font-weight: 600;
-                font-size: 15px;
-            }
-            QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.08);
-            }
-        """)
-        self.clear_button.clicked.connect(self.clear_plan)
-        action_layout.addWidget(self.clear_button)
-        
-        self.undo_button = QPushButton("↩ Undo Last")
-        self.undo_button.setMinimumHeight(48)
-        self.undo_button.setMinimumWidth(130)
-        self.undo_button.setEnabled(False)
-        self.undo_button.setCursor(Qt.PointingHandCursor)
-        self.undo_button.setToolTip("Undo the last organization (move files back)")
-        self.undo_button.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #9575FF;
-                border: 1px solid rgba(149, 117, 255, 0.30);
-                border-radius: 12px;
-                font-weight: 600;
-                font-size: 15px;
-            }
-            QPushButton:hover {
-                background-color: rgba(124, 77, 255, 0.08);
-                color: #B39DFF;
-                border-color: #7C4DFF;
-            }
-            QPushButton:disabled {
-                background-color: #16161F;
-                border-color: #1C1C28;
-                color: #4A4A5A;
-            }
-        """)
-        self.undo_button.clicked.connect(self.undo_last_organization)
-        action_layout.addWidget(self.undo_button)
-        
         # History button - shows past organization operations
         self.history_button = QPushButton("📋 History")
         self.history_button.setMinimumHeight(48)
@@ -5238,8 +5384,6 @@ class OrganizePage(QWidget):
         
         # Hide these buttons initially - shown after plan is generated
         self.apply_button.setVisible(False)
-        self.clear_button.setVisible(False)
-        self.undo_button.setVisible(False)
         
         # Wrap action buttons in a scroll area to prevent cutoff on small windows
         action_widget = QWidget()
@@ -5736,28 +5880,6 @@ class OrganizePage(QWidget):
                 background-color: #4CAF50;
                 color: white;
                 border-color: #4CAF50;
-            }}
-            QPushButton:disabled {{
-                background-color: {c['card']};
-                border-color: {c['border']};
-                color: {c['text_disabled']};
-            }}
-        """)
-
-        # ---- Undo button ----
-        self.undo_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                color: #9575FF;
-                border: 1px solid rgba(149, 117, 255, 0.30);
-                border-radius: 12px;
-                font-weight: 600;
-                font-size: 15px;
-            }}
-            QPushButton:hover {{
-                background-color: rgba(124, 77, 255, 0.08);
-                color: #B39DFF;
-                border-color: #7C4DFF;
             }}
             QPushButton:disabled {{
                 background-color: {c['card']};
@@ -6278,9 +6400,15 @@ class OrganizePage(QWidget):
         # Hide the plan completely - return to clean input view
         self._hide_plan_ui()
         self.apply_button.setVisible(False)
-        self.clear_button.setVisible(False)
-        self.undo_button.setVisible(False)
         self.feedback_group.setVisible(False)
+
+        # Reset plan state so Generate starts fresh (folds in old Clear behavior)
+        self.current_plan = None
+        self.current_moves = []
+        self.original_instruction = None
+        self.plan_tree.clear()
+        self.apply_button.setEnabled(False)
+        self.feedback_input.clear()
     
     def _show_plan_summary(self, folder_count: int, file_count: int, total_size_mb: float):
         """Show the plan summary line."""
@@ -7157,8 +7285,6 @@ class OrganizePage(QWidget):
             # Show the results section and action buttons
             self.results_splitter.setVisible(True)
             self.apply_button.setVisible(True)
-            self.clear_button.setVisible(True)
-            self.undo_button.setVisible(True)
     
     def _on_plan_error(self, error: str):
         """Handle planning error."""
@@ -7512,17 +7638,6 @@ Caption: {file_info.get('caption', 'none')}
         self.generate_button.setEnabled(True)
         
         if success:
-            # Save undo information BEFORE updating database paths
-            self.last_organization = []
-            for m in self.current_moves:
-                self.last_organization.append({
-                    "source": m["source_path"],
-                    "destination": m["destination_path"],
-                    "file_id": m["file_id"],
-                })
-            self.undo_button.setEnabled(True)
-            logger.info(f"Saved {len(self.last_organization)} moves for potential undo")
-            
             paths_updated = 0
             for m in self.current_moves:
                 if file_index.update_file_path(m["file_id"], m["destination_path"]):
@@ -7587,24 +7702,18 @@ Caption: {file_info.get('caption', 'none')}
             self.apply_button.setEnabled(True)
 
     def clear_plan(self):
-        """Clear the current plan and reset UI."""
-        self.current_plan = None
-        self.current_moves = []
-        self.original_instruction = None
-        self.plan_tree.clear()
-        self.apply_button.setEnabled(False)
-        self.feedback_group.setVisible(False)
-        self.feedback_input.clear()
-        
-        # Hide plan UI elements
+        """Clear the current plan and reset UI.
+
+        Kept as an internal helper (called after a successful apply_organization).
+        The user-facing Edit button reuses _show_input_cards which now resets
+        plan state as well.
+        """
         self.apply_button.setVisible(False)
-        self.clear_button.setVisible(False)
-        self.undo_button.setVisible(False)
         self._hide_plan_ui()
-        
-        # Show input cards again
+
+        # _show_input_cards resets state (current_plan, current_moves, tree, etc.)
         self._show_input_cards()
-        
+
         self._update_file_count()
     
     def refine_plan(self):
@@ -7657,103 +7766,6 @@ Caption: {file_info.get('caption', 'none')}
         """Show the pinned items management dialog."""
         dialog = PinnedDialog(self)
         dialog.exec()
-    
-    def undo_last_organization(self):
-        """Undo the last organization by moving files back to their original locations."""
-        if not self.last_organization:
-            QMessageBox.information(
-                self, "Nothing to Undo",
-                "There is no previous organization to undo."
-            )
-            return
-        
-        can_undo = []
-        cannot_undo = []
-        
-        for move in self.last_organization:
-            dest_path = Path(move["destination"])
-            source_path = Path(move["source"])
-            
-            if not dest_path.exists():
-                cannot_undo.append(f"File not found: {dest_path.name}")
-            elif source_path.exists():
-                cannot_undo.append(f"Original location occupied: {source_path.name}")
-            else:
-                can_undo.append(move)
-        
-        if not can_undo:
-            QMessageBox.warning(
-                self, "Cannot Undo",
-                f"Cannot undo the last organization:\n\n" +
-                "\n".join(cannot_undo[:5]) +
-                (f"\n... and {len(cannot_undo) - 5} more issues" if len(cannot_undo) > 5 else "")
-            )
-            return
-        
-        warning_text = ""
-        if cannot_undo:
-            warning_text = f"\n\n{len(cannot_undo)} files cannot be undone (modified or moved)."
-        
-        reply = QMessageBox.question(
-            self,
-            "Confirm Undo",
-            f"Move {len(can_undo)} files back to their original locations?{warning_text}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply != QMessageBox.Yes:
-            return
-        
-        import shutil
-        success_count = 0
-        errors = []
-        
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(can_undo))
-        self.status_label.setText("Undoing organization...")
-        
-        for i, move in enumerate(can_undo):
-            self.progress_bar.setValue(i + 1)
-            try:
-                dest_path = Path(move["destination"])
-                source_path = Path(move["source"])
-                
-                source_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                shutil.move(str(dest_path), str(source_path))
-                
-                file_index.update_file_path(move["file_id"], str(source_path))
-                
-                success_count += 1
-                logger.info(f"Undo: {dest_path} -> {source_path}")
-            except Exception as e:
-                errors.append(f"{dest_path.name}: {e}")
-                logger.error(f"Undo failed for {move['destination']}: {e}")
-        
-        self.progress_bar.setVisible(False)
-        
-        self._cleanup_empty_folders()
-        
-        self.last_organization = None
-        self.undo_button.setEnabled(False)
-        
-        if errors:
-            QMessageBox.warning(
-                self, "Partial Undo",
-                f"Restored {success_count} files.\n\n"
-                f"{len(errors)} files could not be restored:\n" +
-                "\n".join(errors[:3])
-            )
-            self.status_label.setText(f"Undo partial: {success_count} restored, {len(errors)} failed")
-        else:
-            QMessageBox.information(
-                self, "Undo Complete",
-                f"Successfully restored {success_count} files to their original locations!"
-            )
-            self.status_label.setText(f"Undo complete: {success_count} files restored")
-        
-        self._update_file_count()
     
     def _collect_empty_folders(self, source_folders: set) -> list:
         """

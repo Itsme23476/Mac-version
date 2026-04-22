@@ -25,10 +25,6 @@ CONTEXTUAL_TIPS = {
         "title": "📌 Pinned Files & Folders",
         "message": "• Lock files to prevent organization\n• Pin entire folders to protect them\n• Right-click items in the plan to pin",
     },
-    "undo_button": {
-        "title": "↩️ Undo Last Action",
-        "message": "• Instantly reverse your last organization\n• Files return to original locations\n• Works even after closing the app",
-    },
     "voice_button": {
         "title": "🎤 Voice Instructions",
         "message": "• Speak instead of typing\n• Say: 'Organize by date'\n• Click and hold to record",
@@ -39,7 +35,7 @@ CONTEXTUAL_TIPS = {
     },
     "apply_button": {
         "title": "✓ Apply Organization",
-        "message": "• Execute the plan and move files\n• Creates folders automatically\n• Can be undone if needed",
+        "message": "• Execute the plan and move files\n• Creates folders automatically\n• Revert from History if needed",
     },
     
     # Settings Page - Medium Priority

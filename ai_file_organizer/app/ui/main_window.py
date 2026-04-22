@@ -405,10 +405,6 @@ class MainWindow(QMainWindow):
                 if hasattr(op, 'pinned_button'):
                     self.tips_manager.add_tip("pinned_button", op.pinned_button, force_position="below")
                 
-                # Undo button
-                if hasattr(op, 'undo_button'):
-                    self.tips_manager.add_tip("undo_button", op.undo_button, force_position="below")
-                
                 # Apply button
                 if hasattr(op, 'apply_button'):
                     self.tips_manager.add_tip("apply_button", op.apply_button, force_position="below")
@@ -4452,36 +4448,34 @@ class MainWindow(QMainWindow):
         try:
             row = item.row()
             col = item.column()
-            # file id is stored in column 0's user data
-            name_item = self.debug_table.item(row, 0)
+            # file id is stored in column 1's user data (File Name column)
+            name_item = self.debug_table.item(row, 1)
             file_id = name_item.data(Qt.UserRole) if name_item else None
             if not file_id:
                 return
             text = item.text()
-            if col == 4:  # Label
+            # Column indices: 5=Label, 6=Tags, 7=Caption, 11=Purpose, 12=SuggestedFilename
+            if col == 5:  # Label
                 ok = file_index.update_file_field(file_id, 'label', text)
-            elif col == 5:  # Tags
+            elif col == 6:  # Tags
                 tags = [t.strip() for t in (text or '').split(',') if t.strip()]
                 ok = file_index.update_file_field(file_id, 'tags', tags)
-            elif col == 6:  # Caption
+            elif col == 7:  # Caption
                 ok = file_index.update_file_field(file_id, 'caption', text)
-            elif col == 10:  # Purpose
+            elif col == 11:  # Purpose
                 # update metadata JSON
-                # read existing metadata from current table row if possible
-                meta_text = self.debug_table.item(row, 12)  # detected text col; not metadata
-                # fallback: fetch from db if needed is overkill; we set only one key
                 meta = {}
                 try:
-                    rec = file_index.get_file_by_path(self.debug_table.item(row, 8).text())  # unlikely path in col8; ignore if fails
+                    rec = file_index.get_file_by_path(self.debug_table.item(row, 14).text())  # File path is col 14
                 except Exception:
                     rec = None
                 meta = (rec or {}).get('metadata', {}) if rec else {}
                 meta['purpose'] = text
                 ok = file_index.update_file_field(file_id, 'metadata', meta)
-            elif col == 11:  # Suggested filename
+            elif col == 12:  # Suggested filename
                 meta = {}
                 try:
-                    rec = file_index.get_file_by_path(self.debug_table.item(row, 8).text())
+                    rec = file_index.get_file_by_path(self.debug_table.item(row, 14).text())  # File path is col 14
                 except Exception:
                     rec = None
                 meta = (rec or {}).get('metadata', {}) if rec else {}
@@ -4514,7 +4508,10 @@ class MainWindow(QMainWindow):
         column_name = header.text() if header else f"Column {col}"
         
         # Editable columns (others are read-only)
-        editable_columns = {4: 'label', 5: 'tags', 6: 'caption', 10: 'purpose', 11: 'suggested_filename'}
+        # Column indices: 0=✓, 1=FileName, 2=Category, 3=Size, 4=HasOCR, 5=Label, 6=Tags, 7=Caption,
+        #                 8=OCRTextPreview, 9=AISource, 10=VisionScore, 11=Purpose, 12=SuggestedFilename,
+        #                 13=DetectedText, 14=FilePath, 15=Actions
+        editable_columns = {5: 'label', 6: 'tags', 7: 'caption', 11: 'purpose', 12: 'suggested_filename'}
         is_editable = col in editable_columns
         
         # Create a styled dialog
@@ -4649,9 +4646,43 @@ class MainWindow(QMainWindow):
         if is_editable and result == QDialog.Accepted:
             new_text = text_edit.toPlainText()
             if new_text != original_text:
-                # Update the table cell
-                item.setText(new_text)
-                self.status_bar.showMessage(f"Updated {column_name}")
+                # Get the file ID from column 1's user data (File Name column)
+                name_item = self.debug_table.item(row, 1)
+                file_id = name_item.data(Qt.UserRole) if name_item else None
+                
+                if file_id:
+                    # Save directly to database based on column type
+                    ok = False
+                    field_name = editable_columns.get(col)
+                    
+                    if field_name == 'tags':
+                        # Parse tags as comma-separated list
+                        tags = [t.strip() for t in (new_text or '').split(',') if t.strip()]
+                        ok = file_index.update_file_field(file_id, 'tags', tags)
+                    elif field_name in ('label', 'caption'):
+                        ok = file_index.update_file_field(file_id, field_name, new_text)
+                    elif field_name in ('purpose', 'suggested_filename'):
+                        # These are stored in metadata JSON
+                        try:
+                            file_path_item = self.debug_table.item(row, 14)  # File path is col 14
+                            rec = file_index.get_file_by_path(file_path_item.text()) if file_path_item else None
+                        except Exception:
+                            rec = None
+                        meta = (rec or {}).get('metadata', {}) if rec else {}
+                        meta[field_name] = new_text
+                        ok = file_index.update_file_field(file_id, 'metadata', meta)
+                    
+                    if ok:
+                        # Update the table cell to reflect the change
+                        item.setText(new_text)
+                        self.status_bar.showMessage(f"Saved {column_name}")
+                        logger.info(f"Successfully saved {field_name} for file ID {file_id}")
+                    else:
+                        from app.ui.organize_page import ModernInfoDialog
+                        ModernInfoDialog.show_warning(self, "Save Error", f"Failed to save {column_name} to database.")
+                else:
+                    from app.ui.organize_page import ModernInfoDialog
+                    ModernInfoDialog.show_warning(self, "Save Error", "Could not find file ID.")
         
         # Clear selection after dialog closes (for both Save and Cancel)
         self.debug_table.clearSelection()
@@ -5610,6 +5641,28 @@ Move Plan Summary:
         custom_header.addWidget(custom_label)
         custom_header.addStretch()
         
+        # Remove All button (initially hidden if no folders)
+        remove_all_btn = QPushButton("Clear All")
+        remove_all_btn.setObjectName("watchRemoveAllBtn")
+        remove_all_btn.setCursor(Qt.PointingHandCursor)
+        remove_all_btn.setFixedHeight(28)
+        remove_all_btn.setStyleSheet("""
+            QPushButton#watchRemoveAllBtn {
+                background: transparent;
+                color: #9575FF;
+                border: 1px solid #9575FF;
+                border-radius: 6px;
+                padding: 4px 12px;
+                font-size: 12px;
+            }
+            QPushButton#watchRemoveAllBtn:hover {
+                background: #9575FF;
+                color: white;
+            }
+        """)
+        remove_all_btn.setVisible(bool(settings.watch_custom_folders))
+        custom_header.addWidget(remove_all_btn)
+        
         add_folder_btn = QPushButton("+ Add")
         add_folder_btn.setObjectName("watchAddFolderBtn")
         add_folder_btn.setCursor(Qt.PointingHandCursor)
@@ -5630,6 +5683,9 @@ Move Plan Summary:
                 if item.widget():
                     item.widget().deleteLater()
             
+            # Show/hide Remove All button based on whether there are folders
+            remove_all_btn.setVisible(bool(settings.watch_custom_folders))
+            
             if not settings.watch_custom_folders:
                 empty_label = QLabel("No custom folders added")
                 empty_label.setObjectName("watchEmptyLabel")
@@ -5648,12 +5704,28 @@ Move Plan Summary:
                     folder_label.setToolTip(folder_path)
                     row_layout.addWidget(folder_label, 1)
                     
-                    # Remove button
-                    remove_btn = QPushButton("✕")
+                    # Remove button - individual folder removal
+                    remove_btn = QPushButton("X")
                     remove_btn.setObjectName("watchRemoveFolderBtn")
                     remove_btn.setFixedSize(22, 22)
                     remove_btn.setCursor(Qt.PointingHandCursor)
-                    remove_btn.setToolTip("Remove")
+                    remove_btn.setToolTip("Remove this folder")
+                    remove_btn.setStyleSheet("""
+                        QPushButton {
+                            background: #7C4DFF;
+                            color: white;
+                            border: none;
+                            border-radius: 11px;
+                            font-size: 11px;
+                            font-weight: bold;
+                            font-family: Arial, sans-serif;
+                            padding: 0px;
+                            margin: 0px;
+                        }
+                        QPushButton:hover {
+                            background: #5E35B1;
+                        }
+                    """)
                     remove_btn.clicked.connect(lambda checked, fp=folder_path: remove_folder(fp))
                     row_layout.addWidget(remove_btn)
                     
@@ -5664,6 +5736,18 @@ Move Plan Summary:
             refresh_folder_list()
             self._restart_folder_watching()
             self._update_watch_status()
+        
+        def remove_all_folders():
+            if not settings.watch_custom_folders:
+                return
+            # Clear all custom folders
+            for folder in list(settings.watch_custom_folders):
+                settings.remove_watch_custom_folder(folder)
+            refresh_folder_list()
+            self._restart_folder_watching()
+            self._update_watch_status()
+        
+        remove_all_btn.clicked.connect(remove_all_folders)
         
         def add_folder():
             folder = QFileDialog.getExistingDirectory(dialog, "Select Folder to Watch", str(Path.home()))
@@ -5837,7 +5921,7 @@ Move Plan Summary:
         watching = []
         if settings.watch_common_folders:
             watching.append("common folders")
-        if settings.watch_custom_folders and self.watch_custom_toggle.isChecked():
+        if settings.watch_custom_folders:
             watching.append(f"{len(settings.watch_custom_folders)} custom folder(s)")
         
         if watching:
@@ -5888,7 +5972,7 @@ Move Plan Summary:
                     folders_to_watch.append(str(p))
         
         # Custom folders
-        if self.watch_custom_toggle.isChecked():
+        if settings.watch_custom_folders:
             for folder in settings.watch_custom_folders:
                 if Path(folder).exists():
                     folders_to_watch.append(folder)
@@ -5908,7 +5992,7 @@ Move Plan Summary:
     def _restart_folder_watching(self):
         """Restart folder watching with updated settings."""
         self._stop_folder_watching()
-        if settings.watch_common_folders or (self.watch_custom_toggle.isChecked() and settings.watch_custom_folders):
+        if settings.watch_common_folders or settings.watch_custom_folders:
             self._start_folder_watching()
     
     def _stop_folder_watching(self):
