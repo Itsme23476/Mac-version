@@ -4110,6 +4110,8 @@ class WatchConfigDialog(QDialog):
         
         # Track folder data: {path: instruction}
         self.folder_data: Dict[str, str] = {}
+        # Track folder actions: {path: action} - stores user selections before save
+        self.folder_actions: Dict[str, int] = {}
         # Track folder widgets for updates
         self.folder_widgets: Dict[str, Dict] = {}
         
@@ -4274,8 +4276,12 @@ class WatchConfigDialog(QDialog):
         for folder_info in settings.auto_organize_folders:
             path = folder_info.get('path', '')
             instruction = folder_info.get('instruction', '')
+            action = folder_info.get('action')
             if path and os.path.isdir(path):
                 self._create_folder_widget(path, instruction)
+                # Pre-populate the action if it was saved
+                if action is not None:
+                    self.folder_actions[path] = action
         
         self._update_no_folders_visibility()
     
@@ -4550,8 +4556,8 @@ class WatchConfigDialog(QDialog):
         except Exception:
             pass
         
-        # Get the previously selected action
-        saved_action = settings.get_auto_organize_action(folder_path)
+        # Get the previously selected action (check local dict first, then settings)
+        saved_action = self.folder_actions.get(folder_path) or settings.get_auto_organize_action(folder_path)
         
         # Show single-folder apply dialog with pre-selected option
         dialog = ApplyInstructionsDialogSingleFolder(
@@ -4565,13 +4571,14 @@ class WatchConfigDialog(QDialog):
         dialog.exec()
         
         if dialog.result_choice:
-            # Save the selected action (but don't apply yet - wait for Save button)
-            settings.update_auto_organize_action(folder_path, dialog.result_choice)
+            # Store the action locally (will be saved when user clicks Save)
+            self.folder_actions[folder_path] = dialog.result_choice
+            logger.info(f"Stored action {dialog.result_choice} for folder: {folder_path}")
             
             # Update status display to show what will be applied
             self._update_folder_status_display(folder_path, dialog.result_choice)
             
-            # Note: Action will be applied when user clicks "Save" button
+            # Note: Action will be saved and applied when user clicks "Save" button
     
     def _update_no_folders_visibility(self):
         """Show/hide placeholder based on folder count."""
@@ -4588,17 +4595,17 @@ class WatchConfigDialog(QDialog):
             new_folders = []
             
             for path, instruction in self.folder_data.items():
-                logger.info(f"  Saving folder: {path}, instruction: {instruction[:50] if instruction else '(empty)'}...")
-                # Get existing action if any
-                existing_action = settings.get_auto_organize_action(path)
+                # Get action: first from local selections, then from saved settings
+                action = self.folder_actions.get(path) or settings.get_auto_organize_action(path)
+                logger.info(f"  Saving folder: {path}, instruction: {instruction[:50] if instruction else '(empty)'}, action: {action}...")
                 new_folders.append({
                     'path': path,
                     'instruction': instruction,
-                    'action': existing_action  # Preserve the action setting
+                    'action': action  # Use the selected action
                 })
                 # Track folders that need action applied
-                if existing_action in [1, 2]:  # 1=Re-organize, 2=As-Is
-                    folders_to_apply.append((path, existing_action))
+                if action in [1, 2]:  # 1=Re-organize, 2=As-Is
+                    folders_to_apply.append((path, action))
             
             # Save settings first
             settings.auto_organize_folders = new_folders
@@ -5860,24 +5867,41 @@ class OrganizePage(QWidget):
     
     def _apply_config_changes(self):
         """Apply configuration changes while watcher is running."""
-        # Update folder instructions from settings
+        # Get the new folder list from settings
+        new_folders = set()
         folder_instructions = {}
         for folder_data in settings.auto_organize_folders:
             folder_path = folder_data.get('path', '')
             instruction = folder_data.get('instruction', '')
             if folder_path:
                 normalized_path = os.path.normpath(folder_path)
+                new_folders.add(normalized_path)
                 folder_instructions[normalized_path] = instruction
+        
+        # Get current watched folders
+        current_folders = set(os.path.normpath(f) for f in self.auto_watcher.watched_folders)
+        
+        # Remove folders that are no longer in settings
+        folders_to_remove = current_folders - new_folders
+        for folder in folders_to_remove:
+            self.auto_watcher.remove_folder(folder)
+            logger.info(f"Removed folder from watcher: {folder}")
+        
+        # Add new folders that weren't being watched
+        folders_to_add = new_folders - current_folders
+        for folder in folders_to_add:
+            self.auto_watcher.add_folder(folder)
+            logger.info(f"Added folder to watcher: {folder}")
         
         # Update watcher's instructions
         self.auto_watcher.folder_instructions = folder_instructions
         
-        # NOTE: Per-folder organization choices are now handled by the individual "Save" 
-        # buttons next to each folder, so we don't show a dialog here when clicking "Done"
+        # Also update the local watch_folders list
+        self.watch_folders = list(new_folders)
         
-        # Instructions updated - just update the summary
+        # Update the summary
         self._update_watch_summary()
-        logger.info("Applied configuration changes while watching")
+        logger.info(f"Applied configuration changes: now watching {len(new_folders)} folder(s)")
     
     def _update_watch_summary(self):
         """Update the watch status display."""
@@ -6134,10 +6158,16 @@ class OrganizePage(QWidget):
         # Start the watcher
         self.auto_watcher.start(organize_existing=organize_existing, flatten_first=flatten_first)
         
+        # Remember that watcher is running - auto-start on next app open
+        settings.set_auto_organize_auto_start(True)
+        
     def _stop_watch_mode(self):
         """Stop watching folders."""
         if self.auto_watcher:
             self.auto_watcher.stop()
+        
+        # Remember that user stopped the watcher - don't auto-start on next app open
+        settings.set_auto_organize_auto_start(False)
         
         # Save last active timestamp for catch-up feature
         settings.update_auto_organize_last_active()
@@ -6147,8 +6177,13 @@ class OrganizePage(QWidget):
     
     def _check_auto_start(self):
         """Check if we should auto-start the watcher on app open."""
-        # Auto-start if there are configured folders (no toggle needed)
+        # Only auto-start if there are configured folders
         if not settings.auto_organize_folders:
+            return
+        
+        # Check if user had stopped the watcher before closing the app
+        if not settings.auto_organize_auto_start:
+            logger.info("Auto-start skipped: watcher was manually stopped by user")
             return
         
         # Check for catch-up (files added while app was closed)

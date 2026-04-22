@@ -179,39 +179,110 @@ def request_organization_plan(
     # Detect auto-organize mode vs specific instruction mode
     is_auto_organize = user_instruction.startswith("[AUTO-ORGANIZE]")
     
-    if is_auto_organize:
-        # Auto-organize: MUST include ALL files, follow user instruction LITERALLY
+    # Check for different auto-organize modes
+    is_existing_folders_only = "EXISTING FOLDERS ONLY" in user_instruction
+    has_user_instruction = "User's specific instructions:" in user_instruction
+    
+    if is_auto_organize and is_existing_folders_only:
+        # ORGANIZE AS-IS MODE: Must use only existing folders (passed in instruction)
         user_message = f"""User instruction: "{user_instruction}"
 
 Files to organize ({len(files)} total):
 {file_summary}
 
-CRITICAL - FOLLOW THE INSTRUCTION LITERALLY:
-- If the instruction says "move all files to X" or "put files in folder X", put ALL {len(files)} files in folder "X"
-- Do NOT organize by file type unless explicitly asked
-- Do NOT create extra folders - only create what the user asked for
+CRITICAL - EXISTING FOLDERS ONLY:
+- You can ONLY use the folders listed in the instruction - DO NOT create new folders
+- Put each file in the MOST APPROPRIATE existing folder based on file type/content
+- You MUST include EVERY file_id in your response ({len(files)} total)
+- Each file_id must appear in exactly ONE folder
+- Use your best judgment to match files to the closest existing folder
+
+Propose an organization plan. Return JSON only."""
+    elif is_auto_organize and has_user_instruction:
+        # Auto-organize WITH user instruction: follow user instruction, organize rest by type
+        user_message = f"""User instruction: "{user_instruction}"
+
+Files to organize ({len(files)} total):
+{file_summary}
+
+CRITICAL RULES:
+- FOLLOW the user's specific instructions for files they mentioned
+- For ALL OTHER files, organize them logically by file type (photos, videos, docs, etc.)
 - You MUST include EVERY file_id in your response
 - Each file_id must appear in exactly ONE folder
+- Use clear folder names: 'photos', 'images', 'videos', 'documents', 'audio', 'misc'
 - Total files in your response must equal {len(files)}
 
-Example: If instruction is "move all files to hello", return: {{"folders": {{"hello": [list all {len(files)} file IDs here]}}}}
+Propose an organization plan. Return JSON only."""
+    elif is_auto_organize:
+        # Auto-organize WITHOUT specific instruction: let AI decide best organization
+        user_message = f"""Analyze these files and organize them in the SMARTEST way possible.
+
+Files to organize ({len(files)} total):
+{file_summary}
+
+ANALYZE THE FILES and choose the BEST organization approach:
+- If files seem related to different PROJECTS → organize by project name
+- If files seem related to different CLIENTS/PEOPLE → organize by client/person
+- If files seem related to different TOPICS/SUBJECTS → organize by topic
+- If files seem related to different EVENTS/DATES → organize by event
+- If files are just random mixed types → organize by file type (photos, videos, docs, etc.)
+
+CRITICAL RULES:
+- LOOK at the file names and tags to understand what they are about
+- Choose folder names that MAKE SENSE for these specific files
+- Use CLEAR, DESCRIPTIVE folder names (not generic like "folder1")
+- DO NOT put all files in a single folder - create a logical structure
+- You MUST include EVERY file_id in your response ({len(files)} total)
+- Each file_id must appear in exactly ONE folder
+- Create 2-5 folders depending on how the files naturally group
+
+Examples:
+- Project files: {{"folders": {{"website-redesign": [1,2,3], "mobile-app": [4,5], "marketing": [6,7,8]}}}}
+- Mixed types: {{"folders": {{"photos": [1,2,3], "videos": [4,5], "documents": [6,7,8]}}}}
 
 Propose an organization plan. Return JSON only."""
     else:
-        # Specific instruction: organize ALL files based on instruction
-        user_message = f"""User instruction: "{user_instruction}"
+        # Manual organization with user instruction (or empty instruction)
+        if user_instruction and user_instruction.strip():
+            # User provided specific instruction - follow it
+            user_message = f"""User instruction: "{user_instruction}"
 
 Files to organize ({len(files)} total):
 {file_summary}
 
-CRITICAL - FRESH ORGANIZATION:
-- This is a NEW organization request - ignore any existing folder structure
-- Treat ALL files as if starting fresh from a flat list
-- Organize ALL {len(files)} files according to the user's instruction
+CRITICAL RULES:
+- FOLLOW the user's instruction for organizing these files
 - If user says "move all files to X", put ALL files in folder "X"
-- If user specifies a structure, follow it and put remaining files in appropriate folders
-- NEVER return empty folders - always include all files
+- If user specifies a structure, follow it exactly
+- For any files NOT covered by the instruction, organize them logically by type or topic
+- You MUST include EVERY file_id in your response ({len(files)} total)
 - Every file_id must appear exactly once in your response
+- NEVER return empty folders
+
+Propose an organization plan. Return JSON only."""
+        else:
+            # No instruction provided - let AI decide the best organization
+            user_message = f"""Analyze these files and organize them in the SMARTEST way possible.
+
+Files to organize ({len(files)} total):
+{file_summary}
+
+ANALYZE THE FILES and choose the BEST organization approach:
+- If files seem related to different PROJECTS → organize by project name
+- If files seem related to different CLIENTS/PEOPLE → organize by client/person
+- If files seem related to different TOPICS/SUBJECTS → organize by topic
+- If files seem related to different EVENTS/DATES → organize by event
+- If files are just random mixed types → organize by file type (photos, videos, docs, etc.)
+
+CRITICAL RULES:
+- LOOK at the file names and tags to understand what they are about
+- Choose folder names that MAKE SENSE for these specific files
+- Use CLEAR, DESCRIPTIVE folder names (not generic like "folder1")
+- DO NOT put all files in a single folder - create a logical structure
+- You MUST include EVERY file_id in your response ({len(files)} total)
+- Each file_id must appear in exactly ONE folder
+- Create 2-5 folders depending on how the files naturally group
 
 Propose an organization plan. Return JSON only."""
 

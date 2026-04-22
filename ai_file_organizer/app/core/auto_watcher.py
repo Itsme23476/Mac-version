@@ -719,26 +719,42 @@ class AutoOrganizeWatcher(QObject):
         return instruction
     
     def _organize_existing_files(self) -> None:
-        """Organize files already in the watched folders (including subfolders)."""
-        all_files = []
+        """Organize files already in the watched folders (including subfolders).
         
+        Note: Folders with action=3 (Organize New Only) are SKIPPED entirely.
+        Those folders should only organize NEW files that appear in the root,
+        not existing files.
+        """
+        from app.core.settings import settings
+        
+        all_files = []
+
         for folder in self.watched_folders:
             folder = os.path.normpath(folder)
             if not os.path.isdir(folder):
                 continue
+
+            # Check the action for this folder
+            folder_action = settings.get_auto_organize_action(folder)
             
+            # SKIP folders with action=3 (Organize New Only)
+            # These folders should only organize NEW files, not existing ones
+            if folder_action == 3:
+                logger.info(f"Skipping existing files in {folder} (Organize New Only mode)")
+                continue
+
             # Get ALL files in this folder AND subfolders
             for root, dirs, files in os.walk(folder):
                 # Skip hidden directories
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
-                
+
                 for item in files:
                     item_path = os.path.join(root, item)
-                    
+
                     # Check with full path so pinned files are properly detected
                     if self._should_ignore(item_path):
                         continue
-                    
+
                     # Check catch-up filter
                     if self.catch_up_since:
                         try:
@@ -747,7 +763,7 @@ class AutoOrganizeWatcher(QObject):
                                 continue  # Skip files older than catch-up time
                         except Exception:
                             pass
-                    
+
                     all_files.append((item_path, folder))
         
         if not all_files:
