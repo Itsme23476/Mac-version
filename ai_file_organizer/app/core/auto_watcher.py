@@ -655,8 +655,19 @@ class AutoOrganizeWatcher(QObject):
                 continue
             
             try:
-                # Check if folder is empty (no files or subdirs)
-                if not os.listdir(dirpath):
+                # Check if folder is empty (ignoring macOS system files)
+                # .DS_Store = Finder metadata, .localized = localized folder names
+                contents = [f for f in os.listdir(dirpath) if f not in {'.DS_Store', '.localized'}]
+                if not contents:
+                    # Delete any remaining system files first
+                    for sys_file in ['.DS_Store', '.localized']:
+                        sys_path = os.path.join(dirpath, sys_file)
+                        if os.path.exists(sys_path):
+                            try:
+                                os.remove(sys_path)
+                            except OSError:
+                                pass  # Ignore if can't delete system file
+                    # Now remove the empty folder
                     os.rmdir(dirpath)
                     removed_count += 1
                     logger.info(f"Removed empty folder: {dirpath}")
