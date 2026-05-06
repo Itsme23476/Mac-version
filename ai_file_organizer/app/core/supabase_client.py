@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 # Supabase configuration
 SUPABASE_URL = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdzdmNjeGhkZ2NzaGl3Z2p2Z2ZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjczOTY2NTIsImV4cCI6MjA4Mjk3MjY1Mn0.Sbb6YJjlQ_ig2LCcs9zz_Be1kU-iIHBx4Vu4nzCPyTM"
-SIGNUP_SUCCESS_REDIRECT_URL = "https://www.softwaregentofficial.com/signup-success"
-RESET_PASSWORD_REDIRECT_URL = "https://www.softwaregentofficial.com/secret-reset-password"
+SIGNUP_SUCCESS_REDIRECT_URL = "https://filect.io/signup-success"
+RESET_PASSWORD_REDIRECT_URL = "https://filect.io/secret-reset-password"
 
 # Stripe configuration - Pricing Plans
 STRIPE_PRICE_ID_STARTER = "price_1SeEv5BATYQXewwiQ5XO32PD"  # Starter plan
