@@ -37,13 +37,14 @@ CRITICAL: FOLLOW USER INSTRUCTIONS LITERALLY
 - Do NOT create additional folders beyond what the user requested
 
 FRESH START ON EVERY REQUEST:
-- Each instruction is a NEW organization request - ignore any existing folder structure
-- Files may currently be in subfolders - IGNORE their current location
-- Treat ALL files as if they are in a flat list, ready to be organized from scratch
+- Each instruction is a NEW organization request
+- Files may currently be in subfolders - their current folder is shown in the "folder" field
+- Use the current folder information when the user asks to preserve specific folders
 
 FILE INFORMATION PROVIDED:
 - id: unique file identifier (use this in your response)
-- name: the filename (may include path like "subfolder/file.txt" - IGNORE the path, use only the filename)
+- name: the filename
+- folder: the current subfolder the file lives in (or "." if at the root level)
 - ext: the FILE EXTENSION (e.g., .mp4, .json, .png, .pdf)
 - label/tags/caption: AI-generated descriptions
 
@@ -53,10 +54,17 @@ STRICT RULES:
 
 2. folder-name: use EXACTLY what the user specifies, or lowercase kebab-case if organizing by type
 3. Use ONLY file_ids from the provided list - NEVER invent IDs
-4. EVERY file_id must appear in exactly ONE folder
+4. By default, EVERY file_id must appear in exactly ONE folder — UNLESS the user asks to preserve specific folders (see below)
 5. Maximum 2 folder levels
 6. Do NOT rename files - only organize into folders
 7. NEVER return empty folders - every folder must have at least one file
+
+PRESERVE INSTRUCTIONS (e.g., "keep X as is", "preserve folder X", "don't touch X", "leave X alone"):
+- Files inside the named folder must be OMITTED from the plan entirely — do NOT include their file_ids
+- Omitted files are left exactly where they are on disk — this is how preservation works
+- You can identify which files belong to a folder using the "folder" field
+- Example: "organize everything but preserve Work Projects" → include all files EXCEPT those with folder:"Work Projects"
+- Only omit files for folders the user explicitly names — organize everything else normally
 
 INSTRUCTION INTERPRETATION:
 
@@ -129,19 +137,19 @@ def build_file_summary(files: List[Dict[str, Any]], max_files: int = 300) -> str
         label = f.get('label', '') or ''
         caption = (f.get('caption', '') or '')[:80]
         tags = f.get('tags', []) or []
-        
+        subfolder = f.get('subfolder', '.') or '.'
+
         # Extract file extension for accurate type matching
         ext = ''
         if '.' in name:
             ext = name[name.rfind('.'):].lower()
-        
+
         # Add inferred hints from filename patterns
         hints = _infer_file_type_hints(name)
         all_tags = list(tags[:8]) + hints
         tags_str = ', '.join(all_tags) if all_tags else ''
-        
-        # Include extension prominently so AI can match file types
-        line = f"id:{fid} | {name} | ext:{ext} | label:{label} | tags:[{tags_str}]"
+
+        line = f"id:{fid} | {name} | folder:{subfolder} | ext:{ext} | label:{label} | tags:[{tags_str}]"
         if caption:
             line += f" | caption:{caption}"
         lines.append(line)
