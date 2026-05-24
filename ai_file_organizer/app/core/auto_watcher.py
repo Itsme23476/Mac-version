@@ -609,11 +609,13 @@ class AutoOrganizeWatcher(QObject):
         # Move files to root, handling name conflicts
         from app.core.settings import settings
         
+        from app.core.database import file_index
+
         for file_path in files_to_move:
             try:
                 file_name = os.path.basename(file_path)
                 dest_path = os.path.join(folder_path, file_name)
-                
+
                 # Handle name conflicts by adding (1), (2), etc.
                 if os.path.exists(dest_path):
                     base, ext = os.path.splitext(file_name)
@@ -621,14 +623,22 @@ class AutoOrganizeWatcher(QObject):
                     while os.path.exists(dest_path):
                         dest_path = os.path.join(folder_path, f"{base} ({counter}){ext}")
                         counter += 1
-                
+
                 shutil.move(file_path, dest_path)
                 moved_count += 1
                 logger.info(f"Flattened: {file_path} -> {dest_path}")
-                
+
                 # Update pinned path if this file was pinned
                 settings.update_pinned_path_if_moved(file_path, dest_path)
-                
+
+                # Update database so paths stay current after flatten
+                try:
+                    record = file_index.get_file_by_path(file_path)
+                    if record:
+                        file_index.update_file_path(record['id'], dest_path)
+                except Exception:
+                    pass
+
             except Exception as e:
                 logger.error(f"Error flattening {file_path}: {e}")
                 self.error_occurred.emit(file_path, str(e))

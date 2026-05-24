@@ -7594,15 +7594,38 @@ Caption: {file_info.get('caption', 'none')}
         if not dialog.exec():
             return
         
-        # Final safety check: filter out any excluded files before moving
+        # Pause auto-watcher for the duration of apply to prevent race conditions
+        # where the watcher moves files between plan generation and apply.
+        watcher_was_running = self.auto_watcher and self.auto_watcher.is_running
+        if watcher_was_running:
+            self.auto_watcher.stop()
+            logger.info("Auto-watcher paused during manual organize apply")
+
+        # Final safety check: filter out excluded files and re-verify source paths.
+        # Re-verifying here (not just at plan time) catches files moved by the
+        # watcher or other processes while the user was reviewing the plan.
         filtered_moves = []
         excluded_count = 0
+        already_done_count = 0
         for m in self.current_moves:
             if settings.should_exclude(m["source_path"]):
                 excluded_count += 1
                 logger.info(f"Skipping excluded file in apply: {m['file_name']}")
-            else:
-                filtered_moves.append(m)
+                continue
+            source = Path(m["source_path"])
+            dest = Path(m["destination_path"])
+            if not source.exists():
+                if dest.exists():
+                    # File already reached its destination (watcher moved it) — count as done
+                    already_done_count += 1
+                    logger.info(f"Already at destination, skipping: {m['file_name']}")
+                else:
+                    logger.warning(f"Source gone and dest missing, skipping: {m['file_name']}")
+                continue
+            filtered_moves.append(m)
+
+        if already_done_count:
+            logger.info(f"{already_done_count} file(s) already at destination — skipped")
         
         if excluded_count > 0:
             logger.info(f"Excluded {excluded_count} files from final move (matched exclusion patterns)")
@@ -7633,7 +7656,12 @@ Caption: {file_info.get('caption', 'none')}
         self.status_label.setText("Moving files...")
         
         success, errors, log_file, renamed_count = apply_moves(move_plan)
-        
+
+        # Resume watcher now that moves are complete
+        if watcher_was_running:
+            self.auto_watcher.start(organize_existing=False)
+            logger.info("Auto-watcher resumed after manual organize apply")
+
         self.progress_bar.setVisible(False)
         self.generate_button.setEnabled(True)
         
