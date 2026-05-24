@@ -22,6 +22,8 @@ else:
 # Add the project root to Python path for consistent imports
 sys.path.insert(0, str(project_root))
 
+from urllib.parse import urlparse, parse_qs
+
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QIcon, QFileOpenEvent
@@ -38,17 +40,53 @@ class FilectApplication(QApplication):
     def __init__(self, argv):
         super().__init__(argv)
         self._main_window = None
+        self._auth_dialog = None
 
     def set_main_window(self, window):
         self._main_window = window
 
+    def set_auth_dialog(self, dialog):
+        self._auth_dialog = dialog
+
     def event(self, event):
         if event.type() == QEvent.FileOpen:
             url = event.url().toString()
-            if url.startswith('filect://') and self._main_window:
+            if url.startswith('filect://verify'):
+                self._handle_verify(url)
+            elif url.startswith('filect://'):
                 self._bring_to_front()
             return True
         return super().event(event)
+
+    def _handle_verify(self, url):
+        """Verify email token from filect://verify?token_hash=...&type=signup deep link."""
+        params = parse_qs(urlparse(url).query)
+        token_hash = params.get('token_hash', [None])[0]
+
+        if not token_hash:
+            logger.warning("filect://verify received with no token_hash")
+            return
+
+        logger.info("Verifying email token from deep link")
+        result = supabase_auth.verify_email_token(token_hash)
+
+        if result.get('success'):
+            # Persist the session so the user stays logged in
+            tokens = supabase_auth.get_session_tokens()
+            if tokens:
+                settings.set_auth_tokens(
+                    tokens['access_token'],
+                    tokens['refresh_token'],
+                    supabase_auth.user_email or ''
+                )
+            # If auth dialog is still open, run subscription check — it will
+            # close the dialog and show the main window (or subscribe page)
+            if self._auth_dialog and self._auth_dialog.isVisible():
+                self._auth_dialog._check_subscription_silent()
+            else:
+                self._bring_to_front()
+        else:
+            logger.error(f"Email verification failed: {result.get('error')}")
 
     def _bring_to_front(self):
         if not self._main_window:
@@ -147,6 +185,7 @@ def main():
     if not has_valid_session:
         # Show auth dialog
         auth_dialog = AuthDialog()
+        app.set_auth_dialog(auth_dialog)
         auth_result = auth_dialog.exec()
         
         # If dialog was rejected (closed without auth), exit
