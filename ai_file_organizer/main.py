@@ -23,13 +23,45 @@ else:
 sys.path.insert(0, str(project_root))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtGui import QIcon, QFileOpenEvent
 from app.ui.main_window import MainWindow
 from app.ui.auth_dialog import AuthDialog
 from app.core.logging_config import setup_logging
 from app.core.supabase_client import supabase_auth, SUPABASE_AVAILABLE
 from app.core.settings import settings
+
+
+class FilectApplication(QApplication):
+    """QApplication subclass that handles filect:// deep links on macOS."""
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self._main_window = None
+
+    def set_main_window(self, window):
+        self._main_window = window
+
+    def event(self, event):
+        if event.type() == QEvent.FileOpen:
+            url = event.url().toString()
+            if url.startswith('filect://') and self._main_window:
+                self._bring_to_front()
+            return True
+        return super().event(event)
+
+    def _bring_to_front(self):
+        if not self._main_window:
+            return
+        self._main_window.show()
+        self._main_window.raise_()
+        self._main_window.activateWindow()
+        if sys.platform == 'darwin':
+            try:
+                from AppKit import NSApp
+                NSApp.activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
 
 
 def check_existing_session():
@@ -79,8 +111,8 @@ def main():
         except Exception as e:
             print(f"macOS: Error setting activation policy: {e}")
     
-    # Create Qt application
-    app = QApplication(sys.argv)
+    # Create Qt application (FilectApplication handles filect:// deep links on macOS)
+    app = FilectApplication(sys.argv)
     app.setApplicationName("Filect")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("Filect")
@@ -125,6 +157,7 @@ def main():
     
     # Create and show main window
     window = MainWindow()
+    app.set_main_window(window)  # register for filect:// deep link handling
     window.show()
     
     # Start event loop
