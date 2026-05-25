@@ -727,6 +727,17 @@ class AutoOrganizeWatcher(QObject):
         instruction = self.folder_instructions.get(folder_path, '')
         logger.debug(f"Instruction for {folder_path}: {instruction[:50] if instruction else '(none)'}")
         return instruction
+
+    def _get_existing_folders_if_as_is(self, folder_path: str) -> list:
+        """Return existing subfolders if folder is in ORGANIZE_AS_IS mode, else None."""
+        from app.core.settings import settings
+        ORGANIZE_AS_IS = 2
+        if settings.get_auto_organize_action(folder_path) == ORGANIZE_AS_IS:
+            return [
+                item for item in os.listdir(folder_path)
+                if os.path.isdir(os.path.join(folder_path, item)) and not item.startswith('.')
+            ]
+        return None
     
     def _organize_existing_files(self) -> None:
         """Organize files already in the watched folders (including subfolders).
@@ -789,9 +800,19 @@ class AutoOrganizeWatcher(QObject):
             files_by_folder[folder].append(file_path)
         
         # Process each folder with its instruction
+        ORGANIZE_AS_IS = 2
         for folder, files in files_by_folder.items():
             instruction = self._get_instruction_for_folder(folder)
-            self._process_files_with_ai(files, folder, instruction)
+            # For ORGANIZE_AS_IS mode, restrict AI to existing subfolders only
+            folder_action = settings.get_auto_organize_action(folder)
+            existing_folders = None
+            if folder_action == ORGANIZE_AS_IS:
+                existing_folders = [
+                    item for item in os.listdir(folder)
+                    if os.path.isdir(os.path.join(folder, item)) and not item.startswith('.')
+                ]
+                logger.info(f"Organize As-Is: restricting to existing folders: {existing_folders}")
+            self._process_files_with_ai(files, folder, instruction, existing_folders)
     
     def _organize_existing_files_with_options(self, flatten_first: bool = False) -> None:
         """
@@ -1047,7 +1068,8 @@ class AutoOrganizeWatcher(QObject):
                         if current_time - first_seen >= self._debounce_seconds:
                             # File is stable, process it
                             instruction = self._get_instruction_for_folder(folder)
-                            self._process_files_with_ai([item_path], folder, instruction)
+                            existing_folders = self._get_existing_folders_if_as_is(folder)
+                            self._process_files_with_ai([item_path], folder, instruction, existing_folders)
                             self._pending_files.pop(item_path, None)
                             
             except Exception as e:
@@ -1142,7 +1164,8 @@ class AutoOrganizeWatcher(QObject):
                 if files and self._is_running:
                     logger.info(f"[FullScan] Queuing {len(files)} unindexed files from {os.path.basename(folder)}")
                     instruction = self._get_instruction_for_folder(folder)
-                    self._process_files_with_ai(files, folder, instruction)
+                    existing_folders = self._get_existing_folders_if_as_is(folder)
+                    self._process_files_with_ai(files, folder, instruction, existing_folders)
         else:
             logger.info("[FullScan] All files are indexed")
     
