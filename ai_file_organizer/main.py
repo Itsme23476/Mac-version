@@ -67,6 +67,7 @@ class FilectApplication(QApplication):
         # unsubscribed user lands directly on checkout.
         if self._auth_dialog:
             try:
+                self.set_normal_focus_mode(True)
                 self._auth_dialog.show()
                 self._auth_dialog.raise_()
                 self._auth_dialog.activateWindow()
@@ -103,6 +104,29 @@ class FilectApplication(QApplication):
                 self._bring_to_front()
         else:
             logger.error(f"Email verification failed: {result.get('error')}")
+
+    def set_normal_focus_mode(self, enabled: bool):
+        """Toggle between Regular and Accessory activation policy on macOS.
+
+        As an agent (Accessory) app, focusable windows like the login dialog
+        don't release focus cleanly when the user clicks another app. Switching
+        to Regular while such a window is shown restores normal focus behavior;
+        we switch back to Accessory afterwards so the app stays a menu-bar agent.
+        """
+        if sys.platform != 'darwin':
+            return
+        try:
+            from AppKit import (
+                NSApp,
+                NSApplicationActivationPolicyRegular,
+                NSApplicationActivationPolicyAccessory,
+            )
+            NSApp.setActivationPolicy_(
+                NSApplicationActivationPolicyRegular if enabled
+                else NSApplicationActivationPolicyAccessory
+            )
+        except Exception as e:
+            logger.warning(f"Could not change activation policy: {e}")
 
     def _bring_to_front(self):
         if not self._main_window:
@@ -199,10 +223,14 @@ def main():
     has_valid_session = check_existing_session()
     
     if not has_valid_session:
-        # Show auth dialog
+        # Show auth dialog. Switch to Regular activation policy so the login
+        # window has normal focus (releases when clicking other apps), then
+        # restore the Accessory/agent policy once the dialog is done.
         auth_dialog = AuthDialog()
         app.set_auth_dialog(auth_dialog)
+        app.set_normal_focus_mode(True)
         auth_result = auth_dialog.exec()
+        app.set_normal_focus_mode(False)
         
         # If dialog was rejected (closed without auth), exit
         if auth_result == 0:  # QDialog.Rejected
