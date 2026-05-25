@@ -53,10 +53,26 @@ class FilectApplication(QApplication):
             url = event.url().toString()
             if url.startswith('filect://verify'):
                 self._handle_verify(url)
+            elif url.startswith('filect://subscribe'):
+                self._handle_subscribe()
             elif url.startswith('filect://'):
                 self._bring_to_front()
             return True
         return super().event(event)
+
+    def _handle_subscribe(self):
+        """Bring the app forward and show the subscribe page (from a recovery email link)."""
+        self._bring_to_front()
+        # If the auth dialog is available, route it to the subscribe page so an
+        # unsubscribed user lands directly on checkout.
+        if self._auth_dialog:
+            try:
+                self._auth_dialog.show()
+                self._auth_dialog.raise_()
+                self._auth_dialog.activateWindow()
+                self._auth_dialog._show_subscribe_page()
+            except Exception as e:
+                logger.warning(f"Could not show subscribe page from deep link: {e}")
 
     def _handle_verify(self, url):
         """Verify email token from filect://verify?token_hash=...&type=signup deep link."""
