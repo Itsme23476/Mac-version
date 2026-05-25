@@ -79,7 +79,29 @@ class AutoWatcherWorker(QThread):
         
         # No good match found
         return None
-    
+
+    def _best_existing_folder_for_name(self, ai_folder: str) -> str:
+        """Pick the best existing folder to absorb files the AI assigned to a
+        non-existing folder. Prefers a catch-all folder, otherwise the existing
+        folder whose name is most similar to the AI's suggested name.
+        """
+        import difflib
+        # Prefer a catch-all style folder if one exists
+        catchall_keywords = ['everything', 'other', 'misc', 'general', 'rest', 'else']
+        for f in self.existing_folders:
+            if any(k in f.lower() for k in catchall_keywords):
+                return f
+        # Otherwise pick the most similar existing folder name
+        ai_lower = ai_folder.lower().strip()
+        best_folder = self.existing_folders[0]
+        best_score = 0.0
+        for f in self.existing_folders:
+            score = difflib.SequenceMatcher(None, ai_lower, f.lower()).ratio()
+            if score > best_score:
+                best_score = score
+                best_folder = f
+        return best_folder
+
     def run(self):
         """Process files in background thread."""
         # Track all files we process (for marking as organized)
@@ -265,13 +287,10 @@ class AutoWatcherWorker(QThread):
                         else:
                             filtered_folders[matched_folder] = valid_ids
                     else:
-                        # No match - redirect to best existing folder rather than leaving files in place
-                        # Prefer a catch-all style folder if one exists, otherwise use the first
-                        catchall_keywords = ['everything', 'other', 'misc', 'general', 'rest', 'else']
-                        fallback = next(
-                            (f for f in self.existing_folders if any(k in f.lower() for k in catchall_keywords)),
-                            next(iter(self.existing_folders))
-                        )
+                        # No match - redirect to best existing folder rather than leaving files in place.
+                        # Prefer a catch-all style folder; otherwise pick the existing folder whose
+                        # name is most similar to the folder the AI suggested.
+                        fallback = self._best_existing_folder_for_name(folder_name)
                         logger.info(f"[Worker] No match for '{folder_name}' - redirecting {len(valid_ids)} file(s) to '{fallback}'")
                         if fallback in filtered_folders:
                             filtered_folders[fallback].extend(valid_ids)
@@ -656,21 +675,31 @@ class AutoOrganizeWatcher(QObject):
         logger.info(f"Flattened {moved_count} files in {folder_path}")
         return moved_count
     
-    def _cleanup_empty_folders(self, root_folder: str) -> int:
-        """Remove empty subdirectories. Returns count of removed folders."""
+    def _cleanup_empty_folders(self, root_folder: str, protected_names: set = None) -> int:
+        """Remove empty subdirectories. Returns count of removed folders.
+
+        Folders whose name is in protected_names (case-insensitive) are never
+        deleted, even when empty — these are folders the user named in their
+        instruction.
+        """
         removed_count = 0
         root_folder = os.path.normpath(root_folder)
-        
+        protected = {n.lower() for n in (protected_names or set())}
+
         # Walk bottom-up to remove nested empty folders
         for dirpath, dirnames, filenames in os.walk(root_folder, topdown=False):
             # Skip the root folder itself (normalize for comparison)
             if os.path.normpath(dirpath) == root_folder:
                 continue
-            
+
             # Skip hidden folders
             if os.path.basename(dirpath).startswith('.'):
                 continue
-            
+
+            # Skip folders the user explicitly named in their instruction
+            if os.path.basename(dirpath).lower() in protected:
+                continue
+
             try:
                 # Check if folder is empty (ignoring macOS system files)
                 # .DS_Store = Finder metadata, .localized = localized folder names
@@ -734,6 +763,62 @@ class AutoOrganizeWatcher(QObject):
         instruction = self.folder_instructions.get(folder_path, '')
         logger.debug(f"Instruction for {folder_path}: {instruction[:50] if instruction else '(none)'}")
         return instruction
+
+    def _extract_named_folders(self, instruction: str) -> List[str]:
+        """Extract folder names the user explicitly named in their instruction.
+
+        Relies on the reliable "called X" / "named X" phrasing. The capture
+        stops at conjunctions/prepositions (and, except, where, to, ...) so
+        names like "everything else" are kept whole without bleeding into the
+        rest of the sentence.
+        """
+        if not instruction:
+            return []
+        import re
+        names = []
+        seen = set()
+        stopwords = {'a', 'an', 'the', 'it', 'them', 'this', 'that'}
+
+        pattern = (
+            r'(?:called|named)\s+["\']?([A-Za-z0-9][\w \-]*?)["\']?'
+            r'(?=\s+(?:and|except|where|to|in|on|into|onto|or|but|then)\b|["\',.\n]|$)'
+        )
+        for m in re.finditer(pattern, instruction, flags=re.IGNORECASE):
+            name = m.group(1).strip().strip('"\'').strip()
+            key = name.lower()
+            if not name or key in seen or key in stopwords or len(name) > 60:
+                continue
+            if 'folder' in key or ' move ' in key:
+                continue
+            seen.add(key)
+            names.append(name)
+        return names
+
+    def _ensure_named_folders_exist(self, folder_path: str, instruction: str) -> None:
+        """Create folders the user named in their instruction if they don't exist.
+
+        Uses a case-insensitive check against current subfolders so existing
+        folders are never duplicated.
+        """
+        named = self._extract_named_folders(instruction)
+        if not named:
+            return
+        try:
+            existing_lower = {
+                item.lower() for item in os.listdir(folder_path)
+                if os.path.isdir(os.path.join(folder_path, item))
+            }
+        except OSError:
+            existing_lower = set()
+        for name in named:
+            if name.lower() in existing_lower:
+                continue
+            try:
+                os.makedirs(os.path.join(folder_path, name), exist_ok=True)
+                logger.info(f"Created user-specified folder: {name}")
+                existing_lower.add(name.lower())
+            except OSError as e:
+                logger.warning(f"Could not create folder '{name}': {e}")
 
     def _get_existing_folders_if_as_is(self, folder_path: str) -> list:
         """Return existing subfolders if folder is in ORGANIZE_AS_IS mode, else None."""
@@ -810,6 +895,8 @@ class AutoOrganizeWatcher(QObject):
         ORGANIZE_AS_IS = 2
         for folder, files in files_by_folder.items():
             instruction = self._get_instruction_for_folder(folder)
+            # Ensure folders the user named in their instruction exist up front
+            self._ensure_named_folders_exist(folder, instruction)
             # For ORGANIZE_AS_IS mode, restrict AI to existing subfolders only
             folder_action = settings.get_auto_organize_action(folder)
             existing_folders = None
@@ -1011,7 +1098,15 @@ class AutoOrganizeWatcher(QObject):
         
         # Process files with AI
         instruction = self._get_instruction_for_folder(folder_path)
+        # Ensure folders the user named in their instruction exist up front
+        self._ensure_named_folders_exist(folder_path, instruction)
         use_existing_only = not flatten_first  # Organize As-Is = only use existing folders
+        if use_existing_only:
+            # Re-read existing folders so freshly-created named folders are included
+            existing_folders = [
+                item for item in os.listdir(folder_path)
+                if os.path.isdir(os.path.join(folder_path, item)) and not item.startswith('.')
+            ]
         self._process_files_with_ai(all_files, folder_path, instruction, existing_folders if use_existing_only else None)
     
     def _check_for_new_files(self) -> None:
@@ -1028,7 +1123,8 @@ class AutoOrganizeWatcher(QObject):
             for folder in self.watched_folders:
                 folder = os.path.normpath(folder)
                 if os.path.isdir(folder):
-                    deleted = self._cleanup_empty_folders(folder)
+                    protected = set(self._extract_named_folders(self._get_instruction_for_folder(folder)))
+                    deleted = self._cleanup_empty_folders(folder, protected)
                     if deleted > 0:
                         logger.info(f"Periodic cleanup: removed {deleted} empty folder(s)")
         
