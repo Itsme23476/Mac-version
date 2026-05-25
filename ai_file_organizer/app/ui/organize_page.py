@@ -4811,6 +4811,11 @@ class WatchConfigDialog(QDialog):
             # Apply actions regardless of whether watcher is currently running
             parent = self.parent()
             if parent and hasattr(parent, 'auto_watcher') and parent.auto_watcher:
+                # Sync folder_instructions in memory before calling organize_single_folder
+                # so _get_instruction_for_folder picks up the new instruction immediately
+                for path, instruction in self.folder_data.items():
+                    parent.auto_watcher.folder_instructions[os.path.normpath(path)] = instruction
+
                 for folder_path, action in folders_to_apply:
                     logger.info(f"Applying action {action} to folder: {folder_path}")
                     if action == ApplyInstructionsDialogSingleFolder.REORGANIZE_ALL:

@@ -214,11 +214,11 @@ Files to organize ({len(files)} total):
 {file_summary}
 
 CRITICAL RULES:
-- FOLLOW the user's specific instructions for files they mentioned
-- For ALL OTHER files, organize them logically by file type (photos, videos, docs, etc.)
+- FOLLOW the user's specific instructions EXACTLY
+- ONLY create folders that the user explicitly mentioned - do NOT invent additional folders
+- For any file not clearly covered by the instruction, place it in whichever user-specified folder is the closest match
 - You MUST include EVERY file_id in your response
 - Each file_id must appear in exactly ONE folder
-- Use clear folder names: 'photos', 'images', 'videos', 'documents', 'audio', 'misc'
 - Total files in your response must equal {len(files)}
 
 Propose an organization plan. Return JSON only."""
@@ -517,8 +517,8 @@ def ensure_all_files_included(plan: Dict[str, Any], all_file_ids: set, files_inf
     if not missing_ids:
         return plan  # All files are included
     
-    logger.warning(f"AI plan missing {len(missing_ids)} file(s). Adding them to 'misc' folder.")
-    
+    logger.warning(f"AI plan missing {len(missing_ids)} file(s). Adding them to existing folder.")
+
     # Log which files are missing for debugging
     if files_info:
         missing_names = []
@@ -530,26 +530,20 @@ def ensure_all_files_included(plan: Dict[str, Any], all_file_ids: set, files_inf
                 pass
         if missing_names:
             logger.info(f"Missing files: {', '.join(missing_names[:10])}")
-    
-    # Add missing files to 'misc' folder
+
     folders = plan.get("folders", {})
-    
-    # Use 'misc' if it exists, otherwise create it
-    misc_folder = None
-    for name in ['misc', 'other', 'unsorted']:
-        if name in folders:
-            misc_folder = name
-            break
-    
-    if misc_folder is None:
-        misc_folder = 'misc'
-        folders[misc_folder] = []
-    
-    # Add missing IDs to misc folder
-    for missing_id in missing_ids:
-        folders[misc_folder].append(missing_id)
-    
-    logger.info(f"Added {len(missing_ids)} missing file(s) to '{misc_folder}' folder")
+
+    # If there are already folders in the plan, put missing files in the first one
+    # rather than inventing a generic 'misc' folder
+    if folders:
+        fallback_folder = next(iter(folders))
+        for missing_id in missing_ids:
+            folders[fallback_folder].append(missing_id)
+        logger.info(f"Added {len(missing_ids)} missing file(s) to '{fallback_folder}' folder")
+    else:
+        # No folders at all — create a misc as last resort
+        folders['misc'] = list(missing_ids)
+        logger.info(f"Added {len(missing_ids)} missing file(s) to 'misc' folder (no existing folders)")
     
     return {"folders": folders}
 

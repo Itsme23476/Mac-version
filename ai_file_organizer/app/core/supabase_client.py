@@ -271,6 +271,35 @@ class SupabaseAuth:
                 'refresh_token': self._session.get('refresh_token', '')
             }
         return None
+
+    def refresh_session(self) -> bool:
+        """Refresh the access token using the stored refresh token. Returns True on success."""
+        if not self._auth_client or not self._session:
+            return False
+        refresh_token = self._session.get('refresh_token')
+        if not refresh_token:
+            return False
+        try:
+            response = self._auth_client.refresh_session(refresh_token)
+            if response.user and response.session:
+                self._user = self._extract_user_dict(response.user)
+                self._session = self._extract_session_dict(response.session)
+                self._access_token = self._session.get('access_token')
+                logger.info("Session token refreshed successfully")
+                # Persist the new tokens so next startup doesn't use stale ones
+                try:
+                    from app.core.settings import settings
+                    settings.set_auth_tokens(
+                        self._session.get('access_token', ''),
+                        self._session.get('refresh_token', ''),
+                        self._user.get('email', '') if self._user else ''
+                    )
+                except Exception:
+                    pass
+                return True
+        except Exception as e:
+            logger.error(f"Session refresh failed: {e}")
+        return False
     
     def check_subscription(self) -> Dict[str, Any]:
         """

@@ -84,7 +84,18 @@ def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 50
         response = requests.post(OPENAI_PROXY_URL, json=payload, headers=headers, timeout=120)
         
         if response.status_code == 401:
-            logger.error("OpenAI proxy: Authentication failed (401)")
+            logger.warning("OpenAI proxy: 401 - attempting token refresh and retry")
+            from .supabase_client import supabase_auth
+            if supabase_auth.refresh_session():
+                auth_token = _get_auth_token()
+                if auth_token:
+                    headers["Authorization"] = f"Bearer {auth_token}"
+                    response = requests.post(OPENAI_PROXY_URL, json=payload, headers=headers, timeout=120)
+                    if response.status_code == 200:
+                        data = response.json()
+                        logger.info("OpenAI proxy call successful after token refresh")
+                        return data
+            logger.error("OpenAI proxy: Authentication failed (401) even after token refresh")
             return None
         elif response.status_code == 403:
             logger.error("OpenAI proxy: No active subscription (403)")

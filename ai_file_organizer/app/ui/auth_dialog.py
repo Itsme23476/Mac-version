@@ -938,9 +938,17 @@ class AuthDialog(QDialog):
                 settings.auth_access_token,
                 settings.auth_refresh_token
             )
-            
+
             if result.get('success'):
                 logger.info("Session restored successfully")
+                # Save the new tokens Supabase issued so next startup uses fresh ones
+                tokens = supabase_auth.get_session_tokens()
+                if tokens:
+                    settings.set_auth_tokens(
+                        tokens['access_token'],
+                        tokens['refresh_token'],
+                        settings.auth_user_email
+                    )
                 self._check_subscription_silent()
             else:
                 settings.clear_auth_tokens()

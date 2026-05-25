@@ -265,15 +265,22 @@ class AutoWatcherWorker(QThread):
                         else:
                             filtered_folders[matched_folder] = valid_ids
                     else:
-                        # No match - don't create new folder, skip these files
-                        skipped_folders.append(folder_name)
-                        logger.info(f"[Worker] Skipping folder '{folder_name}' - not in existing folders, files will stay in place")
+                        # No match - redirect to best existing folder rather than leaving files in place
+                        # Prefer a catch-all style folder if one exists, otherwise use the first
+                        catchall_keywords = ['everything', 'other', 'misc', 'general', 'rest', 'else']
+                        fallback = next(
+                            (f for f in self.existing_folders if any(k in f.lower() for k in catchall_keywords)),
+                            next(iter(self.existing_folders))
+                        )
+                        logger.info(f"[Worker] No match for '{folder_name}' - redirecting {len(valid_ids)} file(s) to '{fallback}'")
+                        if fallback in filtered_folders:
+                            filtered_folders[fallback].extend(valid_ids)
+                        else:
+                            filtered_folders[fallback] = list(valid_ids)
                 else:
                     # Normal mode - use folder as-is
                     filtered_folders[folder_name] = valid_ids
             
-            if skipped_folders:
-                logger.info(f"[Worker] Skipped {len(skipped_folders)} non-existing folders: {skipped_folders}")
             
             logger.info(f"[Worker] Filtered plan has {sum(len(ids) for ids in filtered_folders.values())} files in {len(filtered_folders)} folders")
             
@@ -1208,12 +1215,11 @@ class AutoOrganizeWatcher(QObject):
                 f"[AUTO-ORGANIZE] User's specific instructions: {instruction}\n\n"
                 f"PARENT FOLDER NAME: '{parent_folder_name}' - DO NOT create a folder with this name!\n\n"
                 "RULES FOR AUTO-ORGANIZE MODE:\n"
-                "1. FOLLOW the user's specific instructions EXACTLY for any files they mentioned\n"
-                "2. For ALL REMAINING files not covered by user's instructions, organize them logically by file type\n"
-                "3. EVERY file MUST be placed in a folder - NO files left out\n"
-                "4. Use simple, clear folder names (e.g., 'photos', 'docs', 'videos', 'audio', 'misc')\n"
-                f"5. IMPORTANT: Do NOT create a folder named '{parent_folder_name}' - use different names\n"
-                "6. If user says 'screenshots to X' - put screenshots in X, organize everything else by type"
+                "1. FOLLOW the user's specific instructions EXACTLY\n"
+                "2. ONLY create folders that the user explicitly mentioned in their instructions - do NOT invent additional folders\n"
+                "3. EVERY file MUST be placed in one of the folders the user specified - put each file in the closest matching folder\n"
+                f"4. IMPORTANT: Do NOT create a folder named '{parent_folder_name}' - use different names\n"
+                "5. If a file does not clearly match any folder the user mentioned, place it in whichever user-specified folder is the closest match"
             )
         else:
             full_instruction = (
