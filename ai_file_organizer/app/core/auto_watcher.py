@@ -439,6 +439,16 @@ class AutoOrganizeWatcher(QObject):
         
         # Per-folder instructions: {folder_path: instruction_text}
         self.folder_instructions: Dict[str, str] = {}
+
+        # Baseline content hashes captured when watching starts, per folder.
+        # For "Organize New Only" mode: any file whose hash is in this set was
+        # already present when watching began and must never be organized.
+        self._baseline_hashes: Dict[str, set] = {}
+
+        # Normalized paths of files we've decided to leave in place (Organize New
+        # Only mode). Detection scans skip these so we don't keep re-hashing them.
+        # Cleared on watcher start, so switching modes resets the protection.
+        self._left_in_place_paths: Set[str] = set()
         
         # For catch-up mode: only organize files modified after this time
         self.catch_up_since: Optional[datetime] = None
@@ -530,11 +540,19 @@ class AutoOrganizeWatcher(QObject):
         self._is_running = True
         self._processed_files.clear()
         self._pending_files.clear()
-        
+
         folder_count = len(self.watched_folders)
         self.status_changed.emit(f"Starting watch on {folder_count} folder(s)...")
         logger.info(f"Starting watcher for {folder_count} folders")
-        
+
+        # Capture the pre-existing baseline for "Organize New Only" folders BEFORE
+        # any organizing happens, so files already present are never touched.
+        # Clearing here means switching a folder's mode resets the protection.
+        self._baseline_hashes.clear()
+        self._left_in_place_paths.clear()
+        for folder in self.watched_folders:
+            self._capture_baseline(os.path.normpath(folder))
+
         # Flatten folders first if requested (for re-organize)
         if flatten_first:
             total_flattened = 0
@@ -830,7 +848,101 @@ class AutoOrganizeWatcher(QObject):
                 if os.path.isdir(os.path.join(folder_path, item)) and not item.startswith('.')
             ]
         return None
-    
+
+    def _compute_file_hash(self, file_path: str) -> Optional[str]:
+        """SHA-256 of a file's contents (same scheme used during indexing)."""
+        import hashlib
+        try:
+            h = hashlib.sha256()
+            with open(file_path, 'rb') as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception as e:
+            logger.warning(f"Could not hash {file_path}: {e}")
+            return None
+
+    def _capture_baseline(self, folder: str) -> None:
+        """Snapshot the content hashes of every file currently in an
+        ORGANIZE_NEW_ONLY folder. These files were present when watching began,
+        so they are 'pre-existing' and must never be organized — even if the
+        user later moves or renames them.
+
+        Reuses the content hash already stored in the database for indexed files
+        (no disk read); only files without a stored hash are hashed from disk.
+        This keeps the one-time capture fast even for folders with large files.
+        """
+        from app.core.settings import settings
+        from app.core.database import file_index
+        ORGANIZE_NEW_ONLY = 3
+        if settings.get_auto_organize_action(folder) != ORGANIZE_NEW_ONLY:
+            return
+        baseline = set()
+        hashed_from_disk = 0
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for name in files:
+                if name.startswith('.'):
+                    continue
+                path = os.path.join(root, name)
+                # Prefer the hash already stored in the DB (no disk read)
+                record = file_index.get_file_by_path(path)
+                h = record.get('content_hash') if record else None
+                if not h:
+                    h = self._compute_file_hash(path)
+                    if h:
+                        hashed_from_disk += 1
+                if h:
+                    baseline.add(h)
+        self._baseline_hashes[os.path.normpath(folder)] = baseline
+        logger.info(
+            f"[OrganizeNewOnly] Captured baseline of {len(baseline)} existing file(s) "
+            f"for {os.path.basename(folder)} ({hashed_from_disk} hashed from disk)"
+        )
+
+    def _filter_genuinely_new_files(self, folder: str, file_paths: List[str]) -> List[str]:
+        """For ORGANIZE_NEW_ONLY (action=3) folders, keep only files that were
+        added AFTER watching began. A file is left untouched (never organized)
+        if its content hash is either:
+          - in the pre-existing baseline (it was already there when enabled), or
+          - already in the database (a file we've already seen/organized).
+        Either way it's a file the user already had — moving/renaming it leaves
+        it exactly where they put it.
+
+        For all other modes, the list is returned unchanged.
+        """
+        from app.core.settings import settings
+        from app.core.database import file_index
+        ORGANIZE_NEW_ONLY = 3
+        if settings.get_auto_organize_action(folder) != ORGANIZE_NEW_ONLY:
+            return file_paths
+
+        baseline = self._baseline_hashes.get(os.path.normpath(folder), set())
+        genuinely_new = []
+        for path in file_paths:
+            file_hash = self._compute_file_hash(path)
+            is_baseline = bool(file_hash and file_hash in baseline)
+            known = file_index.get_file_by_hash(file_hash) if file_hash else None
+
+            if is_baseline or known:
+                # File the user already had (pre-existing or previously seen) —
+                # leave it exactly where it is. Record its path so the detection
+                # scans skip it and we don't keep re-hashing it every cycle.
+                # Keep the DB path current for already-indexed files (DB hygiene).
+                if known:
+                    old_path = known.get('file_path')
+                    if old_path and os.path.normpath(old_path) != os.path.normpath(path):
+                        file_index.update_file_path(known['id'], path)
+                normalized = os.path.normpath(path).lower()
+                self._left_in_place_paths.add(normalized)
+                self._processed_files.add(path)
+                self._organized_files.add(normalized)
+                reason = 'pre-existing (baseline)' if is_baseline else 'already known (moved)'
+                logger.info(f"[OrganizeNewOnly] '{os.path.basename(path)}' {reason} - leaving in place")
+            else:
+                genuinely_new.append(path)
+        return genuinely_new
+
     def _organize_existing_files(self) -> None:
         """Organize files already in the watched folders (including subfolders).
         
@@ -1145,11 +1257,16 @@ class AutoOrganizeWatcher(QObject):
                     
                     if not os.path.isfile(item_path):
                         continue
-                    
+
                     # Check with full path so pinned files are properly detected
                     if self._should_ignore(item_path):
                         continue
-                    
+
+                    # Organize New Only: a file we've decided to leave in place —
+                    # skip it without re-hashing or re-evaluating.
+                    if normalized_path in self._left_in_place_paths:
+                        continue
+
                     # Skip already processed files ONLY if they're still in the database
                     # If user deleted them from indexing, they should be re-indexed
                     if item_path in self._processed_files:
@@ -1224,6 +1341,9 @@ class AutoOrganizeWatcher(QObject):
                         
                         if self._should_ignore(file_path):
                             continue
+                        # Files we've decided to leave in place — skip entirely
+                        if normalized_path in self._left_in_place_paths:
+                            continue
                         if file_path in self._processed_files:
                             continue
                         if normalized_path not in indexed_paths:
@@ -1287,7 +1407,13 @@ class AutoOrganizeWatcher(QObject):
         """
         if not file_paths:
             return
-        
+
+        # For "Organize New Only" folders, drop files the user already had
+        # (moved/renamed) — only genuinely new files get organized.
+        file_paths = self._filter_genuinely_new_files(folder, file_paths)
+        if not file_paths:
+            return
+
         # Build full instruction for AI
         parent_folder_name = os.path.basename(folder).lower()
         
@@ -1405,7 +1531,11 @@ class AutoOrganizeWatcher(QObject):
             # RE-SCAN the folder to get fresh file paths (not stale ones from before)
             # This also filters out files already in _organized_files
             file_paths = self._scan_folder_for_files(folder, exclude_organized=True)
-            
+
+            # For "Organize New Only" folders, drop files the user already had
+            # (moved/renamed) so the queue path doesn't re-organize them.
+            file_paths = self._filter_genuinely_new_files(folder, file_paths)
+
             if file_paths:
                 logger.info(f"Processing queued request: {len(file_paths)} NEW files in {os.path.basename(folder)}")
                 self._start_worker(file_paths, folder, instruction, existing_folders)

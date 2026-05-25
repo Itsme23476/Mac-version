@@ -892,6 +892,35 @@ class FileIndex:
             logger.error(f"Error getting file {file_path}: {e}")
             return None
 
+    def get_file_by_hash(self, content_hash: str) -> Optional[Dict[str, Any]]:
+        """Return a file record matching a content hash, or None.
+
+        Used to recognize an already-indexed file that has been moved/renamed
+        (same content = same hash, regardless of path).
+        """
+        if not content_hash:
+            return None
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, file_path, file_name, content_hash FROM files WHERE content_hash = ? LIMIT 1",
+                    (content_hash,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'id': row['id'],
+                        'file_path': row['file_path'],
+                        'file_name': row['file_name'],
+                        'content_hash': row['content_hash'],
+                    }
+                return None
+        except Exception as e:
+            logger.error(f"Error getting file by hash: {e}")
+            return None
+
     def get_filenames_with_tags(self) -> set:
         """
         Get a set of all filenames that have tags in the database.

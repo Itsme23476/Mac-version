@@ -6282,11 +6282,22 @@ class OrganizePage(QWidget):
         elif is_catch_up:
             organize_existing = True
         
-        # Start the watcher
-        self.auto_watcher.start(organize_existing=organize_existing, flatten_first=flatten_first)
-        
+        # Optimistic UI feedback: flip the button/status immediately so the click
+        # feels instant, then run the (briefly blocking) activation on the next
+        # event-loop tick after the UI has repainted.
+        self.watch_toggle_btn.setText("⏹ Stop")
+        self.watch_folder_label.setText(
+            f"📁 {len(settings.auto_organize_folders)} folder(s) • Starting…"
+        )
+        QApplication.processEvents()
+
         # Remember that watcher is running - auto-start on next app open
         settings.set_auto_organize_auto_start(True)
+
+        def _do_activate():
+            self.auto_watcher.start(organize_existing=organize_existing, flatten_first=flatten_first)
+            self._update_watch_summary()
+        QTimer.singleShot(50, _do_activate)
         
     def _stop_watch_mode(self):
         """Stop watching folders."""
