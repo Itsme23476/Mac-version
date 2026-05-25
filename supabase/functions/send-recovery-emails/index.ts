@@ -129,6 +129,17 @@ serve(async () => {
   const h24ago = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
   const h72ago = new Date(now.getTime() - 72 * 60 * 60 * 1000).toISOString();
 
+  // De-dupe by PERSON so someone who keeps abandoning checkouts can't be
+  // re-enrolled and spammed. Each email gets at most ONE nudge and ONE
+  // discount, ever — across all their abandoned-checkout rows.
+  const { data: priorNudged } = await supabase
+    .from("abandoned_checkouts").select("email").not("nudge_sent_at", "is", null);
+  const nudgedEmails = new Set((priorNudged ?? []).map((r) => r.email));
+
+  const { data: priorDiscounted } = await supabase
+    .from("abandoned_checkouts").select("email").not("discount_sent_at", "is", null);
+  const discountedEmails = new Set((priorDiscounted ?? []).map((r) => r.email));
+
   // 24h nudge: created > 24h ago, no nudge sent, not converted
   const { data: nudgeCandidates } = await supabase
     .from("abandoned_checkouts")
@@ -137,15 +148,25 @@ serve(async () => {
     .is("nudge_sent_at", null)
     .lt("created_at", h24ago);
 
+  let nudgeSent = 0;
   for (const row of nudgeCandidates ?? []) {
+    if (nudgedEmails.has(row.email)) {
+      // Already nudged via another row — suppress this duplicate fully
+      // (mark both stages handled) so it never sends an email.
+      await supabase.from("abandoned_checkouts")
+        .update({ nudge_sent_at: now.toISOString(), discount_sent_at: now.toISOString() })
+        .eq("id", row.id);
+      continue;
+    }
     const ok = await sendEmail(
       row.email,
       "You left something behind 👀",
       nudgeEmail(row.name, recoveryUrl(row))
     );
     if (ok) {
-      await supabase
-        .from("abandoned_checkouts")
+      nudgedEmails.add(row.email);
+      nudgeSent++;
+      await supabase.from("abandoned_checkouts")
         .update({ nudge_sent_at: now.toISOString() })
         .eq("id", row.id);
     }
@@ -160,25 +181,30 @@ serve(async () => {
     .is("discount_sent_at", null)
     .lt("created_at", h72ago);
 
+  let discountSent = 0;
   for (const row of discountCandidates ?? []) {
+    if (discountedEmails.has(row.email)) {
+      await supabase.from("abandoned_checkouts")
+        .update({ discount_sent_at: now.toISOString() })
+        .eq("id", row.id);
+      continue;
+    }
     const ok = await sendEmail(
       row.email,
       "20% off — just for you, Filect",
       discountEmail(row.name, recoveryUrl(row))
     );
     if (ok) {
-      await supabase
-        .from("abandoned_checkouts")
+      discountedEmails.add(row.email);
+      discountSent++;
+      await supabase.from("abandoned_checkouts")
         .update({ discount_sent_at: now.toISOString() })
         .eq("id", row.id);
     }
   }
 
   return new Response(
-    JSON.stringify({
-      nudge: nudgeCandidates?.length ?? 0,
-      discount: discountCandidates?.length ?? 0,
-    }),
+    JSON.stringify({ nudge: nudgeSent, discount: discountSent }),
     { headers: { "Content-Type": "application/json" } }
   );
 });
