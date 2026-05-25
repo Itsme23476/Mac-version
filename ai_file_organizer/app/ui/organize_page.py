@@ -7693,6 +7693,16 @@ Caption: {file_info.get('caption', 'none')}
             cleanup_msg = ""
             if all_empty:
                 removed_count = self._delete_folders(all_empty)
+
+                # Second pass: parents that became empty after their children were deleted
+                parent_candidates = {
+                    str(Path(p).parent) for p in all_empty
+                    if len(Path(p).parent.parts) > 2
+                }
+                parent_candidates -= set(all_empty)
+                if parent_candidates:
+                    removed_count += self._delete_folders(list(parent_candidates))
+
                 if removed_count > 0:
                     cleanup_msg = f"\n\nDeleted {removed_count} empty folder(s)."
             

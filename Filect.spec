@@ -135,7 +135,6 @@ a = Analysis(
     excludes=[
         'tkinter',
         'matplotlib',
-        'numpy.testing',
         'pytest',
     ],
     win_no_prefer_redirects=False,
@@ -184,8 +183,8 @@ app = BUNDLE(
         'CFBundleName': 'Filect',
         'CFBundleDisplayName': 'Filect',
         'CFBundleIdentifier': 'com.filect.filesearch',
-        'CFBundleVersion': '14.0.8',
-        'CFBundleShortVersionString': '14.0.8',
+        'CFBundleVersion': '14.0.9',
+        'CFBundleShortVersionString': '14.0.9',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleExecutable': 'Filect',
