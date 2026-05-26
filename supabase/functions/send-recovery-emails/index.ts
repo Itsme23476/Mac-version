@@ -7,10 +7,11 @@ const RECOVERY_BASE = "https://filect.io/open";
 
 // Build a per-recipient recovery link so the landing page can start checkout
 // for that exact account (Starter plan) without making them log in again.
-function recoveryUrl(row: { user_id?: string | null; email?: string | null }): string {
+function recoveryUrl(row: { user_id?: string | null; email?: string | null; plan?: string | null }): string {
   const params = new URLSearchParams();
   if (row.user_id) params.set("uid", row.user_id);
   if (row.email) params.set("email", row.email);
+  if (row.plan) params.set("plan", row.plan);
   const qs = params.toString();
   return qs ? `${RECOVERY_BASE}?${qs}` : RECOVERY_BASE;
 }

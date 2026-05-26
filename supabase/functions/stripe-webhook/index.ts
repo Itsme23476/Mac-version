@@ -37,6 +37,9 @@ serve(async (req) => {
       user_id: session.metadata?.user_id ?? null,
       email,
       name: session.customer_details?.name ?? null,
+      // The plan they were buying, so the recovery email can bring them back
+      // to the exact plan (set by create-checkout-web in session metadata).
+      plan: session.metadata?.plan ?? null,
       created_at: new Date(session.created * 1000).toISOString(),
     }, { onConflict: "stripe_session_id", ignoreDuplicates: true });
   }
@@ -48,6 +51,40 @@ serve(async (req) => {
     const email = session.customer_details?.email ?? session.customer_email;
     const customerId =
       typeof session.customer === "string" ? session.customer : session.customer?.id;
+
+    // PROVISION: write the subscription into the DB so the app recognizes the
+    // user as subscribed (incl. which plan). user_id comes from the checkout
+    // session metadata set by create-checkout. Idempotent upsert on sub id.
+    const userId = session.metadata?.user_id;
+    const subId =
+      typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
+    if (userId && subId) {
+      try {
+        const sub = await stripe.subscriptions.retrieve(subId);
+        // Stripe's newer API exposes current_period_* on the subscription ITEM,
+        // not the top level — read item first, fall back to top level, and guard
+        // against undefined so the upsert never throws (which would drop the row).
+        const item = sub.items?.data?.[0];
+        const startTs = item?.current_period_start ?? sub.current_period_start;
+        const endTs = item?.current_period_end ?? sub.current_period_end;
+        const { error: subErr } = await supabase.from("subscriptions").upsert({
+          user_id: userId,
+          stripe_customer_id: customerId ?? null,
+          stripe_subscription_id: subId,
+          status: sub.status,
+          price_id: item?.price?.id ?? null,
+          // Where the paying customer came from. create-checkout-web sets
+          // metadata.source='web'; the app's create-checkout omits it → 'app'.
+          source: session.metadata?.source ?? "app",
+          current_period_start: startTs ? new Date(startTs * 1000).toISOString() : null,
+          current_period_end: endTs ? new Date(endTs * 1000).toISOString() : null,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "stripe_subscription_id" });
+        if (subErr) console.error("subscription upsert error:", subErr);
+      } catch (e) {
+        console.error("subscription provision error:", e);
+      }
+    }
 
     if (email) {
       await supabase
