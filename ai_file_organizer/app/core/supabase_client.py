@@ -367,28 +367,16 @@ class SupabaseAuth:
                 self._subscription = sub
                 logger.info(f"[SUB CHECK] Found subscription: {sub}")
                 
+                # Trust the Stripe status as the source of truth. The webhook keeps
+                # `status` in sync with Stripe (active/trialing/canceled/past_due/…),
+                # so active/trialing == subscribed. We do NOT reject based on
+                # current_period_end: that date can briefly go stale if a webhook is
+                # delayed, and rejecting on it would lock out a paying customer.
+                # current_period_end is returned for display only ("renews/ends on …").
                 status = sub.get('status')
                 is_active = status in ('active', 'trialing')
-                logger.info(f"[SUB CHECK] Status: {status}, is_active (before date check): {is_active}")
-                
-                # Check if subscription has expired
                 period_end = sub.get('current_period_end')
-                logger.info(f"[SUB CHECK] current_period_end: {period_end}")
-                
-                if period_end and is_active:
-                    try:
-                        end_date = datetime.fromisoformat(period_end.replace('Z', '+00:00'))
-                        now = datetime.now(end_date.tzinfo)
-                        logger.info(f"[SUB CHECK] end_date: {end_date}, now: {now}")
-                        if end_date < now:
-                            logger.info("[SUB CHECK] Subscription has EXPIRED")
-                            is_active = False
-                        else:
-                            logger.info("[SUB CHECK] Subscription is VALID")
-                    except Exception as e:
-                        logger.warning(f"[SUB CHECK] Date parsing error: {e}")
-                
-                logger.info(f"[SUB CHECK] Final result: has_subscription={is_active}")
+                logger.info(f"[SUB CHECK] Status: {status}, has_subscription={is_active}, period_end={period_end}")
                 return {
                     'has_subscription': is_active,
                     'status': status,

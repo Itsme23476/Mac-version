@@ -117,6 +117,47 @@ serve(async (req) => {
     }
   }
 
+  // SYNC: keep our subscriptions row mirrored to Stripe on every renewal,
+  // plan change, or cancellation — so status / period / cancel flag never go
+  // stale (the app reads these to decide access).
+  if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
+    const sub = event.data.object as Stripe.Subscription;
+    const item = sub.items?.data?.[0];
+    const startTs = item?.current_period_start ?? sub.current_period_start;
+    const endTs = item?.current_period_end ?? sub.current_period_end;
+    const customerId = typeof sub.customer === "string" ? sub.customer : sub.customer?.id;
+    const fields = {
+      status: sub.status,
+      price_id: item?.price?.id ?? null,
+      current_period_start: startTs ? new Date(startTs * 1000).toISOString() : null,
+      current_period_end: endTs ? new Date(endTs * 1000).toISOString() : null,
+      cancel_at_period_end: sub.cancel_at_period_end ?? false,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: existing } = await supabase
+      .from("subscriptions")
+      .select("id")
+      .eq("stripe_subscription_id", sub.id)
+      .maybeSingle();
+
+    if (existing) {
+      // Row exists — just refresh it.
+      await supabase.from("subscriptions").update(fields).eq("stripe_subscription_id", sub.id);
+    } else if (sub.metadata?.user_id) {
+      // New sub we haven't recorded yet but we know the user — insert it.
+      await supabase.from("subscriptions").upsert({
+        user_id: sub.metadata.user_id,
+        stripe_customer_id: customerId ?? null,
+        stripe_subscription_id: sub.id,
+        source: sub.metadata?.source ?? "app",
+        ...fields,
+      }, { onConflict: "stripe_subscription_id" });
+    }
+    // (Legacy subs with no row and no metadata.user_id are handled by the
+    // one-time email-based backfill, not here.)
+  }
+
   // CONVERT (fallback): subscription created — match by customer id.
   if (event.type === "customer.subscription.created") {
     const sub = event.data.object as Stripe.Subscription;

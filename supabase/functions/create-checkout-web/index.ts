@@ -27,6 +27,24 @@ serve(async (req) => {
       return new Response("Missing user_id or price_id", { status: 400 });
     }
 
+    // Prevent duplicate subscriptions: if the user already has an active or
+    // trialing subscription, don't create a new one — send them to their account
+    // to manage / change plan instead (one active subscription per account).
+    try {
+      const { data: existingActive } = await supabase
+        .from("subscriptions")
+        .select("id")
+        .eq("user_id", userId)
+        .in("status", ["active", "trialing"])
+        .limit(1)
+        .maybeSingle();
+      if (existingActive) {
+        return Response.redirect("https://filect.io/account", 303);
+      }
+    } catch (_e) {
+      // If the check fails, fall through and let checkout proceed.
+    }
+
     // Promo code field only on monthly plans.
     let allowPromo = false;
     try {
