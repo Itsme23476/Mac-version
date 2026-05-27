@@ -101,6 +101,22 @@ serve(async (req) => {
     }
   }
 
+  // A paid invoice consumes the one-time retention discount, so clear the
+  // "50% off next invoice" flag once it's been used up.
+  if (event.type === "invoice.payment_succeeded") {
+    const invoice = event.data.object as Stripe.Invoice;
+    const subId = typeof invoice.subscription === "string"
+      ? invoice.subscription
+      : invoice.subscription?.id;
+    if (subId) {
+      await supabase
+        .from("subscriptions")
+        .update({ discount_pending: false, updated_at: new Date().toISOString() })
+        .eq("stripe_subscription_id", subId)
+        .eq("discount_pending", true);
+    }
+  }
+
   // CONVERT (fallback): subscription created — match by customer id.
   if (event.type === "customer.subscription.created") {
     const sub = event.data.object as Stripe.Subscription;

@@ -27,6 +27,10 @@ from urllib.parse import urlparse, parse_qs
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QIcon, QFileOpenEvent
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+# Key for the single-instance lock (a named local socket).
+SINGLE_INSTANCE_KEY = "filect-single-instance"
 from app.ui.main_window import MainWindow
 from app.ui.auth_dialog import AuthDialog
 from app.core.logging_config import setup_logging
@@ -142,6 +146,41 @@ class FilectApplication(QApplication):
                 pass
 
 
+def acquire_single_instance(app) -> bool:
+    """
+    Ensure only one Filect window runs at a time.
+
+    Returns True if this is the first/only instance (and sets up a listener to
+    bring the window forward if another launch happens). Returns False if another
+    instance is already running — in that case it signals the existing one to come
+    to the front, and the caller should exit immediately.
+    """
+    sock = QLocalSocket()
+    sock.connectToServer(SINGLE_INSTANCE_KEY)
+    if sock.waitForConnected(300):
+        # Another instance is already running. The connection itself triggers the
+        # running instance's newConnection handler (which brings its window to the
+        # front), so we just disconnect and bail out.
+        sock.disconnectFromServer()
+        return False
+
+    # First instance: clear any stale socket and start listening.
+    QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+    server = QLocalServer()
+    server.listen(SINGLE_INSTANCE_KEY)
+
+    def _on_new_connection():
+        conn = server.nextPendingConnection()
+        if conn is not None:
+            app._bring_to_front()
+            conn.disconnectFromServer()
+
+    server.newConnection.connect(_on_new_connection)
+    # Keep a reference so the server isn't garbage-collected.
+    app._single_instance_server = server
+    return True
+
+
 def check_existing_session():
     """
     Check if there's a valid stored session with active subscription.
@@ -194,6 +233,12 @@ def main():
     app.setApplicationName("Filect")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("Filect")
+
+    # Single-instance guard: if Filect is already running, bring that window to
+    # the front and exit instead of opening a second window.
+    if not acquire_single_instance(app):
+        print("Filect is already running — bringing the existing window to front.")
+        sys.exit(0)
     
     # Set application icon (shows in taskbar and window title bar)
     # Try ICO first (for Windows), then PNG as fallback

@@ -1,7 +1,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import Stripe from "https://esm.sh/stripe@14";
 
 const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, { apiVersion: "2023-10-16" });
+const supabase = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+);
 
 // Dedicated checkout for the WEBSITE signup flow. Mirrors the app's create-checkout
 // (10-day trial, subscription tied to the account via metadata.user_id) and adds:
@@ -14,6 +19,9 @@ serve(async (req) => {
     const userId = url.searchParams.get("user_id");
     const email = url.searchParams.get("email") || undefined;
     const priceId = url.searchParams.get("price_id");
+    // Where this checkout originated: "web" (default) or "app" (handed off from
+    // the desktop app via the pricing page).
+    const source = url.searchParams.get("source") === "app" ? "app" : "web";
 
     if (!priceId || !userId) {
       return new Response("Missing user_id or price_id", { status: 400 });
@@ -28,19 +36,40 @@ serve(async (req) => {
       allowPromo = false;
     }
 
+    // The 10-day free trial is for FIRST-TIME subscribers only. If the user has
+    // ever had a subscription (any status), they've already used their trial —
+    // they get charged immediately, no second trial.
+    let hadSubscription = false;
+    try {
+      const { data } = await supabase
+        .from("subscriptions")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1)
+        .maybeSingle();
+      hadSubscription = !!data;
+    } catch (_e) {
+      hadSubscription = false;
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       line_items: [{ price: priceId, quantity: 1 }],
       customer_email: email,
       allow_promotion_codes: allowPromo,
       subscription_data: {
-        trial_period_days: 10,
-        metadata: { user_id: userId, source: "web" },
+        // Omit trial entirely for returning subscribers.
+        ...(hadSubscription ? {} : { trial_period_days: 10 }),
+        metadata: { user_id: userId, source },
       },
-      // source=web lets us track web-vs-app conversions; plan lets abandoned-cart
-      // recovery bring the user back to the exact plan they were buying.
-      metadata: { user_id: userId, source: "web", plan: priceId },
-      success_url: "https://filect.io/payment-success",
+      // source tracks web-vs-app conversions; plan lets abandoned-cart recovery
+      // bring the user back to the exact plan they were buying.
+      metadata: { user_id: userId, source, plan: priceId },
+      // App-originated payments land on a "return to the app" page (they already
+      // have the app); web payments get the download page.
+      success_url: source === "app"
+        ? "https://filect.io/payment-success?from=app"
+        : "https://filect.io/payment-success",
       cancel_url: "https://filect.io/pricing.html",
     });
 
