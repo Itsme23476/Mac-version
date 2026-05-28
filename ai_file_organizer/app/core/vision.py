@@ -791,7 +791,11 @@ def gpt_vision_fallback(image_b64: str, filename: Optional[str] = None, user_ins
         if filename:
             user_content.append({"type": "text", "text": f"filename: {filename}"})
         user_content.append({"type": "text", "text": "Return STRICT JSON only using the schema."})
-        user_content.append({"type": "image_url", "image_url": {"url": data_url}})
+        # detail:"high" sends ~1445 image tokens (vs ~85 on "low" or downscaled
+        # "auto") so the model can actually distinguish look-alike subjects
+        # (e.g. tigers vs bears, lions vs other big cats). The cost delta is
+        # ~$0.0003 → ~$0.0006 per image — well worth the recognition accuracy.
+        user_content.append({"type": "image_url", "image_url": {"url": data_url, "detail": "high"}})
         
         messages = [
             {"role": "system", "content": system},
