@@ -133,19 +133,24 @@ def build_file_summary(files: List[Dict[str, Any]], max_files: int = 300) -> str
     lines = []
     for f in files[:max_files]:
         fid = f.get('id')
-        name = f.get('file_name', 'unknown')[:50]
+        # Extract the extension and type hints from the FULL filename BEFORE
+        # truncating it for display. Long names (Adobe Stock URLs, base64-encoded
+        # image URLs, CDN paths, etc.) would otherwise be sliced before their
+        # extension, and the LLM would see ext: (empty) and stop treating them as
+        # images — sending them into generic buckets like "documents/" instead of
+        # the user's intended category.
+        full_name = f.get('file_name', 'unknown')
+        ext = ''
+        if '.' in full_name:
+            ext = full_name[full_name.rfind('.'):].lower()
+        # Same reasoning for filename-pattern hints — long names can carry signals
+        # ("screenshot", "IMG_", etc.) past the 50-char display cutoff.
+        hints = _infer_file_type_hints(full_name)
+        name = full_name[:50]  # truncated form is only for the summary's display
         label = f.get('label', '') or ''
         caption = (f.get('caption', '') or '')[:80]
         tags = f.get('tags', []) or []
         subfolder = f.get('subfolder', '.') or '.'
-
-        # Extract file extension for accurate type matching
-        ext = ''
-        if '.' in name:
-            ext = name[name.rfind('.'):].lower()
-
-        # Add inferred hints from filename patterns
-        hints = _infer_file_type_hints(name)
         all_tags = list(tags[:8]) + hints
         tags_str = ', '.join(all_tags) if all_tags else ''
 
