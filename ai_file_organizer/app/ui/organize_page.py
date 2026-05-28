@@ -4982,7 +4982,17 @@ class OrganizePage(QWidget):
         self.auto_watcher.file_indexed.connect(self._on_watch_file_indexed)
         self.auto_watcher.status_changed.connect(self._on_watch_status)
         self.auto_watcher.error_occurred.connect(self._on_watch_error)
-    
+        self.auto_watcher.index_limit_reached.connect(self._on_watch_limit_reached)
+
+    def _on_watch_limit_reached(self, limit_info):
+        """Show the upgrade popup once per watch session when auto-organize hits the cap."""
+        if getattr(self, '_watch_limit_popup_shown', False):
+            return
+        self._watch_limit_popup_shown = True
+        mw = self.window()
+        if hasattr(mw, '_show_upgrade_dialog'):
+            mw._show_upgrade_dialog(limit_info or {})
+
     def setup_ui(self):
         """Setup the organization page UI."""
         # Main layout for this widget
@@ -6152,6 +6162,8 @@ class OrganizePage(QWidget):
             catch_up_since: Datetime to filter files for catch-up mode
             skip_existing_popup: If True, skip the "Organize Existing Files?" popup (for auto-start)
         """
+        # Allow the limit popup to show once for this fresh watch session.
+        self._watch_limit_popup_shown = False
         if not settings.auto_organize_folders:
             QMessageBox.warning(
                 self, "No Folders",

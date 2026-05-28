@@ -31,7 +31,8 @@ class AutoWatcherWorker(QThread):
     status_changed = Signal(str)  # status message
     error_occurred = Signal(str, str)  # file_path, error_message
     finished_processing = Signal(list)  # Emitted when done, with list of all processed file paths
-    
+    index_limit_reached = Signal(dict)  # Emitted once when the monthly media-index limit is hit
+
     def __init__(self, file_paths: List[str], folder: str, instruction: str, 
                  folder_instructions: Dict[str, str] = None,
                  existing_folders: List[str] = None):
@@ -189,6 +190,8 @@ class AutoWatcherWorker(QThread):
                             logger.warning(f"[Worker] Index limit reached: {result.get('error')}")
                             self.status_changed.emit("Index limit reached - upgrade for more")
                             self.error_occurred.emit(file_path, result.get('error', 'Index limit reached'))
+                            # Fire the upgrade popup once for this run.
+                            self.index_limit_reached.emit({})
                     elif result.get('error'):
                         logger.warning(f"[Worker] Failed to index {file_path}: {result.get('error')}")
             
@@ -430,6 +433,7 @@ class AutoOrganizeWatcher(QObject):
     file_indexed = Signal(str)  # file_path that was auto-indexed
     error_occurred = Signal(str, str)  # file_path, error_message
     status_changed = Signal(str)  # status message
+    index_limit_reached = Signal(dict)  # monthly media-index limit hit (re-emitted from worker)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1486,7 +1490,8 @@ class AutoOrganizeWatcher(QObject):
         self._current_worker.status_changed.connect(self._on_worker_status)
         self._current_worker.error_occurred.connect(self._on_worker_error)
         self._current_worker.finished_processing.connect(self._on_worker_finished_with_files)
-        
+        self._current_worker.index_limit_reached.connect(self.index_limit_reached)
+
         self._current_worker.start()
     
     def _on_worker_file_indexed(self, file_path: str):
