@@ -308,13 +308,31 @@ class MainWindow(QMainWindow):
         
         logger.info("Main window initialized")
 
-        # Retention signal — fired once per launch when authenticated.
+        # Retention signal — fired once per launch when authenticated. We also
+        # stash the start time so closeEvent can compute session length.
+        import time as _time
+        self._session_started_at = _time.time()
         try:
             from app.core.supabase_client import track, supabase_auth
             if supabase_auth.is_authenticated:
                 track("app_opened")
         except Exception:
             pass
+
+    def closeEvent(self, event):
+        # Session length signal. Fires synchronously but track() itself is async,
+        # so we don't block the shutdown. Wrapped in try/except so a failed
+        # telemetry POST can never block the user from closing the app.
+        try:
+            import time as _time
+            start = getattr(self, '_session_started_at', None)
+            if start:
+                from app.core.supabase_client import track, supabase_auth
+                if supabase_auth.is_authenticated:
+                    track("session_ended", duration_seconds=int(_time.time() - start))
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def showEvent(self, event):
         """Handle window show event - show onboarding on first launch"""
