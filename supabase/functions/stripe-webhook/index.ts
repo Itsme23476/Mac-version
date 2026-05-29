@@ -102,7 +102,8 @@ serve(async (req) => {
   }
 
   // A paid invoice consumes the one-time retention discount, so clear the
-  // "50% off next invoice" flag once it's been used up.
+  // "50% off next invoice" flag once it's been used up. Also clear the
+  // payment-failed flags so a future failure starts a fresh email sequence.
   if (event.type === "invoice.payment_succeeded") {
     const invoice = event.data.object as Stripe.Invoice;
     const subId = typeof invoice.subscription === "string"
@@ -114,6 +115,43 @@ serve(async (req) => {
         .update({ discount_pending: false, updated_at: new Date().toISOString() })
         .eq("stripe_subscription_id", subId)
         .eq("discount_pending", true);
+      // Reset failed-email state — independent of discount, runs every success.
+      await supabase
+        .from("subscriptions")
+        .update({
+          payment_failed_email_sent_at: null,
+          payment_failed_reminder_sent_at: null,
+        })
+        .eq("stripe_subscription_id", subId);
+    }
+  }
+
+  // Payment failed: trigger our branded recovery email. The send function is
+  // idempotent per user/kind/24h, so duplicate webhook deliveries are safe.
+  if (event.type === "invoice.payment_failed") {
+    const invoice = event.data.object as Stripe.Invoice;
+    const subId = typeof invoice.subscription === "string"
+      ? invoice.subscription
+      : invoice.subscription?.id;
+    if (subId) {
+      const { data: sub } = await supabase
+        .from("subscriptions")
+        .select("user_id")
+        .eq("stripe_subscription_id", subId)
+        .maybeSingle();
+      if (sub?.user_id) {
+        // Fire and forget — we don't want to fail the webhook ack if Resend hiccups.
+        fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/send-payment-failed-email`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          },
+          body: JSON.stringify({ user_id: sub.user_id, kind: "first" }),
+        }).catch((e) => console.error("send-payment-failed-email invoke error:", e));
+      } else {
+        console.warn("invoice.payment_failed: no subscription row for", subId);
+      }
     }
   }
 
