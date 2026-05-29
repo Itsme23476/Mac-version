@@ -3,7 +3,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY")!;
 const TO = "softwaregentofficial@gmail.com";
-const FROM = "Filect Contact <team@filect.io>";
+const FROM = "Filect Support <support@filect.io>";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,

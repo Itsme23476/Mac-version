@@ -821,5 +821,76 @@ def get_latest_app_version() -> Optional[Dict[str, Any]]:
         return None
 
 
+# ----------------------------------------------------------------------------
+# Lightweight product-analytics: fire-and-forget event tracking. Used to answer
+# "what features get used / who comes back / where do people drop off". Never
+# logs file paths, file contents, or query text — only counts and categories.
+# ----------------------------------------------------------------------------
+
+import threading as _threading
+import sys as _sys
+
+def _detect_platform() -> str:
+    p = (_sys.platform or "").lower()
+    if p == "darwin":  return "mac"
+    if p.startswith("win"): return "win"
+    if p.startswith("linux"): return "linux"
+    return p or "unknown"
+
+_PLATFORM = _detect_platform()
+
+def _current_app_version() -> str:
+    try:
+        from app.version import VERSION
+        return VERSION
+    except Exception:
+        return ""
+
+def track(event_name: str, **props) -> None:
+    """Record a product-analytics event. Fully async, swallows all errors.
+
+    Safe to call from anywhere — never blocks UI, never raises.
+    Skipped silently when the user isn't authenticated.
+    """
+    try:
+        user_id = supabase_auth.user_id if hasattr(supabase_auth, 'user_id') else None
+        if not user_id and getattr(supabase_auth, '_user', None):
+            user_id = supabase_auth._user.get('id')
+        if not user_id:
+            return  # not signed in yet — nothing to attribute the event to
+        token = getattr(supabase_auth, '_access_token', None) or getattr(supabase_auth, 'access_token', None)
+        if not token:
+            return
+        payload = {
+            "user_id": user_id,
+            "event_name": event_name,
+            "props": props or {},
+            "platform": _PLATFORM,
+            "app_version": _current_app_version(),
+        }
+
+        def _post():
+            try:
+                import urllib.request, json as _json
+                req = urllib.request.Request(
+                    f"{SUPABASE_URL}/rest/v1/app_events",
+                    data=_json.dumps(payload).encode(),
+                    headers={
+                        "apikey": SUPABASE_ANON_KEY,
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=8).read()
+            except Exception:
+                pass  # analytics must NEVER crash the app
+
+        _threading.Thread(target=_post, daemon=True, name="track-event").start()
+    except Exception:
+        pass
+
+
 # Global instance
 supabase_auth = SupabaseAuth()

@@ -6306,18 +6306,35 @@ class OrganizePage(QWidget):
         # Remember that watcher is running - auto-start on next app open
         settings.set_auto_organize_auto_start(True)
 
+        try:
+            from app.core.supabase_client import track
+            track(
+                "auto_organize_enabled",
+                folder_count=len(settings.auto_organize_folders),
+                organize_existing=bool(organize_existing),
+                flatten_first=bool(flatten_first),
+            )
+        except Exception:
+            pass
+
         def _do_activate():
             self.auto_watcher.start(organize_existing=organize_existing, flatten_first=flatten_first)
             self._update_watch_summary()
         QTimer.singleShot(50, _do_activate)
-        
+
     def _stop_watch_mode(self):
         """Stop watching folders."""
         if self.auto_watcher:
             self.auto_watcher.stop()
-        
+
         # Remember that user stopped the watcher - don't auto-start on next app open
         settings.set_auto_organize_auto_start(False)
+
+        try:
+            from app.core.supabase_client import track
+            track("auto_organize_disabled", folder_count=len(settings.auto_organize_folders))
+        except Exception:
+            pass
         
         # Save last active timestamp for catch-up feature
         settings.update_auto_organize_last_active()
@@ -7720,8 +7737,30 @@ Caption: {file_info.get('caption', 'none')}
         self.apply_button.setEnabled(False)
         self.generate_button.setEnabled(False)
         self.status_label.setText("Moving files...")
-        
+
+        import time as _time
+        _t0 = _time.time()
+        try:
+            from app.core.supabase_client import track
+            track("organize_started", source="manual_page", file_count=len(move_plan))
+        except Exception:
+            pass
+
         success, errors, log_file, renamed_count = apply_moves(move_plan)
+
+        try:
+            from app.core.supabase_client import track
+            track(
+                "organize_completed",
+                source="manual_page",
+                success=bool(success),
+                files_moved=len(move_plan) - len(errors or []),
+                files_failed=len(errors or []),
+                files_renamed=int(renamed_count or 0),
+                duration_ms=int((_time.time() - _t0) * 1000),
+            )
+        except Exception:
+            pass
 
         # Resume watcher now that moves are complete
         if watcher_was_running:

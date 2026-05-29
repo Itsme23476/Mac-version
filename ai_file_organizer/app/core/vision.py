@@ -404,6 +404,13 @@ def analyze_image(image_path: Path, model: str = None, user_instructions: str = 
             image_b64 = _file_to_b64(image_path)
             if image_b64:
                 result = gpt_vision_fallback(image_b64, image_path.name, user_instructions)
+                # Cost signal — counts only, no filename, no content. Fires for both
+                # success and failure so we can see error rate too.
+                try:
+                    from app.core.supabase_client import track
+                    track("vision_call", provider="openai", success=bool(result))
+                except Exception:
+                    pass
                 if result:
                     logger.info(f"OpenAI vision analysis successful for {image_path.name}")
                     return result

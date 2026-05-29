@@ -141,6 +141,101 @@ def _parse_hotkey_for_pynput(sequence: str) -> Optional[set]:
     return hotkey_set if hotkey_set else None
 
 
+# macOS virtual keycodes for the special keys we support in hotkeys.
+_MAC_KEYCODES = {
+    'space': 49, 'enter': 36, 'return': 36, 'tab': 48, 'escape': 53, 'esc': 53,
+    'backspace': 51, 'delete': 117,
+    'up': 126, 'down': 125, 'left': 123, 'right': 124,
+    'home': 115, 'end': 119, 'pageup': 116, 'pagedown': 121,
+    'f1': 122, 'f2': 120, 'f3': 99, 'f4': 118, 'f5': 96, 'f6': 97,
+    'f7': 98, 'f8': 100, 'f9': 101, 'f10': 109, 'f11': 103, 'f12': 111,
+    'a': 0, 'b': 11, 'c': 8, 'd': 2, 'e': 14, 'f': 3, 'g': 5, 'h': 4,
+    'i': 34, 'j': 38, 'k': 40, 'l': 37, 'm': 46, 'n': 45, 'o': 31,
+    'p': 35, 'q': 12, 'r': 15, 's': 1, 't': 17, 'u': 32, 'v': 9,
+    'w': 13, 'x': 7, 'y': 16, 'z': 6,
+    '0': 29, '1': 18, '2': 19, '3': 20, '4': 21, '5': 23,
+    '6': 22, '7': 26, '8': 28, '9': 25,
+}
+
+
+def _register_hotkey_nsevent(sequence: str, on_activated: Callable[[], None]
+                             ) -> Optional[Tuple[int, Any, int]]:
+    """Register a global hotkey using Cocoa's native NSEvent monitors.
+
+    Runs on the main thread (via the main run loop), unlike pynput's
+    CGEventTap which runs on a background thread and crashes on CapsLock.
+    """
+    from AppKit import NSEvent
+    from Foundation import NSRunLoop
+    # Modifier mask constants (10.10+). NSEventModifier* values:
+    #   Caps=1<<16 Shift=1<<17 Control=1<<18 Option=1<<19 Command=1<<20
+    MASK_CAPS    = 1 << 16
+    MASK_SHIFT   = 1 << 17
+    MASK_CONTROL = 1 << 18
+    MASK_OPTION  = 1 << 19
+    MASK_COMMAND = 1 << 20
+    DEVICE_MASK  = MASK_SHIFT | MASK_CONTROL | MASK_OPTION | MASK_COMMAND
+    # NSEventMaskKeyDown = 1 << 10
+    NSEventMaskKeyDown = 1 << 10
+
+    parts = (sequence or '').lower().replace(' ', '').split('+')
+    need_mask = 0
+    target_keycode = None
+    for p in parts:
+        if not p:
+            continue
+        if p in ('ctrl', 'control'): need_mask |= MASK_CONTROL
+        elif p == 'shift':           need_mask |= MASK_SHIFT
+        elif p in ('alt', 'option'): need_mask |= MASK_OPTION
+        elif p in ('cmd', 'command', 'meta'): need_mask |= MASK_COMMAND
+        elif p in _MAC_KEYCODES:     target_keycode = _MAC_KEYCODES[p]
+        else:
+            logger.warning(f"NSEvent hotkey: unknown key part '{p}'")
+    if target_keycode is None:
+        raise ValueError(f"hotkey sequence '{sequence}' has no key, only modifiers")
+
+    def _matches(event) -> bool:
+        try:
+            mods = int(event.modifierFlags()) & DEVICE_MASK
+            return mods == need_mask and int(event.keyCode()) == target_keycode
+        except Exception:
+            return False
+
+    def _fire():
+        try:
+            logger.info(f"Hotkey activated (NSEvent): {sequence}")
+            on_activated()
+        except Exception as e:
+            logger.error(f"Error in hotkey callback: {e}", exc_info=True)
+
+    def _global_handler(event):
+        if _matches(event):
+            _fire()
+
+    def _local_handler(event):
+        if _matches(event):
+            _fire()
+            return None  # swallow when our app is frontmost
+        return event
+
+    # Global monitor: fires when another app is frontmost (needs Accessibility).
+    # Local monitor: fires when our app is frontmost.
+    g_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+        NSEventMaskKeyDown, _global_handler)
+    l_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+        NSEventMaskKeyDown, _local_handler)
+
+    # Keep refs alive — if the Python objects are GC'd, the monitors die silently.
+    handle = {'global': g_monitor, 'local': l_monitor, 'kind': 'nsevent'}
+    _hotkey_listeners.append(handle)
+    hotkey_id = len(_hotkey_listeners) - 1
+    logger.info(f"Successfully registered global hotkey via NSEvent: {sequence} (id={hotkey_id})")
+
+    if not _check_accessibility_permission():
+        logger.warning("Accessibility permission not granted — global hotkey will only fire when our app is frontmost.")
+    return (hotkey_id, handle, 0)
+
+
 def register_global_hotkey(
     parent: Any,
     sequence: str,
@@ -159,6 +254,17 @@ def register_global_hotkey(
     """
     global _hotkey_listeners
     
+    # Use Cocoa's native NSEvent global+local monitors instead of pynput.
+    # pynput runs its CGEventTap on a background thread, and on macOS Sequoia
+    # the path `NSEvent.eventWithCGEvent_` → TSMSetCapsLockKeyTransitionDetected
+    # hits a dispatch_assert_queue check that kills the process whenever the
+    # user toggles CapsLock. NSEvent monitors run on the main run loop, so
+    # this whole class of crashes goes away.
+    try:
+        return _register_hotkey_nsevent(sequence, on_activated)
+    except Exception as e:
+        logger.error(f"NSEvent hotkey registration failed, falling back: {e}", exc_info=True)
+
     try:
         from pynput import keyboard
     except ImportError:
@@ -322,7 +428,24 @@ def register_global_hotkey(
             except Exception:
                 pass
         
-        listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        # macOS Sequoia hard-kills the process (SIGTRAP, _dispatch_assert_queue_fail)
+        # when pynput tries to build an NSEvent for a CapsLock transition from its
+        # background CGEventTap thread. Drop CapsLock events at the tap so they
+        # never reach +[NSEvent eventWithCGEvent:].
+        def _darwin_intercept(event_type, event):
+            try:
+                from Quartz import CGEventGetIntegerValueField, kCGKeyboardEventKeycode
+                if CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == 57:
+                    return None
+            except Exception:
+                pass
+            return event
+
+        listener = keyboard.Listener(
+            on_press=on_press,
+            on_release=on_release,
+            darwin_intercept=_darwin_intercept,
+        )
         listener.start()
         
         hotkey_id = len(_hotkey_listeners)
@@ -354,7 +477,15 @@ def unregister_global_hotkey(hotkey_id: int, filt: Any) -> None:
     global _hotkey_listeners
     
     try:
-        if filt is not None and hasattr(filt, 'stop'):
+        if isinstance(filt, dict) and filt.get('kind') == 'nsevent':
+            from AppKit import NSEvent
+            for k in ('global', 'local'):
+                m = filt.get(k)
+                if m is not None:
+                    try: NSEvent.removeMonitor_(m)
+                    except Exception: pass
+            logger.info(f"Unregistered NSEvent hotkey (id={hotkey_id})")
+        elif filt is not None and hasattr(filt, 'stop'):
             filt.stop()
             logger.info(f"Unregistered global hotkey (id={hotkey_id})")
         
@@ -1544,7 +1675,18 @@ def cleanup_hotkeys() -> None:
     global _hotkey_listeners
     
     for listener in _hotkey_listeners:
-        if listener is not None and hasattr(listener, 'stop'):
+        if listener is None:
+            continue
+        if isinstance(listener, dict) and listener.get('kind') == 'nsevent':
+            try:
+                from AppKit import NSEvent
+                for k in ('global', 'local'):
+                    m = listener.get(k)
+                    if m is not None:
+                        NSEvent.removeMonitor_(m)
+            except Exception:
+                pass
+        elif hasattr(listener, 'stop'):
             try:
                 listener.stop()
             except Exception:

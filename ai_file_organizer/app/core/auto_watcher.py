@@ -1049,13 +1049,26 @@ class AutoOrganizeWatcher(QObject):
     def organize_folders_with_per_folder_options(self, folder_choices: Dict[str, int]) -> None:
         """
         Organize folders with per-folder options.
-        
+
         Args:
             folder_choices: Dict mapping folder_path -> choice where choice is:
                 1 = REORGANIZE_ALL (flatten + organize)
                 2 = ORGANIZE_AS_IS (organize without flatten)
                 3 = CONTINUE_WATCHING (skip, just watch for new files)
         """
+        # Telemetry: mode distribution across the auto-organize popup. Counts only,
+        # no folder paths — privacy-safe signal for "which mode do people pick?".
+        try:
+            from app.core.supabase_client import track
+            counts = {"reorganize_all": 0, "organize_as_is": 0, "continue_watching": 0}
+            for c in folder_choices.values():
+                if c == 1: counts["reorganize_all"] += 1
+                elif c == 2: counts["organize_as_is"] += 1
+                elif c == 3: counts["continue_watching"] += 1
+            track("organize_started", source="auto_popup", folder_count=len(folder_choices), **counts)
+        except Exception:
+            pass
+
         # Clear the catch-up filter so ALL files are processed
         self.catch_up_since = None
         
