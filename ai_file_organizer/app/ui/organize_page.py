@@ -7344,31 +7344,60 @@ class OrganizePage(QWidget):
         self.plan_tree.itemCollapsed.connect(self._on_folder_collapsed)
         
         folders = plan.get("folders", {})
-        
-        for folder_name, file_ids in sorted(folders.items()):
-            # Add expand arrow prefix - starts collapsed
-            folder_item = QTreeWidgetItem([f"▶  📁 {folder_name}  ({len(file_ids)} files)"])
-            folder_item.setExpanded(False)  # Start collapsed
-            folder_item.setData(0, Qt.UserRole, {"type": "folder", "name": folder_name})
-            
-            display_limit = 25
-            for i, fid in enumerate(file_ids[:display_limit]):
+
+        # NESTED-FOLDER SYNTAX: a key like "Animals/Bear" must render as Bear
+        # nested under Animals in the tree, NOT as a flat "Animals/Bear" row.
+        # Sort parents-before-children (by slash depth, then alphabetically) and
+        # walk each path segment, lazily creating placeholder items for any
+        # ancestor the AI didn't explicitly include in the plan.
+        path_to_item = {}  # full slash-path -> QTreeWidgetItem
+        display_limit = 25
+
+        def _make_item(label, path_key):
+            it = QTreeWidgetItem([label])
+            it.setExpanded(False)
+            it.setData(0, Qt.UserRole, {"type": "folder", "name": path_key})
+            return it
+
+        sorted_paths = sorted(folders.keys(), key=lambda p: (p.count('/'), p))
+        for folder_path in sorted_paths:
+            file_ids = folders[folder_path]
+            parts = folder_path.split('/')
+            current_path = ""
+            parent_item = None
+            for i, part in enumerate(parts):
+                current_path = part if i == 0 else current_path + "/" + part
+                if current_path in path_to_item:
+                    parent_item = path_to_item[current_path]
+                    continue
+                if current_path == folder_path:
+                    item = _make_item(f"▶  📁 {part}  ({len(file_ids)} files)", current_path)
+                else:
+                    # Placeholder for an ancestor the plan didn't explicitly list.
+                    item = _make_item(f"▶  📁 {part}", current_path)
+                path_to_item[current_path] = item
+                if parent_item is None:
+                    self.plan_tree.addTopLevelItem(item)
+                else:
+                    parent_item.addChild(item)
+                parent_item = item
+
+            # Attach file children to the leaf (the real folder for this path).
+            leaf = path_to_item[folder_path]
+            for fid in file_ids[:display_limit]:
                 try:
                     fid_int = int(fid)
                     file_info = self.files_by_id.get(fid_int, {})
                     fname = file_info.get("file_name", f"id:{fid}")
-                    file_item = QTreeWidgetItem([fname])  # No icon, just filename
+                    file_item = QTreeWidgetItem([fname])
                     file_item.setData(0, Qt.UserRole, {"type": "file", "id": fid_int})
-                    folder_item.addChild(file_item)
+                    leaf.addChild(file_item)
                 except:
                     pass
-            
             if len(file_ids) > display_limit:
                 more_item = QTreeWidgetItem([f"+ {len(file_ids) - display_limit} more files..."])
                 more_item.setDisabled(True)
-                folder_item.addChild(more_item)
-            
-            self.plan_tree.addTopLevelItem(folder_item)
+                leaf.addChild(more_item)
         
         summary = get_plan_summary(plan, self.files_by_id)
         
@@ -7998,36 +8027,68 @@ Caption: {file_info.get('caption', 'none')}
     def _delete_folders(self, folder_paths: list) -> int:
         """
         Delete the specified folders. Returns count of successfully deleted folders.
-        Deletes in order (deepest first to handle nested folders).
+        Deletes deepest first; after each successful rmdir, walks UP and removes
+        any ancestor that just became empty as a result (capped at the destination
+        root). This catches multi-level chains like `a/b/c` where `a` only becomes
+        empty after `b` is deleted, which a one-shot snapshot would otherwise miss.
         """
         deleted_count = 0
-        
-        # Sort by depth (deepest first)
         sorted_paths = sorted(folder_paths, key=lambda p: len(Path(p).parts), reverse=True)
-        
         _METADATA_FILES = {'.DS_Store', '.localized', 'Thumbs.db', 'desktop.ini'}
 
-        for folder_path in sorted_paths:
-            try:
-                folder = Path(folder_path)
-                if folder.exists() and folder.is_dir():
-                    # Remove macOS metadata files so they don't block deletion
-                    for meta in folder.iterdir():
-                        if meta.name in _METADATA_FILES and meta.is_file():
-                            meta.unlink(missing_ok=True)
+        # Never delete the destination root itself.
+        dest_root = None
+        try:
+            if self.destination_path:
+                dest_root = Path(self.destination_path).resolve()
+        except Exception:
+            dest_root = None
 
-                    real_contents = [p for p in folder.iterdir() if p.name not in _METADATA_FILES]
-                    if not real_contents:
-                        folder.rmdir()
-                        deleted_count += 1
-                        logger.info(f"Deleted empty folder: {folder}")
-                    else:
-                        logger.warning(f"Folder not empty, skipping: {folder}")
+        def _try_delete(folder: Path) -> bool:
+            try:
+                if not folder.exists() or not folder.is_dir():
+                    return False
+                if dest_root is not None:
+                    try:
+                        if folder.resolve() == dest_root:
+                            return False
+                    except Exception:
+                        pass
+                for meta in folder.iterdir():
+                    if meta.name in _METADATA_FILES and meta.is_file():
+                        meta.unlink(missing_ok=True)
+                real_contents = [p for p in folder.iterdir() if p.name not in _METADATA_FILES]
+                if real_contents:
+                    return False
+                folder.rmdir()
+                logger.info(f"Deleted empty folder: {folder}")
+                return True
             except OSError as e:
-                logger.warning(f"Could not delete folder {folder_path}: {e}")
+                logger.warning(f"Could not delete folder {folder}: {e}")
+                return False
             except Exception as e:
-                logger.error(f"Error deleting folder {folder_path}: {e}")
-        
+                logger.error(f"Error deleting folder {folder}: {e}")
+                return False
+
+        for folder_path in sorted_paths:
+            folder = Path(folder_path)
+            if not _try_delete(folder):
+                continue
+            deleted_count += 1
+            # Walk parents up — any that became empty as a result also get removed.
+            parent = folder.parent
+            while True:
+                if dest_root is not None:
+                    try:
+                        if parent.resolve() == dest_root:
+                            break
+                    except Exception:
+                        break
+                if not _try_delete(parent):
+                    break
+                deleted_count += 1
+                parent = parent.parent
+
         return deleted_count
     
     def _cleanup_empty_folders(self):

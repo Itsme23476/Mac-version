@@ -268,6 +268,8 @@ CRITICAL RULES:
 - FOLLOW the user's instruction for organizing these files
 - If user says "move all files to X", put ALL files in folder "X"
 - If user specifies a structure, follow it exactly
+- USE THE EXACT FOLDER NAMES THE USER TYPED — do not change capitalisation, pluralisation, or spelling. If the user wrote 'Bear', use 'Bear', not 'Bears' or 'bears'.
+- For NESTED FOLDERS use slash syntax in the folder key, e.g. "<parent>/<child>". Do not use literal example words from these rules — derive the actual names from the user's instruction.
 - For any files NOT covered by the instruction, organize them logically by type or topic
 - You MUST include EVERY file_id in your response ({len(files)} total)
 - Every file_id must appear exactly once in your response
@@ -290,8 +292,10 @@ ANALYZE THE FILES and choose the BEST organization approach:
 
 CRITICAL RULES:
 - LOOK at the file names and tags to understand what they are about
-- Choose folder names that MAKE SENSE for these specific files
+- Choose folder names that MAKE SENSE for these specific files (derived from the files themselves, NOT from any example words in these rules)
 - Use CLEAR, DESCRIPTIVE folder names (not generic like "folder1")
+- USE THE EXACT WORDS that match the content — do not change capitalisation or pluralisation arbitrarily
+- For NESTED FOLDERS use slash syntax: "<parent>/<child>"
 - DO NOT put all files in a single folder - create a logical structure
 - You MUST include EVERY file_id in your response ({len(files)} total)
 - Each file_id must appear in exactly ONE folder
