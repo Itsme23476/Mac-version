@@ -45,6 +45,11 @@ class FilectApplication(QApplication):
         super().__init__(argv)
         self._main_window = None
         self._auth_dialog = None
+        # When macOS launches us via a filect:// URL while another instance is
+        # already running, the URL arrives in THIS (new) instance as a Qt
+        # FileOpen event. We stash it here so main() can forward it to the
+        # running instance over the single-instance socket before exiting.
+        self._pending_url = None
 
     def set_main_window(self, window):
         self._main_window = window
@@ -55,14 +60,64 @@ class FilectApplication(QApplication):
     def event(self, event):
         if event.type() == QEvent.FileOpen:
             url = event.url().toString()
-            if url.startswith('filect://verify'):
-                self._handle_verify(url)
-            elif url.startswith('filect://subscribe'):
-                self._handle_subscribe()
-            elif url.startswith('filect://'):
-                self._bring_to_front()
+            # Always stash — main() reads this to forward to an existing
+            # instance if we're the second one launched.
+            self._pending_url = url
+            self._dispatch_url(url)
             return True
         return super().event(event)
+
+    def _dispatch_url(self, url):
+        if url.startswith('filect://verify'):
+            self._handle_verify(url)
+        elif url.startswith('filect://subscribe'):
+            self._handle_subscribe()
+        elif url.startswith('filect://auth-callback'):
+            self._handle_auth_callback(url)
+        elif url.startswith('filect://'):
+            self._bring_to_front()
+
+    def _handle_auth_callback(self, url):
+        """Complete OAuth (Google) sign-in.
+
+        Supabase redirects back to filect://auth-callback#access_token=...&refresh_token=...
+        after the user completes Google sign-in in the browser. We extract the
+        tokens from the URL fragment, install them as the active session, and
+        let the auth dialog continue into the main window.
+        """
+        # Tokens come back in the URL FRAGMENT (#…), not query string — that's
+        # Supabase's implicit OAuth flow. urlparse puts it in .fragment.
+        parsed = urlparse(url)
+        params = parse_qs(parsed.fragment) if parsed.fragment else parse_qs(parsed.query)
+        access_token = params.get('access_token', [None])[0]
+        refresh_token = params.get('refresh_token', [None])[0]
+
+        if not access_token or not refresh_token:
+            logger.error("filect://auth-callback received without tokens")
+            return
+
+        logger.info("OAuth callback: installing Google sign-in session")
+        result = supabase_auth.restore_session(access_token, refresh_token)
+        if not result.get('success'):
+            logger.error(f"OAuth session install failed: {result.get('error')}")
+            return
+
+        # Persist so the user stays logged in next launch.
+        tokens = supabase_auth.get_session_tokens()
+        if tokens:
+            settings.set_auth_tokens(
+                tokens['access_token'],
+                tokens['refresh_token'],
+                supabase_auth.user_email or ''
+            )
+
+        # If the auth dialog is still up, run the same post-signin path as
+        # email/password — it'll close the dialog and route to main window or
+        # subscribe page based on subscription status.
+        if self._auth_dialog and self._auth_dialog.isVisible():
+            self._auth_dialog._check_subscription_silent()
+        else:
+            self._bring_to_front()
 
     def _handle_subscribe(self):
         """Bring the app forward and show the subscribe page (from a recovery email link)."""
@@ -151,16 +206,26 @@ def acquire_single_instance(app) -> bool:
     Ensure only one Filect window runs at a time.
 
     Returns True if this is the first/only instance (and sets up a listener to
-    bring the window forward if another launch happens). Returns False if another
-    instance is already running — in that case it signals the existing one to come
-    to the front, and the caller should exit immediately.
+    forward deep-link URLs from any future launches). Returns False if another
+    instance is already running — in that case it forwards any pending filect://
+    URL we received from macOS to the running instance, then the caller exits.
     """
     sock = QLocalSocket()
     sock.connectToServer(SINGLE_INSTANCE_KEY)
     if sock.waitForConnected(300):
-        # Another instance is already running. The connection itself triggers the
-        # running instance's newConnection handler (which brings its window to the
-        # front), so we just disconnect and bail out.
+        # Another instance is already running. macOS may have launched us with a
+        # filect:// deep link (Apple Event). Give Qt a brief tick to surface that
+        # FileOpen event into app._pending_url so we can forward it.
+        for _ in range(20):
+            app.processEvents()
+            if getattr(app, '_pending_url', None):
+                break
+            import time as _t; _t.sleep(0.02)
+
+        payload = (getattr(app, '_pending_url', None) or '').encode('utf-8')
+        sock.write(payload)
+        sock.flush()
+        sock.waitForBytesWritten(500)
         sock.disconnectFromServer()
         return False
 
@@ -171,9 +236,19 @@ def acquire_single_instance(app) -> bool:
 
     def _on_new_connection():
         conn = server.nextPendingConnection()
-        if conn is not None:
+        if conn is None:
+            return
+        # Wait briefly for the forwarded URL bytes; fall back to plain
+        # bring-to-front if nothing arrives (manual second-launch).
+        if conn.waitForReadyRead(500):
+            data = bytes(conn.readAll()).decode('utf-8', errors='ignore').strip()
+            if data:
+                app._dispatch_url(data)
+            else:
+                app._bring_to_front()
+        else:
             app._bring_to_front()
-            conn.disconnectFromServer()
+        conn.disconnectFromServer()
 
     server.newConnection.connect(_on_new_connection)
     # Keep a reference so the server isn't garbage-collected.
