@@ -79,7 +79,7 @@ function nudgeEmail(name: string | null, url: string): string {
 // when releases are tagged. Used in the discount email so a recipient can grab
 // the app + redeem the code in one place.
 const MAC_DOWNLOAD = "https://github.com/Itsme23476/Mac-version/releases/download/v14.1.10/Filect-14.1.10-mac.dmg";
-const WIN_DOWNLOAD = "https://github.com/Itsme23476/App-interface/releases/download/v12.2.10/Filect.exe";
+const WIN_DOWNLOAD = "https://github.com/Itsme23476/App-interface/releases/download/v12.2.11/Filect.exe";
 
 function discountEmail(name: string | null, url: string): string {
   const greeting = name ? `Hi ${name.split(" ")[0]},` : "Hi there,";
