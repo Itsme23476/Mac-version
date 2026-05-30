@@ -1362,7 +1362,15 @@ class AuthDialog(QDialog):
         redirect = quote(f"http://127.0.0.1:{PORT}/callback", safe='')
         url = f"{SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to={redirect}"
         try:
-            webbrowser.open(url)
+            # webbrowser.open() on macOS doesn't reliably activate the browser
+            # when our app currently has focus — the tab opens but stays behind
+            # the Filect window. `open <url>` (the macOS shell command) does
+            # activate the browser. Fall back to webbrowser.open on other OSes.
+            import subprocess, sys as _sys
+            if _sys.platform == "darwin":
+                subprocess.Popen(["open", url])
+            else:
+                webbrowser.open(url)
         except Exception as e:
             logger.error(f"Could not open browser for Google sign-in: {e}")
             self._stop_google_server()
@@ -1469,6 +1477,13 @@ class AuthDialog(QDialog):
             logger.info("Active subscription found")
             self.auth_successful.emit()
             self.accept()
+        elif result.get('trial_blocked_reason') == 'duplicate_trial_card':
+            # User tried to start a trial with a card that was already used.
+            # Route to /trial-blocked (clear message + "$X immediately" CTA)
+            # instead of the generic pricing page so they know what happened.
+            logger.info("Trial blocked (duplicate card) — routing to /trial-blocked")
+            self._show_subscribe_page()
+            QTimer.singleShot(150, self._open_trial_blocked)
         else:
             # No subscription → switch to the subscribe page in the dialog AND
             # auto-open filect.io/pricing in the browser so the user lands on
@@ -1477,6 +1492,23 @@ class AuthDialog(QDialog):
             # subscription polling — same UX as before, just front-loaded.
             self._show_subscribe_page()
             QTimer.singleShot(150, self._open_checkout)
+
+    def _open_trial_blocked(self):
+        """Open the /trial-blocked page in browser + update the in-app
+        subscribe page text so it matches what just happened."""
+        supabase_auth.open_trial_blocked_page()
+        # Make the in-app dialog text honest about why we routed here.
+        try:
+            self.subscribe_button.setText("View options")
+            self.sub_status.setText(
+                "Your free trial isn't available — this card was already used for a prior trial. "
+                "We've opened the next steps in your browser."
+            )
+            # Still poll subscription so when they pay, the app auto-unlocks.
+            self._poll_count = 0
+            self._poll_timer.start(3000)
+        except Exception:
+            pass
     
     def _do_logout(self):
         """Handle logout."""

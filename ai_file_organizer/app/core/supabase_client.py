@@ -382,11 +382,17 @@ class SupabaseAuth:
                 status = sub.get('status')
                 is_active = status in ('active', 'trialing', 'past_due')
                 period_end = sub.get('current_period_end')
-                logger.info(f"[SUB CHECK] Status: {status}, has_subscription={is_active}, period_end={period_end}")
+                # trial_blocked_reason is set by stripe-webhook when a customer
+                # starts a trial with a card that was already used. Surface it so
+                # the auth dialog can route them to /trial-blocked (clear message
+                # + immediate-pay CTA) instead of the generic pricing page.
+                blocked_reason = sub.get('trial_blocked_reason')
+                logger.info(f"[SUB CHECK] Status: {status}, has_subscription={is_active}, period_end={period_end}, blocked_reason={blocked_reason}")
                 return {
                     'has_subscription': is_active,
                     'status': status,
-                    'expires_at': period_end
+                    'expires_at': period_end,
+                    'trial_blocked_reason': blocked_reason,
                 }
             else:
                 logger.warning(f"[SUB CHECK] No subscription found for user_id: {user_id}")
@@ -740,6 +746,31 @@ class SupabaseAuth:
             return {'success': True}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    def open_trial_blocked_page(self) -> bool:
+        """Open filect.io/trial-blocked for a user whose trial was canceled
+        because their card was already used (trial abuse). Pre-fills user_id
+        and price so the "Subscribe now" CTA on that page jumps straight to
+        an immediate-pay checkout."""
+        if not self._user:
+            return False
+        from urllib.parse import quote
+        user_id = self._user.get('id', '')
+        email = self._user.get('email', '')
+        # Pass the most-recent price they were trying for, if we have one,
+        # so the page shows the right amount in the "$X charged immediately" line.
+        sub = self._subscription or {}
+        params = [f"user_id={user_id}", f"email={quote(email)}"]
+        if sub.get('price_id'):
+            params.append(f"price={sub['price_id']}")
+        url = f"https://filect.io/trial-blocked?{'&'.join(params)}"
+        try:
+            webbrowser.open(url)
+            logger.info(f"Opened /trial-blocked for user: {email}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to open trial-blocked page: {e}")
+            return False
 
     def open_web_pricing(self) -> bool:
         """
