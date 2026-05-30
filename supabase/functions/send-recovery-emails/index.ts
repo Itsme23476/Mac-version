@@ -75,6 +75,12 @@ function nudgeEmail(name: string | null, url: string): string {
 </html>`;
 }
 
+// Latest desktop download URLs — keep in sync with Hero.tsx / CtaSection.tsx
+// when releases are tagged. Used in the discount email so a recipient can grab
+// the app + redeem the code in one place.
+const MAC_DOWNLOAD = "https://github.com/Itsme23476/Mac-version/releases/download/v14.1.10/Filect-14.1.10-mac.dmg";
+const WIN_DOWNLOAD = "https://github.com/Itsme23476/App-interface/releases/download/v12.2.10/Filect.exe";
+
 function discountEmail(name: string | null, url: string): string {
   const greeting = name ? `Hi ${name.split(" ")[0]},` : "Hi there,";
   return `<!DOCTYPE html>
@@ -108,6 +114,28 @@ function discountEmail(name: string | null, url: string): string {
               <a href="${url}" style="color:#fff;text-decoration:none;font-size:16px;font-weight:600;">Claim your discount →</a>
             </td></tr>
           </table>
+
+          <p style="margin:24px 0 12px;font-size:14px;color:#1a1a2e;font-weight:600;">
+            Don't have Filect installed yet?
+          </p>
+          <table cellpadding="0" cellspacing="0" style="margin:0 0 8px;">
+            <tr>
+              <td style="padding-right:10px;">
+                <a href="${MAC_DOWNLOAD}" style="display:inline-block;background:#1a1a2e;color:#fff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 20px;border-radius:8px;">
+                  Download for Mac
+                </a>
+              </td>
+              <td>
+                <a href="${WIN_DOWNLOAD}" style="display:inline-block;background:#1a1a2e;color:#fff;text-decoration:none;font-size:14px;font-weight:600;padding:11px 20px;border-radius:8px;">
+                  Download for Windows
+                </a>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:6px 0 24px;font-size:12px;color:#888;">
+            Install, log in with this email, and your discount will be ready at checkout.
+          </p>
+
           <p style="margin:0;font-size:14px;color:#666;line-height:1.6;">
             Questions? Just reply — we read every email.
           </p>
