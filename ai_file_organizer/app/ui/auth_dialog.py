@@ -1414,26 +1414,20 @@ class AuthDialog(QDialog):
                     tokens['access_token'], tokens['refresh_token'],
                     supabase_auth.user_email or ''
                 )
-            # Bring the app to the foreground so the user doesn't have to manually
-            # switch back from the browser tab. As an LSUIElement (accessory) app
-            # macOS throttles activateIgnoringOtherApps_ — sometimes it works,
-            # sometimes it dampens. The fix: temporarily flip to Regular activation
-            # policy, activate, then flip back to Accessory once the window is up.
-            try:
-                app = QApplication.instance()
-                if app is not None and hasattr(app, 'set_normal_focus_mode'):
-                    app.set_normal_focus_mode(True)
-                if app is not None and hasattr(app, '_bring_to_front'):
-                    app._bring_to_front()
-                self.raise_()
-                self.activateWindow()
-                # Flip back to Accessory after the activation has settled. 600ms
-                # is enough for Cocoa to register the activation; flipping too
-                # fast can race and cancel it.
-                if app is not None and hasattr(app, 'set_normal_focus_mode'):
-                    QTimer.singleShot(600, lambda: app.set_normal_focus_mode(False))
-            except Exception:
-                pass
+            # IMPORTANT: do NOT touch macOS activation policy or steal focus here.
+            # This callback runs while the auth dialog is still open MODALLY.
+            # main.py holds Regular activation policy for the dialog's entire
+            # lifetime (set before exec(), restored to Accessory only after exec()
+            # returns). Flipping to Accessory from here — even on a 600ms delay —
+            # lands while the dialog is still up, and an accessory (LSUIElement)
+            # app's windows can't become the key window, which FROZE the dialog
+            # (clicks registered as nothing). And activateIgnoringOtherApps_ ripped
+            # focus off the browser at the exact moment the user needs it to pick a
+            # plan. Let the routing below decide focus instead:
+            #   • has subscription  → accept() closes the dialog and main.py brings
+            #     up the main window (identical to the email/password login path).
+            #   • no subscription   → we open the browser pricing page, so we
+            #     deliberately leave the browser in front.
             # Reset the button state so if the user ends up back at the login
             # page (e.g., they had no subscription → signed out from sub page),
             # the Google button isn't stuck on "Waiting…".
