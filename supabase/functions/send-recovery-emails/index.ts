@@ -78,7 +78,7 @@ function nudgeEmail(name: string | null, url: string): string {
 // Latest desktop download URLs — keep in sync with Hero.tsx / CtaSection.tsx
 // when releases are tagged. Used in the discount email so a recipient can grab
 // the app + redeem the code in one place.
-const MAC_DOWNLOAD = "https://github.com/Itsme23476/Mac-version/releases/download/v14.1.12/Filect-14.1.12-mac.dmg";
+const MAC_DOWNLOAD = "https://github.com/Itsme23476/Mac-version/releases/download/v14.1.14/Filect-14.1.14-mac.dmg";
 const WIN_DOWNLOAD = "https://github.com/Itsme23476/App-interface/releases/download/v12.2.14/Filect.exe";
 
 function discountEmail(name: string | null, url: string): string {
