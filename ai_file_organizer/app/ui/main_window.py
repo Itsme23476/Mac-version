@@ -3119,15 +3119,27 @@ class MainWindow(QMainWindow):
             # Sign out from Supabase
             supabase_auth.sign_out()
             settings.clear_auth_tokens()
-            
+
             # Hide main window
             self.hide()
-            
-            # Show auth dialog again
+
+            # Show auth dialog again. Flip to Regular activation policy for its
+            # lifetime: as an accessory (agent) app the login dialog otherwise
+            # HOLDS focus and won't hand it to the browser when you click
+            # "Continue with Google". main.py does this for the first-launch
+            # dialog; the post-sign-out dialog needs the same treatment.
+            app = QApplication.instance()
+            if app is not None and hasattr(app, 'set_normal_focus_mode'):
+                app.set_normal_focus_mode(True)
             from app.ui.auth_dialog import AuthDialog
             auth_dialog = AuthDialog()
-            
-            if auth_dialog.exec():
+            if app is not None and hasattr(app, 'set_auth_dialog'):
+                app.set_auth_dialog(auth_dialog)  # register for bring-to-front / deep links
+            result = auth_dialog.exec()
+            if app is not None and hasattr(app, 'set_normal_focus_mode'):
+                app.set_normal_focus_mode(False)  # back to Accessory (menu-bar agent)
+
+            if result:
                 # User logged in successfully, refresh account info and show window
                 self._refresh_account_info()
                 self._update_usage_labels()  # Update usage for new user
