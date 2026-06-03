@@ -25,7 +25,7 @@ sys.path.insert(0, str(project_root))
 from urllib.parse import urlparse, parse_qs
 
 from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QIcon, QFileOpenEvent
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
@@ -188,17 +188,33 @@ class FilectApplication(QApplication):
             logger.warning(f"Could not change activation policy: {e}")
 
     def _bring_to_front(self):
-        if not self._main_window:
+        # Surface the main window if we have one, otherwise the auth dialog.
+        # As an accessory (LSUIElement) app, activateIgnoringOtherApps_ is
+        # throttled, so on a relaunch a plain show()/raise() often leaves the
+        # window buried behind other apps — which made "close → reopen" look
+        # like nothing happened (the window was there, just never brought
+        # forward). Briefly flipping to Regular activation policy makes the
+        # bring-to-front actually stick.
+        win = self._main_window or self._auth_dialog
+        if not win:
             return
-        self._main_window.show()
-        self._main_window.raise_()
-        self._main_window.activateWindow()
+        # If the auth dialog is the target it's running modally and main.py
+        # already holds Regular policy for its whole lifetime — don't flip the
+        # policy back underneath it (that re-introduces the 14.1.11 freeze).
+        modal_dialog = self._main_window is None and self._auth_dialog is not None
+        if sys.platform == 'darwin':
+            self.set_normal_focus_mode(True)
+        win.show()
+        win.raise_()
+        win.activateWindow()
         if sys.platform == 'darwin':
             try:
                 from AppKit import NSApp
                 NSApp.activateIgnoringOtherApps_(True)
             except Exception:
                 pass
+            if not modal_dialog:
+                QTimer.singleShot(800, lambda: self.set_normal_focus_mode(False))
 
 
 def acquire_single_instance(app) -> bool:
@@ -362,7 +378,13 @@ def main():
     window = MainWindow()
     app.set_main_window(window)  # register for filect:// deep link handling
     window.show()
-    
+
+    # Pull the app to the front now that the main window exists. After a Google
+    # sign-in (active subscription) the browser had focus, so without this the
+    # app stays buried behind the browser tab — _bring_to_front's policy flip
+    # surfaces it reliably for an accessory (LSUIElement) app.
+    app._bring_to_front()
+
     # Start event loop
     sys.exit(app.exec())
 
