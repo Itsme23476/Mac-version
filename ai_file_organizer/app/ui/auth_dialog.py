@@ -1240,10 +1240,38 @@ class AuthDialog(QDialog):
         result = supabase_auth.check_subscription()
 
         if result.get('has_subscription'):
+            # Don't grant access on a transient 'trialing' status. A brand-new
+            # trial reads as active for a few seconds before the webhook's
+            # duplicate-card check can cancel it — accepting here is what used to
+            # drop a trial-blocked user into the app on a "Free Plan". Stop and
+            # re-confirm after a short delay so a trial that's about to be blocked
+            # never slips through.
             self._poll_timer.stop()
+            self.sub_status.setText("Confirming your subscription…")
+            QTimer.singleShot(5000, self._confirm_subscription_and_enter)
+
+    def _confirm_subscription_and_enter(self):
+        """Second-look subscription check that closes the race with the
+        duplicate-card trial blocker. Only a clean, still-active subscription lets
+        the user into the app; a blocked trial is locked on the trial-blocked
+        screen instead of dropping into a 'Free Plan'."""
+        result = supabase_auth.check_subscription()
+        if result.get('trial_blocked_reason') == 'duplicate_trial_card':
+            logger.info("Trial blocked (duplicate card) caught at confirm — locking out")
+            self._show_subscribe_page()
+            self._open_trial_blocked()
+            return
+        if result.get('has_subscription'):
             self.sub_status.setText("Payment confirmed! 🎉")
-            logger.info("Subscription verified!")
-            QTimer.singleShot(500, lambda: (self.auth_successful.emit(), self.accept()))
+            logger.info("Subscription verified and confirmed!")
+            self.auth_successful.emit()
+            self.accept()
+        else:
+            # Subscription disappeared between checks (canceled) — keep the user
+            # gated and resume polling rather than letting them in.
+            self._show_subscribe_page()
+            self._poll_count = 0
+            self._poll_timer.start(3000)
     
     def _sign_in_with_google(self):
         """Launch Google OAuth via the loopback-server pattern (RFC 8252).
@@ -1491,14 +1519,21 @@ class AuthDialog(QDialog):
         """Open the /trial-blocked page in browser + update the in-app
         subscribe page text so it matches what just happened."""
         supabase_auth.open_trial_blocked_page()
-        # Make the in-app dialog text honest about why we routed here.
+        # Turn the subscribe page into an honest "free trial already used" lock
+        # screen. The user does NOT get into the app on this path — only a real
+        # paid subscription unlocks it (the poll below picks that up).
         try:
-            self.subscribe_button.setText("View options")
+            if hasattr(self, 'title_label'):
+                self.title_label.setText("Free trial already used")
+            if hasattr(self, 'subtitle_label'):
+                self.subtitle_label.setText("This card was already used for a previous trial.")
+            self.subscribe_button.setText("Subscribe to unlock")
             self.sub_status.setText(
-                "Your free trial isn't available — this card was already used for a prior trial. "
-                "We've opened the next steps in your browser."
+                "A new free trial isn't available on this card. To use Filect, subscribe "
+                "from the page we opened in your browser — the app unlocks the moment your "
+                "payment goes through."
             )
-            # Still poll subscription so when they pay, the app auto-unlocks.
+            # Keep polling so a completed payment auto-unlocks the app.
             self._poll_count = 0
             self._poll_timer.start(3000)
         except Exception:
