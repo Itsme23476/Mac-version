@@ -379,7 +379,7 @@ class Settings:
 
     # Quick search setters
     def set_quick_search_shortcut(self, shortcut: str) -> None:
-        sc = (shortcut or '').strip().lower() or 'ctrl+shift+space'
+        sc = (shortcut or '').strip().lower() or 'cmd+shift+space'
         self.quick_search_shortcut = sc
         self._save_config()
 

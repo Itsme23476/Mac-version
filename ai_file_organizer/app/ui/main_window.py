@@ -262,6 +262,99 @@ class AutoIndexWorker(QThread):
         self._running = False
 
 
+def _is_valid_hotkey(seq: str) -> bool:
+    """True if `seq` has at least one modifier AND one non-modifier key."""
+    mods = {'ctrl', 'control', 'shift', 'alt', 'option', 'cmd', 'command', 'meta'}
+    parts = [p for p in (seq or '').replace(' ', '').lower().split('+') if p]
+    if len(parts) < 2:
+        return False
+    return any(p in mods for p in parts) and any(p not in mods for p in parts)
+
+
+class ShortcutRecorder(QLineEdit):
+    """A field that RECORDS a real key chord (e.g. Cmd+Shift+Space) instead of
+    letting the user type text into it. Stores the app's hotkey format, e.g.
+    'cmd+shift+space'. Click it, then press your combo; Esc clears it.
+    Fixes the old plain-text box that couldn't capture modifier keys.
+    """
+
+    def __init__(self, initial: str = "", parent=None):
+        super().__init__(parent)
+        self.setText(initial or "")
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setContextMenuPolicy(Qt.NoContextMenu)  # block right-click paste
+        self.setCursor(Qt.PointingHandCursor)
+
+    def event(self, e):
+        # Claim key chords as ours: without this, Qt fires a ShortcutOverride and
+        # may route the combo to the app's shortcut system, so keyPressEvent never
+        # sees it. Accepting ShortcutOverride forces it back to us as a key press.
+        from PySide6.QtCore import QEvent
+        if e.type() == QEvent.ShortcutOverride:
+            e.accept()
+            return True
+        return super().event(e)
+
+    def keyPressEvent(self, event):
+        import sys
+        key = event.key()
+        if key == int(Qt.Key_Escape):
+            self.clear()
+            event.accept()
+            return
+        keyname = self._key_name(key)
+        if not keyname:
+            return  # bare modifier / unsupported key — keep waiting for a real key
+        mods = event.modifiers()
+        parts = []
+        if sys.platform == 'darwin':
+            # Qt swaps modifiers on macOS: ControlModifier == the Command key,
+            # MetaModifier == the Control key. Emit the PHYSICAL key names.
+            if mods & Qt.ControlModifier:
+                parts.append('cmd')
+            if mods & Qt.MetaModifier:
+                parts.append('ctrl')
+        else:
+            if mods & Qt.ControlModifier:
+                parts.append('ctrl')
+            if mods & Qt.MetaModifier:
+                parts.append('meta')
+        if mods & Qt.AltModifier:
+            parts.append('alt')
+        if mods & Qt.ShiftModifier:
+            parts.append('shift')
+        if not parts:
+            return  # a global hotkey needs at least one modifier
+        parts.append(keyname)
+        self.setText('+'.join(parts))
+        event.accept()
+
+    def keyReleaseEvent(self, event):
+        event.accept()
+
+    @staticmethod
+    def _key_name(key):
+        special = {
+            int(Qt.Key_Space): 'space', int(Qt.Key_Return): 'enter', int(Qt.Key_Enter): 'enter',
+            int(Qt.Key_Tab): 'tab', int(Qt.Key_Backspace): 'backspace', int(Qt.Key_Delete): 'delete',
+            int(Qt.Key_Up): 'up', int(Qt.Key_Down): 'down', int(Qt.Key_Left): 'left', int(Qt.Key_Right): 'right',
+            int(Qt.Key_Home): 'home', int(Qt.Key_End): 'end',
+            int(Qt.Key_PageUp): 'pageup', int(Qt.Key_PageDown): 'pagedown',
+        }
+        if key in special:
+            return special[key]
+        for i in range(1, 21):
+            fk = getattr(Qt, f'Key_F{i}', None)
+            if fk is not None and key == int(fk):
+                return f'f{i}'
+        # Letters A-Z (0x41-0x5A) and digits 0-9 (0x30-0x39) map to their ASCII char.
+        if 0x41 <= key <= 0x5A:
+            return chr(key).lower()
+        if 0x30 <= key <= 0x39:
+            return chr(key)
+        return None
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
     
@@ -347,12 +440,6 @@ class MainWindow(QMainWindow):
                 app.set_normal_focus_mode(regular)
         except Exception:
             pass
-
-    def hideEvent(self, event):
-        """When the main window is hidden/closed, drop back to Accessory (menu-bar
-        agent) so the quick-search overlay can still appear over fullscreen apps."""
-        self._set_macos_focus_mode(False)
-        super().hideEvent(event)
 
     def showEvent(self, event):
         """Handle window show event - show onboarding on first launch"""
@@ -2325,8 +2412,8 @@ class MainWindow(QMainWindow):
         shortcut_label = QLabel("Shortcut:")
         shortcut_label.setStyleSheet(settings_label_style)
         qs_row2.addWidget(shortcut_label)
-        self.qs_shortcut_input = QLineEdit(settings.quick_search_shortcut)
-        self.qs_shortcut_input.setPlaceholderText("e.g., ctrl+shift+space")
+        self.qs_shortcut_input = ShortcutRecorder(settings.quick_search_shortcut)
+        self.qs_shortcut_input.setPlaceholderText("Click, then press your shortcut")
         self.qs_shortcut_input.setMinimumHeight(36)
         self.qs_shortcut_input.setMaximumWidth(180)
         self.qs_shortcut_input.setStyleSheet("""
@@ -2360,6 +2447,23 @@ class MainWindow(QMainWindow):
             }
         """)
         qs_row2.addWidget(self.qs_shortcut_save)
+        self.qs_shortcut_reset = QPushButton("Reset")
+        self.qs_shortcut_reset.setMinimumHeight(36)
+        self.qs_shortcut_reset.setMinimumWidth(70)
+        self.qs_shortcut_reset.setCursor(Qt.PointingHandCursor)
+        self.qs_shortcut_reset.setToolTip("Reset to the default shortcut (cmd+shift+space)")
+        self.qs_shortcut_reset.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #2A2A3A;
+                border-radius: 8px;
+                color: #A0A0B0;
+                font-weight: 600;
+            }
+            QPushButton:hover { border-color: #7C4DFF; color: #E8E8F0; }
+        """)
+        self.qs_shortcut_reset.clicked.connect(self.on_qs_reset_shortcut)
+        qs_row2.addWidget(self.qs_shortcut_reset)
         qs_row2.addStretch()
         qs_layout.addLayout(qs_row2)
 
@@ -3383,7 +3487,10 @@ class MainWindow(QMainWindow):
     
     def _register_quick_search_hotkey(self):
         """Register the global hotkey for quick search."""
-        hotkey = settings.quick_search_shortcut or 'cmd+shift+space'
+        hotkey = (settings.quick_search_shortcut or '').strip().lower()
+        if not _is_valid_hotkey(hotkey):
+            logger.warning(f"[QS] Saved shortcut '{hotkey}' is invalid — falling back to default")
+            hotkey = 'cmd+shift+space'
         logger.info(f"[QS] Registering global hotkey: {hotkey}")
 
         # Register UNCONDITIONALLY. The primary backend (Carbon RegisterEventHotKey)
@@ -4860,6 +4967,12 @@ class MainWindow(QMainWindow):
         # Update the hotkey live (unregister old, register new)
         self.update_quick_search_hotkey(sc)
         self.status_bar.showMessage(f"Quick Search shortcut updated: {sc}")
+
+    def on_qs_reset_shortcut(self):
+        default = 'cmd+shift+space'
+        self.qs_shortcut_input.setText(default)
+        self.update_quick_search_hotkey(default)
+        self.status_bar.showMessage(f"Quick Search shortcut reset to: {default}")
 
     def on_debug_cell_changed(self, item: QTableWidgetItem) -> None:
         # DIAGNOSTIC: Log every call to this handler

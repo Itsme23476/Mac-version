@@ -1008,28 +1008,37 @@ class QuickSearchOverlay(QDialog):
             except Exception as e:
                 logger.warning(f"[QS] Could not reverse _setPreventsActivation: {e}")
             
-            # Hide all other windows before activating - prevents main window from appearing
-            # This is critical for non-fullscreen scenarios
-            try:
-                for ns_window in NSApp.windows():
-                    try:
-                        if ns_window != popup_window and ns_window.isVisible():
-                            # Don't hide the popup, only other windows (like the main window)
-                            window_title = ns_window.title() if hasattr(ns_window, 'title') else ""
-                            if window_title != "Quick Search":
-                                ns_window.orderOut_(None)
-                                logger.info(f"[QS] Hidden window: {window_title}")
-                    except Exception:
-                        continue
-            except Exception as e:
-                logger.warning(f"[QS] Could not hide other windows: {e}")
-            
-            # Activate the app - this is safe now that other windows are hidden
-            try:
-                NSApp.activateIgnoringOtherApps_(True)
-                logger.info("[QS] Called activateIgnoringOtherApps_(True)")
-            except Exception as e:
-                logger.warning(f"[QS] Could not activate app: {e}")
+            # If our OWN app was already frontmost when the popup was summoned, do
+            # NOT hide the main window or re-activate — that makes the app look gone
+            # with no way back (you can't click into an orderOut'd window). Just put
+            # the popup on top. We only hide other windows + activate when summoned
+            # from ANOTHER app (so the popup can grab keyboard focus), and we restore
+            # them when the popup closes.
+            import os
+            app_was_frontmost = (getattr(self, '_saved_window_hwnd', None) == os.getpid())
+            self._hidden_windows = []
+            if not app_was_frontmost:
+                try:
+                    for ns_window in NSApp.windows():
+                        try:
+                            if ns_window != popup_window and ns_window.isVisible():
+                                # Don't hide the popup, only other windows (the main window)
+                                window_title = ns_window.title() if hasattr(ns_window, 'title') else ""
+                                if window_title != "Quick Search":
+                                    ns_window.orderOut_(None)
+                                    self._hidden_windows.append(ns_window)
+                                    logger.info(f"[QS] Hidden window: {window_title}")
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.warning(f"[QS] Could not hide other windows: {e}")
+                try:
+                    NSApp.activateIgnoringOtherApps_(True)
+                    logger.info("[QS] Called activateIgnoringOtherApps_(True)")
+                except Exception as e:
+                    logger.warning(f"[QS] Could not activate app: {e}")
+            else:
+                logger.info("[QS] App already frontmost — leaving main window visible")
             
             # Now make it the key window
             try:
@@ -1126,7 +1135,35 @@ class QuickSearchOverlay(QDialog):
             settings._save_config()
         except Exception:
             pass
+        # Bring back the app windows the popup hid (e.g. the main window) so the
+        # user can return to the app after closing the popup. Skipped on the
+        # autofill path — there we must keep focus on the target file dialog.
+        if not getattr(self, '_skip_restore_on_hide', False):
+            self._restore_hidden_windows()
+        self._skip_restore_on_hide = False
         super().hideEvent(e)
+
+    def _restore_hidden_windows(self):
+        """Re-show the app windows the popup hid on macOS, so the app reappears
+        (with its Dock icon) when the popup closes — fixing the 'stuck in agent
+        mode, can't reopen' case."""
+        import sys
+        if sys.platform != 'darwin':
+            return
+        windows = getattr(self, '_hidden_windows', None)
+        if not windows:
+            return
+        try:
+            for ns_window in windows:
+                try:
+                    ns_window.makeKeyAndOrderFront_(None)
+                except Exception:
+                    continue
+            logger.info(f"[QS] Restored {len(windows)} window(s) hidden for the popup")
+        except Exception as e:
+            logger.warning(f"[QS] Could not restore hidden windows: {e}")
+        finally:
+            self._hidden_windows = []
 
     def _run_search(self):
         """Start a background search. If a search is already running, queue the new query."""
@@ -1346,7 +1383,9 @@ class QuickSearchOverlay(QDialog):
             # Reset keyboard focus flag
             self._keyboard_focus_claimed = False
             
-            # Hide the popup first
+            # Hide the popup first. Suppress restoring the main window — the
+            # autofill below needs focus on the target dialog, not our window.
+            self._skip_restore_on_hide = True
             self.hide()
             logger.info("[QS] Called hide() on popup")
             
