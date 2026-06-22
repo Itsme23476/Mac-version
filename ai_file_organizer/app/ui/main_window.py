@@ -3310,8 +3310,10 @@ class MainWindow(QMainWindow):
         # Store the show function as instance method for re-registration
         self._show_quick_overlay = self._create_show_quick_overlay_handler()
         
-        # Connect the thread-safe signal to the handler (runs on main Qt thread)
-        self._trigger_quick_overlay.connect(self._show_quick_overlay)
+        # Connect the thread-safe signal to the handler (runs on main Qt thread).
+        # QueuedConnection: the Carbon hotkey callback fires *inside* native event
+        # dispatch on the main thread, so queue the show to run after we return.
+        self._trigger_quick_overlay.connect(self._show_quick_overlay, Qt.QueuedConnection)
         logger.info("[QS] Connected _trigger_quick_overlay signal to handler")
         
         # Initialize hotkey tracking
@@ -3320,7 +3322,7 @@ class MainWindow(QMainWindow):
         
         # Register the hotkey
         self._register_quick_search_hotkey()
-    
+
     def _create_show_quick_overlay_handler(self):
         """Create the handler function for showing the quick search overlay."""
         def show_quick_overlay():
@@ -3357,51 +3359,62 @@ class MainWindow(QMainWindow):
     
     def _register_quick_search_hotkey(self):
         """Register the global hotkey for quick search."""
-        hotkey = settings.quick_search_shortcut or 'ctrl+shift+space'
+        hotkey = settings.quick_search_shortcut or 'cmd+shift+space'
         logger.info(f"[QS] Registering global hotkey: {hotkey}")
-        
-        # Check for Accessibility permission on macOS
-        # Only try to register global hotkey if permission is granted
-        # This prevents showing two dialogs (system + custom)
-        if check_accessibility_permission():
-            # Permission is granted - reset the "don't show" flag
-            # This ensures if permission is revoked later, the dialog can show again
-            if settings.accessibility_dialog_shown:
-                logger.info("[QS] Permission granted - resetting accessibility dialog flag")
-                settings.reset_accessibility_dialog()
-            
-            # Register global hotkey using pynput (works on macOS)
-            # Use signal.emit() to safely trigger UI from background thread
-            try:
-                hk = register_global_hotkey(
-                    self,
-                    hotkey,
-                    lambda: self._trigger_quick_overlay.emit()
-                )
-                if hk:
-                    self._global_hotkey = hk
-                    logger.info(f"[QS] Registered global hotkey: {hotkey}")
-                else:
-                    logger.warning("[QS] Global hotkey registration returned None")
-            except Exception as e:
-                logger.error(f"[QS] Failed to register global hotkey: {e}")
-        else:
-            logger.warning("[QS] Accessibility permission not granted - skipping global hotkey registration")
-            # Show permission dialog after a short delay (so main window is visible)
-            QTimer.singleShot(1500, self._show_accessibility_permission_dialog)
-            # Don't try to register with pynput - it would trigger the system dialog
-            # The app-focus shortcut below will still work when app is focused
-        
-        # App-focus fallback using QShortcut (works when app is focused)
+
+        # Register UNCONDITIONALLY. The primary backend (Carbon RegisterEventHotKey)
+        # is a true system-wide hotkey that needs NO Accessibility permission and
+        # fires regardless of which app is focused. We only nudge the user about
+        # Accessibility if registration had to fall back to an event-monitor path.
+        self._global_hotkey = None
+        registered_kind = None
         try:
-            # Convert to Qt format: ctrl+shift+space -> Ctrl+Shift+Space
-            ks = hotkey.replace('ctrl', 'Ctrl').replace('alt', 'Alt').replace('shift', 'Shift').replace('space', 'Space')
-            self._focus_quick_shortcut = QShortcut(QKeySequence(ks), self)
-            self._focus_quick_shortcut.setContext(Qt.ApplicationShortcut)
-            self._focus_quick_shortcut.activated.connect(self._show_quick_overlay)
-            logger.info(f"[QS] Registered app-focus shortcut: {ks}")
+            hk = register_global_hotkey(
+                self,
+                hotkey,
+                lambda: self._trigger_quick_overlay.emit()
+            )
+            if hk:
+                self._global_hotkey = hk
+                try:
+                    registered_kind = hk[1].get('kind') if isinstance(hk[1], dict) else None
+                except Exception:
+                    registered_kind = None
+                logger.info(f"[QS] Registered global hotkey: {hotkey} (backend={registered_kind})")
+            else:
+                logger.warning("[QS] Global hotkey registration returned None")
         except Exception as e:
-            logger.warning(f"[QS] Failed to register app-focus shortcut: {e}")
+            logger.error(f"[QS] Failed to register global hotkey: {e}")
+
+        # Carbon needs no permission. Only prompt for Accessibility if we fell back
+        # to an event-monitor backend AND permission is missing.
+        if registered_kind != 'carbon' and not check_accessibility_permission():
+            QTimer.singleShot(1500, self._show_accessibility_permission_dialog)
+        elif check_accessibility_permission() and settings.accessibility_dialog_shown:
+            settings.reset_accessibility_dialog()
+
+        # App-focus fallback via QShortcut — only needed if the system-wide Carbon
+        # hotkey did NOT register (otherwise it would double-fire when focused).
+        if registered_kind != 'carbon':
+            try:
+                import sys
+                seq = hotkey.lower()
+                if sys.platform == 'darwin':
+                    # Qt swaps Ctrl<->Meta on macOS: in QKeySequence "Ctrl" == Command.
+                    seq = seq.replace('command', 'cmd')
+                    seq = seq.replace('cmd', 'Ctrl').replace('ctrl', 'Meta')
+                    seq = seq.replace('option', 'Alt').replace('alt', 'Alt')
+                    seq = seq.replace('shift', 'Shift').replace('space', 'Space')
+                else:
+                    seq = (seq.replace('ctrl', 'Ctrl').replace('command', 'Ctrl')
+                              .replace('cmd', 'Ctrl').replace('alt', 'Alt')
+                              .replace('shift', 'Shift').replace('space', 'Space'))
+                self._focus_quick_shortcut = QShortcut(QKeySequence(seq), self)
+                self._focus_quick_shortcut.setContext(Qt.ApplicationShortcut)
+                self._focus_quick_shortcut.activated.connect(self._show_quick_overlay)
+                logger.info(f"[QS] Registered app-focus shortcut: {seq}")
+            except Exception as e:
+                logger.warning(f"[QS] Failed to register app-focus shortcut: {e}")
     
     def _show_accessibility_permission_dialog(self):
         """Show a dialog prompting the user to grant Accessibility permission."""

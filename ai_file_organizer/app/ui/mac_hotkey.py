@@ -158,6 +158,136 @@ _MAC_KEYCODES = {
 }
 
 
+def _register_hotkey_carbon(sequence: str, on_activated: Callable[[], None]
+                            ) -> Optional[Tuple[int, Any, int]]:
+    """Register a TRUE system-wide hotkey via Carbon's RegisterEventHotKey.
+
+    Unlike NSEvent global monitors — which silently receive nothing unless the
+    app has Accessibility / Input-Monitoring permission — RegisterEventHotKey is
+    an OS-level hotkey that fires regardless of which app is frontmost and needs
+    NO permission whatsoever. This is the mechanism Spotlight/Alfred/Raycast use,
+    and it's the reliable path on modern macOS (incl. Sequoia/Tahoe).
+    """
+    import ctypes
+    import ctypes.util
+
+    carbon_path = ctypes.util.find_library('Carbon')
+    if not carbon_path:
+        raise OSError("Carbon framework not found")
+    carbon = ctypes.CDLL(carbon_path)
+
+    class _EventTypeSpec(ctypes.Structure):
+        _fields_ = [("eventClass", ctypes.c_uint32), ("eventKind", ctypes.c_uint32)]
+
+    class _EventHotKeyID(ctypes.Structure):
+        _fields_ = [("signature", ctypes.c_uint32), ("id", ctypes.c_uint32)]
+
+    kEventClassKeyboard = 0x6B657962  # 'keyb'
+    kEventHotKeyPressed = 5
+    # Carbon event modifier masks (NOT the same as NSEvent masks).
+    CARBON_CMD, CARBON_SHIFT, CARBON_OPTION, CARBON_CONTROL = 0x0100, 0x0200, 0x0800, 0x1000
+
+    parts = (sequence or '').lower().replace(' ', '').split('+')
+    modifiers = 0
+    keycode = None
+    for p in parts:
+        if not p:
+            continue
+        if p in ('cmd', 'command', 'meta'):
+            modifiers |= CARBON_CMD
+        elif p == 'shift':
+            modifiers |= CARBON_SHIFT
+        elif p in ('alt', 'option'):
+            modifiers |= CARBON_OPTION
+        elif p in ('ctrl', 'control'):
+            modifiers |= CARBON_CONTROL
+        elif p in _MAC_KEYCODES:
+            keycode = _MAC_KEYCODES[p]
+        else:
+            logger.warning(f"Carbon hotkey: unknown key part '{p}'")
+    if keycode is None:
+        raise ValueError(f"hotkey sequence '{sequence}' has no key, only modifiers")
+
+    # Handler callback type: OSStatus (*)(EventHandlerCallRef, EventRef, void*)
+    _HandlerProc = ctypes.CFUNCTYPE(
+        ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+
+    import time
+    _last_fire = [0.0]
+
+    def _handler(_next_handler, _event, _user_data):
+        try:
+            # Coalesce rapid double-fires (key auto-repeat / synthetic injection)
+            # so a single press can't trigger the popup twice.
+            now = time.monotonic()
+            if now - _last_fire[0] < 0.25:
+                return 0  # noErr
+            _last_fire[0] = now
+            logger.info(f"Hotkey activated (Carbon): {sequence}")
+            on_activated()
+        except Exception as e:
+            logger.error(f"Error in Carbon hotkey callback: {e}", exc_info=True)
+        return 0  # noErr
+
+    handler_proc = _HandlerProc(_handler)
+
+    # Function signatures.
+    carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
+    carbon.GetApplicationEventTarget.argtypes = []
+    carbon.InstallEventHandler.restype = ctypes.c_int32
+    carbon.InstallEventHandler.argtypes = [
+        ctypes.c_void_p, _HandlerProc, ctypes.c_uint32,
+        ctypes.POINTER(_EventTypeSpec), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    carbon.RegisterEventHotKey.restype = ctypes.c_int32
+    carbon.RegisterEventHotKey.argtypes = [
+        ctypes.c_uint32, ctypes.c_uint32, _EventHotKeyID,
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    carbon.UnregisterEventHotKey.restype = ctypes.c_int32
+    carbon.UnregisterEventHotKey.argtypes = [ctypes.c_void_p]
+    carbon.RemoveEventHandler.restype = ctypes.c_int32
+    carbon.RemoveEventHandler.argtypes = [ctypes.c_void_p]
+
+    target = carbon.GetApplicationEventTarget()
+    if not target:
+        raise OSError("GetApplicationEventTarget returned NULL")
+
+    spec = _EventTypeSpec(kEventClassKeyboard, kEventHotKeyPressed)
+    handler_ref = ctypes.c_void_p()
+    err = carbon.InstallEventHandler(
+        target, handler_proc, 1, ctypes.byref(spec), None, ctypes.byref(handler_ref))
+    if err != 0:
+        raise OSError(f"InstallEventHandler failed (OSStatus={err})")
+
+    hk_id = _EventHotKeyID(0x464C4354, 1)  # signature 'FLCT', id 1
+    hotkey_ref = ctypes.c_void_p()
+    err = carbon.RegisterEventHotKey(
+        keycode, modifiers, hk_id, target, 0, ctypes.byref(hotkey_ref))
+    if err != 0:
+        try:
+            carbon.RemoveEventHandler(handler_ref)
+        except Exception:
+            pass
+        raise OSError(f"RegisterEventHotKey failed (OSStatus={err})")
+
+    # Keep handler_proc/spec alive — if they're GC'd, the native callback dies.
+    handle = {
+        'kind': 'carbon',
+        'carbon': carbon,
+        'hotkey_ref': hotkey_ref,
+        'handler_ref': handler_ref,
+        'handler_proc': handler_proc,
+        'spec': spec,
+    }
+    _hotkey_listeners.append(handle)
+    hid = len(_hotkey_listeners) - 1
+    logger.info(f"Successfully registered global hotkey via Carbon: {sequence} "
+                f"(keycode={keycode}, mods={modifiers}, id={hid})")
+    return (hid, handle, 0)
+
+
 def _register_hotkey_nsevent(sequence: str, on_activated: Callable[[], None]
                              ) -> Optional[Tuple[int, Any, int]]:
     """Register a global hotkey using Cocoa's native NSEvent monitors.
@@ -260,6 +390,17 @@ def register_global_hotkey(
     # hits a dispatch_assert_queue check that kills the process whenever the
     # user toggles CapsLock. NSEvent monitors run on the main run loop, so
     # this whole class of crashes goes away.
+    # PRIMARY: Carbon RegisterEventHotKey — a true system-wide hotkey that needs
+    # NO Accessibility/Input-Monitoring permission and fires no matter which app
+    # is frontmost. This is the reliable path on modern macOS; NSEvent monitors
+    # below only work over other apps if Accessibility happens to be granted.
+    try:
+        result = _register_hotkey_carbon(sequence, on_activated)
+        if result:
+            return result
+    except Exception as e:
+        logger.error(f"Carbon hotkey registration failed, falling back to NSEvent: {e}", exc_info=True)
+
     try:
         return _register_hotkey_nsevent(sequence, on_activated)
     except Exception as e:
@@ -477,7 +618,18 @@ def unregister_global_hotkey(hotkey_id: int, filt: Any) -> None:
     global _hotkey_listeners
     
     try:
-        if isinstance(filt, dict) and filt.get('kind') == 'nsevent':
+        if isinstance(filt, dict) and filt.get('kind') == 'carbon':
+            carbon = filt.get('carbon')
+            try:
+                if carbon is not None and filt.get('hotkey_ref') is not None:
+                    carbon.UnregisterEventHotKey(filt['hotkey_ref'])
+            except Exception: pass
+            try:
+                if carbon is not None and filt.get('handler_ref') is not None:
+                    carbon.RemoveEventHandler(filt['handler_ref'])
+            except Exception: pass
+            logger.info(f"Unregistered Carbon hotkey (id={hotkey_id})")
+        elif isinstance(filt, dict) and filt.get('kind') == 'nsevent':
             from AppKit import NSEvent
             for k in ('global', 'local'):
                 m = filt.get(k)
@@ -1319,6 +1471,80 @@ def create_autofill_debug_report(
 # PHASE 3: Autofill Implementation (macOS)
 # ============================================================================
 
+def log_autofill_diagnostics(prefix: str = "[QS-DIAG]") -> None:
+    """Capture exactly what will receive synthesized keystrokes during autofill.
+
+    Logs: Accessibility trust, the frontmost app, whether the native Open/Save
+    panel service is hosting the dialog, our own key window, the SYSTEM-WIDE AX
+    focused UI element (the real keystroke target — role/subrole/title), and the
+    clipboard. This is what tells us why a ⌘V lands (or doesn't). Never raises.
+    """
+    # Accessibility trust — without it the AX focused-element read below is blind.
+    try:
+        from ApplicationServices import AXIsProcessTrusted
+        logger.info(f"{prefix} AXIsProcessTrusted={AXIsProcessTrusted()}")
+    except Exception as e:
+        logger.info(f"{prefix} AXIsProcessTrusted check failed: {e}")
+
+    try:
+        from AppKit import NSWorkspace, NSPasteboard, NSStringPboardType, NSApp
+        ws = NSWorkspace.sharedWorkspace()
+
+        fm = ws.frontmostApplication()
+        if fm:
+            logger.info(f"{prefix} frontmostApp: name={fm.localizedName()} "
+                        f"pid={fm.processIdentifier()} bundle={fm.bundleIdentifier()}")
+
+        # Native Open/Save panels are hosted out-of-process for sandboxed apps.
+        panels = []
+        for app in ws.runningApplications():
+            bid = (app.bundleIdentifier() or "")
+            nm = (app.localizedName() or "")
+            if "openAndSavePanel" in bid or "Open and Save" in nm or "Powerbox" in nm:
+                panels.append(f"{nm}({bid}, pid={app.processIdentifier()}, active={app.isActive()})")
+        logger.info(f"{prefix} open/save panel service running: {panels or 'NONE (dialog is in-process)'}")
+
+        try:
+            kw = NSApp.keyWindow()
+            logger.info(f"{prefix} OUR keyWindow: {kw.title() if kw else None} "
+                        f"(if not None, keystrokes go to FILECT)")
+        except Exception as e:
+            logger.info(f"{prefix} keyWindow read failed: {e}")
+
+        try:
+            pb = NSPasteboard.generalPasteboard()
+            logger.info(f"{prefix} clipboard: {str(pb.stringForType_(NSStringPboardType))[:80]!r}")
+        except Exception as e:
+            logger.info(f"{prefix} clipboard read failed: {e}")
+    except Exception as e:
+        logger.warning(f"{prefix} AppKit diagnostics failed: {e}")
+
+    # The decisive fact: which UI element actually has keyboard focus system-wide.
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide, AXUIElementCopyAttributeValue,
+            kAXFocusedUIElementAttribute, kAXRoleAttribute,
+            kAXSubroleAttribute, kAXTitleAttribute,
+        )
+        sysw = AXUIElementCreateSystemWide()
+        err, el = AXUIElementCopyAttributeValue(sysw, kAXFocusedUIElementAttribute, None)
+        if err == 0 and el:
+            def _a(attr):
+                try:
+                    e, v = AXUIElementCopyAttributeValue(el, attr, None)
+                    return v if e == 0 else None
+                except Exception:
+                    return None
+            logger.info(f"{prefix} AX focused element: role={_a(kAXRoleAttribute)} "
+                        f"subrole={_a(kAXSubroleAttribute)} title={_a(kAXTitleAttribute)!r} "
+                        f"-> a paste/keystroke only lands if this is a text field")
+        else:
+            logger.info(f"{prefix} AX focused element: NONE (err={err}) — "
+                        f"no text target, so ⌘V has nowhere to go")
+    except Exception as e:
+        logger.warning(f"{prefix} AX focused-element read failed: {e}")
+
+
 def autofill_via_clipboard_paste(path: str) -> bool:
     """
     Autofill a file dialog by copying path to clipboard and pasting.
@@ -1345,7 +1571,8 @@ def autofill_via_clipboard_paste(path: str) -> bool:
         import time
         time.sleep(0.1)
         
-        # Simulate Cmd+V to paste
+        # Simulate Cmd+V to paste — log the exact keystroke target at this instant.
+        log_autofill_diagnostics("[QS-DIAG at-paste]")
         return _simulate_paste_shortcut()
         
     except ImportError:
@@ -1486,46 +1713,103 @@ def autofill_via_keyboard_simulation(path: str) -> bool:
         return False
 
 
-def autofill_via_go_to_folder(path: str) -> bool:
+def is_native_open_save_panel() -> bool:
+    """True if the element with keyboard focus belongs to the system Open/Save
+    panel (hosted out-of-process as com.apple.appkit.xpc.openAndSavePanelService).
+
+    These panels focus a file LIST, not a text field — so a plain paste is a
+    no-op and a blind Enter imports whatever is highlighted. When this is True we
+    must drive the panel via "Go to Folder" instead.
     """
-    Use the macOS "Go to Folder" dialog (Cmd+Shift+G) in Finder dialogs.
-    
-    This is specific to native macOS file dialogs.
-    
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide, AXUIElementCopyAttributeValue,
+            AXUIElementGetPid, kAXFocusedUIElementAttribute, kAXRoleAttribute,
+        )
+        from AppKit import NSRunningApplication
+        sysw = AXUIElementCreateSystemWide()
+        err, el = AXUIElementCopyAttributeValue(sysw, kAXFocusedUIElementAttribute, None)
+        if err != 0 or not el:
+            return False
+
+        # Role of the focused element.
+        role = ""
+        try:
+            rerr, rval = AXUIElementCopyAttributeValue(el, kAXRoleAttribute, None)
+            if rerr == 0 and rval:
+                role = str(rval)
+        except Exception:
+            pass
+
+        # Owning process bundle id.
+        bid = ""
+        err2, pid = AXUIElementGetPid(el, None)
+        if err2 == 0 and pid:
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            bid = (app.bundleIdentifier() or "") if app else ""
+
+        # A native Open/Save panel can be hosted out-of-process (sandboxed apps,
+        # via openAndSavePanelService) OR in-process (non-sandboxed apps like
+        # CapCut). In BOTH cases the focused element is the file-browser list, and
+        # Go-to-Folder is the correct driver. Detect by either signal.
+        FILE_BROWSER_ROLES = {"AXList", "AXOutline", "AXBrowser", "AXTable"}
+        is_panel_service = (bid == "com.apple.appkit.xpc.openAndSavePanelService")
+        is_browser_list = (role in FILE_BROWSER_ROLES and bid != "com.filect.filesearch")
+        result = is_panel_service or is_browser_list
+        logger.info(f"[QS] open/save panel detect: result={result} "
+                    f"role={role} pid={pid} bundle={bid}")
+        return result
+    except Exception as e:
+        logger.warning(f"[QS] is_native_open_save_panel error: {e}")
+        return False
+
+
+def autofill_via_go_to_folder(path: str, press_enter: bool = True) -> bool:
+    """Fill a native macOS Open/Save panel via "Go to Folder" (Cmd+Shift+G).
+
+    The panel's file LIST is focused (not a text field), so a plain paste does
+    nothing. Go-to-Folder opens a REAL text field; we paste the FULL FILE PATH
+    there and press Return — macOS navigates to the folder AND selects that exact
+    file. A second Return then activates the default button (Open/Import) on the
+    correct selection, instead of importing whatever was randomly highlighted.
+
     Args:
-        path: The file path to fill
-    
-    Returns:
-        True on success, False on failure
+        path: The full file path to select.
+        press_enter: If True, send the final Return to confirm/import.
     """
     try:
         from pynput.keyboard import Controller, Key
-        
-        keyboard = Controller()
-        
-        # Open "Go to Folder" dialog with Cmd+Shift+G
-        keyboard.press(Key.cmd)
-        keyboard.press(Key.shift)
-        keyboard.press('g')
-        keyboard.release('g')
-        keyboard.release(Key.shift)
-        keyboard.release(Key.cmd)
-        
         import time
-        time.sleep(0.3)  # Wait for dialog to appear
-        
-        # Type the path
-        keyboard.type(path)
-        
-        time.sleep(0.1)
-        
-        # Press Enter to confirm
-        keyboard.press(Key.enter)
-        keyboard.release(Key.enter)
-        
-        logger.info(f"[QS] Go to Folder autofill succeeded")
+
+        kb = Controller()
+
+        # 1) Open "Go to Folder".
+        kb.press(Key.cmd); kb.press(Key.shift); kb.press('g')
+        kb.release('g'); kb.release(Key.shift); kb.release(Key.cmd)
+        time.sleep(0.5)  # let the sheet appear and focus its text field
+
+        # Diagnostic: confirm a TEXT FIELD now holds focus (not the file list).
+        log_autofill_diagnostics("[QS-DIAG go-to-folder-sheet]")
+
+        # 2) TYPE the path char-by-char. Clipboard ⌘V (both Quartz and pynput) was
+        #    not landing in this sheet; typing sends key events straight to the
+        #    focused field and is clipboard-independent.
+        for ch in path:
+            kb.type(ch)
+            time.sleep(0.012)
+        time.sleep(0.25)
+
+        # 3) Return: resolve the path -> navigate to the folder AND select the file.
+        kb.press(Key.enter); kb.release(Key.enter)
+        time.sleep(0.45)  # give the panel time to land on the file
+
+        # 4) Return again: confirm/Import with the correct file now selected.
+        if press_enter:
+            kb.press(Key.enter); kb.release(Key.enter)
+
+        logger.info("[QS] Go to Folder autofill completed (typed path)")
         return True
-        
+
     except ImportError:
         logger.warning("pynput not available - cannot use Go to Folder")
         return False
@@ -1592,6 +1876,20 @@ def try_macos_autofill_strategies(path: str, hwnd: int = None, app_name: str = N
         if info.get('pid') == hwnd:
             app_name = info.get('name')
     
+    # DIAGNOSTICS: log exactly what holds keyboard focus before we touch anything,
+    # so we can see whether there's a real text target for the paste to land in.
+    log_autofill_diagnostics("[QS-DIAG before-pipeline]")
+
+    # NATIVE OPEN/SAVE PANEL (e.g. CapCut "Select a media resource"): the file
+    # LIST is focused, not a text field — so a plain paste is a no-op and the
+    # blind Enter below would import whatever was randomly highlighted. Drive it
+    # with Go-to-Folder, which deterministically selects the exact file first.
+    if is_native_open_save_panel():
+        logger.info("[QS] Native open/save panel detected -> Go to Folder (primary strategy)")
+        if autofill_via_go_to_folder(path, press_enter=press_enter):
+            return (True, "go_to_folder")
+        logger.warning("[QS] Go to Folder failed on native panel; falling through to other strategies")
+
     # Strategy 1: Clipboard + Paste (most reliable)
     logger.info("[QS] Trying strategy 1: Clipboard + Paste")
     if autofill_via_clipboard_paste(path):
@@ -1677,7 +1975,16 @@ def cleanup_hotkeys() -> None:
     for listener in _hotkey_listeners:
         if listener is None:
             continue
-        if isinstance(listener, dict) and listener.get('kind') == 'nsevent':
+        if isinstance(listener, dict) and listener.get('kind') == 'carbon':
+            carbon = listener.get('carbon')
+            try:
+                if carbon is not None and listener.get('hotkey_ref') is not None:
+                    carbon.UnregisterEventHotKey(listener['hotkey_ref'])
+                if carbon is not None and listener.get('handler_ref') is not None:
+                    carbon.RemoveEventHandler(listener['handler_ref'])
+            except Exception:
+                pass
+        elif isinstance(listener, dict) and listener.get('kind') == 'nsevent':
             try:
                 from AppKit import NSEvent
                 for k in ('global', 'local'):
