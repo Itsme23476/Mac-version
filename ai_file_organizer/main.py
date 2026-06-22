@@ -37,6 +37,11 @@ from app.core.logging_config import setup_logging
 from app.core.supabase_client import supabase_auth, SUPABASE_AVAILABLE
 from app.core.settings import settings
 
+import logging
+# main.py referenced `logger` (OAuth/verify handlers, bring-to-front) without ever
+# defining it — a latent NameError that only fired on code paths that ran. Define it.
+logger = logging.getLogger(__name__)
+
 
 class FilectApplication(QApplication):
     """QApplication subclass that handles filect:// deep links on macOS."""
@@ -205,16 +210,57 @@ class FilectApplication(QApplication):
         if sys.platform == 'darwin':
             self.set_normal_focus_mode(True)
         win.show()
+        # Clear a minimized state and mark active — matters when reopening from a
+        # closed/minimized window.
+        try:
+            win.setWindowState(
+                (win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive
+            )
+        except Exception:
+            pass
         win.raise_()
         win.activateWindow()
         if sys.platform == 'darwin':
+            # The deprecated activateIgnoringOtherApps_ is IGNORED on macOS 14+/26.
+            # Use modern cooperative activation + orderFrontRegardless() on the
+            # native window, and re-fire once the Regular-policy flip has settled.
+            self._macos_force_front()
+            QTimer.singleShot(60, self._macos_force_front)
+            # Do NOT flip back to Accessory on a timer — that deactivates the app
+            # while it's frontmost, so the window immediately drops behind again.
+            # The main window's changeEvent restores Accessory when it loses focus
+            # (so the quick-search overlay still works as a menu-bar agent). The
+            # modal auth dialog keeps Regular for its whole lifetime as before.
+
+    def _macos_force_front(self):
+        """Bring our own window to the front on macOS 14+/26.
+
+        NSApplication.activate() is the modern (cooperative) replacement for the
+        deprecated activateIgnoringOtherApps_, which Tahoe ignores. We also call
+        orderFrontRegardless() on the native window so it surfaces over other
+        apps even before app activation completes — the same approach the
+        quick-search overlay uses. The overlay window itself is skipped.
+        """
+        try:
+            from AppKit import NSApp
+        except Exception:
+            return
+        try:
+            NSApp.activate()  # macOS 14+ cooperative activation (no-arg selector)
+        except Exception:
             try:
-                from AppKit import NSApp
-                NSApp.activateIgnoringOtherApps_(True)
+                NSApp.activateIgnoringOtherApps_(True)  # older macOS fallback
             except Exception:
                 pass
-            if not modal_dialog:
-                QTimer.singleShot(800, lambda: self.set_normal_focus_mode(False))
+        try:
+            for ns_window in NSApp.windows():
+                try:
+                    if ns_window.isVisible() and ns_window.title() != "Quick Search":
+                        ns_window.orderFrontRegardless()
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"[bring-to-front] orderFrontRegardless failed: {e}")
 
 
 def acquire_single_instance(app) -> bool:

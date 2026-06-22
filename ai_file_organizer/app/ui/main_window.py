@@ -334,10 +334,34 @@ class MainWindow(QMainWindow):
             pass
         super().closeEvent(event)
 
+    def _set_macos_focus_mode(self, regular: bool):
+        """Flip the app between Regular (Dock icon, stays in front) and Accessory
+        (menu-bar agent) on macOS."""
+        try:
+            import sys
+            from PySide6.QtWidgets import QApplication
+            if sys.platform != 'darwin':
+                return
+            app = QApplication.instance()
+            if app is not None and hasattr(app, 'set_normal_focus_mode'):
+                app.set_normal_focus_mode(regular)
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        """When the main window is hidden/closed, drop back to Accessory (menu-bar
+        agent) so the quick-search overlay can still appear over fullscreen apps."""
+        self._set_macos_focus_mode(False)
+        super().hideEvent(event)
+
     def showEvent(self, event):
         """Handle window show event - show onboarding on first launch"""
         super().showEvent(event)
-        
+        # Regular activation policy while the main window is open → the app stays
+        # in front when surfaced and the Dock icon shows it's active. We drop back
+        # to Accessory in hideEvent (menu-bar agent for the fullscreen overlay).
+        self._set_macos_focus_mode(True)
+
         # Apply dark/light title bar now that the window has a valid HWND
         theme_manager._apply_windows_titlebar(theme_manager.current_theme)
         
