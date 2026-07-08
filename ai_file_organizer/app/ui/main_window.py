@@ -412,6 +412,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # ---- Entitlement re-check (mid-session expiry / resubscribe) ----
+        # The launch gate already confirmed entitlement; this keeps it honest
+        # while the app is open, so a subscription that lapses mid-session (or a
+        # resubscribe) is reflected without a restart. Fires periodically and
+        # whenever the app is re-activated (focus/resume).
+        self._entitlement_wall_open = False
+        self._last_entitlement_check = time.time()
+        self._entitlement_timer = QTimer(self)
+        self._entitlement_timer.timeout.connect(self._recheck_entitlement)
+        self._entitlement_timer.start(30 * 60 * 1000)  # every 30 minutes
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.applicationStateChanged.connect(self._on_app_state_changed)
+
     def closeEvent(self, event):
         # Session length signal. Fires synchronously but track() itself is async,
         # so we don't block the shutdown. Wrapped in try/except so a failed
@@ -3244,39 +3258,94 @@ class MainWindow(QMainWindow):
         )
         
         if confirmed:
-            # Sign out from Supabase
-            supabase_auth.sign_out()
-            settings.clear_auth_tokens()
+            self._perform_sign_out_and_reauth()
 
-            # Hide main window
-            self.hide()
+    def _perform_sign_out_and_reauth(self):
+        """Clear the session and route back to the login dialog. Shared by the
+        Sign Out button and the resubscribe wall's Log out action."""
+        # Sign out from Supabase
+        supabase_auth.sign_out()
+        settings.clear_auth_tokens()
 
-            # Show auth dialog again. Flip to Regular activation policy for its
-            # lifetime: as an accessory (agent) app the login dialog otherwise
-            # HOLDS focus and won't hand it to the browser when you click
-            # "Continue with Google". main.py does this for the first-launch
-            # dialog; the post-sign-out dialog needs the same treatment.
-            app = QApplication.instance()
-            if app is not None and hasattr(app, 'set_normal_focus_mode'):
-                app.set_normal_focus_mode(True)
-            from app.ui.auth_dialog import AuthDialog
-            auth_dialog = AuthDialog()
-            if app is not None and hasattr(app, 'set_auth_dialog'):
-                app.set_auth_dialog(auth_dialog)  # register for bring-to-front / deep links
-            result = auth_dialog.exec()
-            if app is not None and hasattr(app, 'set_normal_focus_mode'):
-                app.set_normal_focus_mode(False)  # back to Accessory (menu-bar agent)
+        # Hide main window
+        self.hide()
 
-            if result:
-                # User logged in successfully, refresh account info and show window
+        # Show auth dialog again. Flip to Regular activation policy for its
+        # lifetime: as an accessory (agent) app the login dialog otherwise
+        # HOLDS focus and won't hand it to the browser when you click
+        # "Continue with Google". main.py does this for the first-launch
+        # dialog; the post-sign-out dialog needs the same treatment.
+        app = QApplication.instance()
+        if app is not None and hasattr(app, 'set_normal_focus_mode'):
+            app.set_normal_focus_mode(True)
+        from app.ui.auth_dialog import AuthDialog
+        auth_dialog = AuthDialog()
+        if app is not None and hasattr(app, 'set_auth_dialog'):
+            app.set_auth_dialog(auth_dialog)  # register for bring-to-front / deep links
+        result = auth_dialog.exec()
+        if app is not None and hasattr(app, 'set_normal_focus_mode'):
+            app.set_normal_focus_mode(False)  # back to Accessory (menu-bar agent)
+
+        if result:
+            # User logged in successfully, refresh account info and show window
+            self._refresh_account_info()
+            self._update_usage_labels()  # Update usage for new user
+            self.show()
+            self.status_bar.showMessage("Welcome back!", 3000)
+        else:
+            # User cancelled login, close app
+            QApplication.quit()
+
+    def _on_app_state_changed(self, state):
+        """Re-check entitlement when the app is re-activated (focus/resume),
+        throttled so rapid focus changes don't hammer the network."""
+        if state == Qt.ApplicationActive:
+            if time.time() - self._last_entitlement_check >= 60:
+                self._recheck_entitlement()
+
+    def _recheck_entitlement(self):
+        """Consult the authoritative get_entitlement RPC; on a confirmed
+        entitled=False, block the app behind the resubscribe wall."""
+        if self._entitlement_wall_open:
+            return
+        if not supabase_auth.is_authenticated:
+            return
+        self._last_entitlement_check = time.time()
+        try:
+            ent = supabase_auth.get_entitlement()
+        except Exception as e:
+            logger.warning(f"Entitlement re-check failed: {e}")
+            return
+        if not ent.get('entitled'):
+            self._show_resubscribe_wall()
+
+    def _show_resubscribe_wall(self):
+        """Show the paywall over the app for a mid-session lapse. Dismisses on a
+        successful resubscribe, routes to login on Log out, or quits if closed."""
+        from app.ui.resubscribe_wall import ResubscribeWall
+        self._entitlement_wall_open = True
+        try:
+            wall = ResubscribeWall(self)
+            result = wall.exec()
+        finally:
+            self._entitlement_wall_open = False
+
+        if result == ResubscribeWall.RESULT_RESUBSCRIBED:
+            # Back in good standing — refresh account/usage and carry on.
+            try:
                 self._refresh_account_info()
-                self._update_usage_labels()  # Update usage for new user
-                self.show()
-                self.status_bar.showMessage("Welcome back!", 3000)
-            else:
-                # User cancelled login, close app
-                QApplication.quit()
-    
+                self._update_usage_labels()
+            except Exception:
+                pass
+            self.status_bar.showMessage("Subscription active — welcome back!", 3000)
+            return
+        if result == ResubscribeWall.RESULT_LOGOUT:
+            self._perform_sign_out_and_reauth()
+            return
+        # Closed without resubscribing → the app must not stay usable.
+        QApplication.quit()
+
+
     def _resync_file_dates(self):
         """Resync file dates from Windows filesystem."""
         from app.ui.organize_page import ModernConfirmDialog, ModernInfoDialog

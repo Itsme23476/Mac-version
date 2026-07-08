@@ -49,6 +49,13 @@ class Settings:
         self.auth_access_token: str = ''
         self.auth_refresh_token: str = ''
         self.auth_user_email: str = ''
+        # Cached entitlement (authoritative source = the get_entitlement RPC).
+        # Used only as an offline-grace fallback: a network blip must not lock
+        # out a paying user, but an expired user must not be able to sit offline
+        # forever either. See SupabaseAuth.get_entitlement().
+        self.entitlement_last_entitled: bool = False
+        self.entitlement_checked_at: str = ''   # ISO-8601 UTC of last confirmed check
+        self.entitlement_user_id: str = ''       # which user the cache belongs to
         
         # ======= AUTO-ORGANIZE WATCHER SETTINGS =======
         # List of folders with per-folder instructions: [{path: str, instruction: str}, ...]
@@ -302,7 +309,11 @@ class Settings:
         self.auth_access_token = data.get('auth_access_token', '')
         self.auth_refresh_token = data.get('auth_refresh_token', '')
         self.auth_user_email = data.get('auth_user_email', '')
-        
+        # Cached entitlement (offline-grace fallback)
+        self.entitlement_last_entitled = bool(data.get('entitlement_last_entitled', False))
+        self.entitlement_checked_at = data.get('entitlement_checked_at', '')
+        self.entitlement_user_id = data.get('entitlement_user_id', '')
+
         # Auto-organize watcher settings
         auto_folders = data.get('auto_organize_folders', [])
         if isinstance(auto_folders, list):
@@ -351,6 +362,9 @@ class Settings:
             'auth_access_token': self.auth_access_token,
             'auth_refresh_token': self.auth_refresh_token,
             'auth_user_email': self.auth_user_email,
+            'entitlement_last_entitled': self.entitlement_last_entitled,
+            'entitlement_checked_at': self.entitlement_checked_at,
+            'entitlement_user_id': self.entitlement_user_id,
             # Auto-organize watcher settings
             'auto_organize_folders': self.auto_organize_folders,
             'auto_organize_auto_start': self.auto_organize_auto_start,
@@ -431,6 +445,17 @@ class Settings:
         self.auth_access_token = ''
         self.auth_refresh_token = ''
         self.auth_user_email = ''
+        # A different user may sign in next — drop the previous entitlement cache.
+        self.entitlement_last_entitled = False
+        self.entitlement_checked_at = ''
+        self.entitlement_user_id = ''
+        self._save_config()
+
+    def set_cached_entitlement(self, entitled: bool, checked_at: str, user_id: str) -> None:
+        """Cache the last confirmed entitlement for the offline-grace fallback."""
+        self.entitlement_last_entitled = bool(entitled)
+        self.entitlement_checked_at = checked_at or ''
+        self.entitlement_user_id = user_id or ''
         self._save_config()
 
     def has_stored_session(self) -> bool:

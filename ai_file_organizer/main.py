@@ -345,6 +345,54 @@ def check_existing_session():
     return False
 
 
+def _passes_entitlement_gate(app) -> bool:
+    """Authoritative post-login paywall.
+
+    check_subscription() (the legacy heuristic that lets a returning user skip
+    the auth dialog) can still let a lapsed user through — e.g. past_due beyond
+    Stripe's retry window, or a stale 'active' whose period has ended — straight
+    into a 403 from the openai-proxy edge function, where every AI action then
+    fails with a raw error. get_entitlement() is that edge function's OWN source
+    of truth, so gating on it here shows a clean resubscribe wall instead of a
+    broken app.
+
+    Returns True to show the app, False to exit. Loops so "Log out" on the wall
+    routes back to login (a lapsed user's way to sign into another account).
+    """
+    from app.ui.resubscribe_wall import ResubscribeWall
+
+    if not supabase_auth.is_authenticated:
+        # Auth is handled upstream; nothing to gate.
+        return True
+
+    while True:
+        ent = supabase_auth.get_entitlement()
+        if ent.get('entitled'):
+            return True
+
+        # Confirmed not entitled → block the app behind the wall.
+        wall = ResubscribeWall()
+        app.set_auth_dialog(wall)          # deep-link / bring-to-front target
+        app.set_normal_focus_mode(True)
+        result = wall.exec()
+        app.set_normal_focus_mode(False)
+
+        if result == ResubscribeWall.RESULT_RESUBSCRIBED:
+            return True
+        if result == ResubscribeWall.RESULT_LOGOUT:
+            supabase_auth.sign_out()
+            settings.clear_auth_tokens()
+            auth_dialog = AuthDialog()
+            app.set_auth_dialog(auth_dialog)
+            app.set_normal_focus_mode(True)
+            auth_dialog.exec()
+            app.set_normal_focus_mode(False)
+            if not supabase_auth.is_authenticated:
+                return False
+            continue  # re-check entitlement for the newly signed-in user
+        return False  # window closed → exit
+
+
 def main():
     """Main application entry point."""
     # Setup logging
@@ -420,6 +468,13 @@ def main():
             if not sub_check.get('has_subscription'):
                 sys.exit(0)  # Exit cleanly if no subscription
     
+    # Authoritative entitlement gate (source of truth: get_entitlement RPC).
+    # Runs for BOTH the stored-session path and the fresh-login path, right
+    # before the app UI is shown. Shows the resubscribe wall for a lapsed user
+    # instead of dropping them into an app that will just 403 every AI action.
+    if not _passes_entitlement_gate(app):
+        sys.exit(0)
+
     # Create and show main window
     window = MainWindow()
     app.set_main_window(window)  # register for filect:// deep link handling

@@ -7,7 +7,7 @@ import calendar
 import logging
 import sys
 import webbrowser
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from typing import Optional, Dict, Any
 
 # Try to import the individual packages
@@ -49,6 +49,13 @@ PRICE_TO_TIER = {
     STRIPE_PRICE_ID_PRO: 'pro',         STRIPE_PRICE_ID_PRO_ANNUAL: 'pro',
     STRIPE_PRICE_ID_PREMIUM: 'premium', STRIPE_PRICE_ID_PREMIUM_ANNUAL: 'premium',
 }
+
+# Offline-grace window for the entitlement gate: if the get_entitlement RPC
+# can't be reached (offline / transient error), keep a user whose LAST confirmed
+# state was entitled=True in for this many days before forcing the resubscribe
+# wall. We never fail-open past this window, and never honour a cached
+# entitled=False as "entitled".
+ENTITLEMENT_OFFLINE_GRACE_DAYS = 3
 
 # Media index limits per tier (images, videos, audio only - text files are unlimited)
 INDEX_LIMITS = {'basic': 1000, 'pro': 5000, 'premium': 50000}
@@ -402,7 +409,128 @@ class SupabaseAuth:
             error_msg = str(e)
             logger.error(f"[SUB CHECK] Exception: {error_msg}")
             return {'has_subscription': False, 'status': None, 'error': error_msg}
-    
+
+    def get_entitlement(self) -> Dict[str, Any]:
+        """
+        Authoritative entitlement check via the get_entitlement() RPC.
+
+        This is the SAME source of truth the openai-proxy edge function uses to
+        allow or deny AI features server-side, so the client-side paywall can
+        never disagree with the server (which 403s lapsed users). Do NOT
+        re-implement the entitlement policy here — just consume the RPC's
+        `entitled` boolean. The RPC takes no arguments; it reads auth.uid() from
+        the bearer JWT we attach in _get_db_client().
+
+        Returns:
+            {
+              'entitled': bool,
+              'status': str | None,
+              'current_period_end': str | None,
+              'reason': str,      # RPC reason ('active'|'grace_past_due'|
+                                  # 'no_subscription'|'no_user'|'inactive') OR an
+                                  # offline reason ('offline_grace'|
+                                  # 'offline_grace_expired'|'offline_no_cache')
+              'source': 'server' | 'cache',
+            }
+
+        Offline / RPC-error policy (never fail-open, never hard-lock a paying
+        user on a network blip): a successful call caches {entitled, checked_at,
+        user_id}. If a later call fails, a cached entitled=True result is honoured
+        for up to ENTITLEMENT_OFFLINE_GRACE_DAYS; past that (or with no/negative
+        cache) we report entitled=False.
+        """
+        user_id = self._user.get('id') if self._user else None
+
+        if not user_id:
+            logger.warning("[ENTITLEMENT] Not authenticated - no user")
+            return {'entitled': False, 'status': None, 'current_period_end': None,
+                    'reason': 'no_user', 'source': 'server'}
+
+        try:
+            db_client = self._get_db_client()
+            if not db_client:
+                raise RuntimeError("Database client not available")
+
+            # No arguments — the RPC uses auth.uid() from the JWT.
+            response = db_client.rpc('get_entitlement', {}).execute()
+            data = response.data
+            # The RPC may return a single row, a list of rows, or a JSON object.
+            if isinstance(data, list):
+                ent = data[0] if data else None
+            elif isinstance(data, dict):
+                ent = data
+            else:
+                ent = None
+
+            if not ent or 'entitled' not in ent:
+                raise RuntimeError(f"Unexpected get_entitlement payload: {data!r}")
+
+            entitled = bool(ent.get('entitled'))
+            result = {
+                'entitled': entitled,
+                'status': ent.get('status'),
+                'current_period_end': ent.get('current_period_end'),
+                'reason': ent.get('reason', 'active' if entitled else 'inactive'),
+                'source': 'server',
+            }
+            logger.info(f"[ENTITLEMENT] entitled={entitled} reason={result['reason']} "
+                        f"status={result['status']}")
+
+            # Cache the confirmed answer for the offline-grace fallback.
+            try:
+                from app.core.settings import settings
+                settings.set_cached_entitlement(
+                    entitled,
+                    datetime.now(timezone.utc).isoformat(),
+                    user_id,
+                )
+            except Exception as cache_err:
+                logger.warning(f"[ENTITLEMENT] Could not cache entitlement: {cache_err}")
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"[ENTITLEMENT] RPC failed ({e}) — using offline cache")
+            return self._offline_entitlement(user_id)
+
+    def _offline_entitlement(self, user_id: str) -> Dict[str, Any]:
+        """Decide entitlement from the local cache when the RPC is unreachable."""
+        base = {'status': None, 'current_period_end': None, 'source': 'cache'}
+        try:
+            from app.core.settings import settings
+            cached_entitled = bool(getattr(settings, 'entitlement_last_entitled', False))
+            checked_at = getattr(settings, 'entitlement_checked_at', '') or ''
+            cached_uid = getattr(settings, 'entitlement_user_id', '') or ''
+        except Exception:
+            return {**base, 'entitled': False, 'reason': 'offline_no_cache'}
+
+        # A cache belonging to a different account is worthless here.
+        if cached_uid and cached_uid != user_id:
+            cached_entitled = False
+
+        if not cached_entitled:
+            # Last we knew, they weren't entitled (or we've never confirmed) —
+            # stay closed rather than fail open.
+            return {**base, 'entitled': False, 'reason': 'offline_no_cache'}
+
+        # Last known state was entitled — honour it, but only inside the grace
+        # window so an expired user can't stay in by going offline indefinitely.
+        try:
+            checked_dt = datetime.fromisoformat(checked_at)
+            if checked_dt.tzinfo is None:
+                checked_dt = checked_dt.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - checked_dt
+            within_grace = age <= timedelta(days=ENTITLEMENT_OFFLINE_GRACE_DAYS)
+        except Exception:
+            within_grace = False
+
+        if within_grace:
+            logger.info("[ENTITLEMENT] Offline — honouring cached entitlement within grace")
+            return {**base, 'entitled': True, 'reason': 'offline_grace'}
+
+        logger.info("[ENTITLEMENT] Offline — cached entitlement is stale, forcing wall")
+        return {**base, 'entitled': False, 'reason': 'offline_grace_expired'}
+
     def open_checkout(self, price_id: str = None) -> bool:
         """
         Open Stripe checkout in browser for subscription.
