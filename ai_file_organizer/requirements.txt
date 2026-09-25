@@ -17,6 +17,7 @@ PyPDF2>=3.0.0
 rapidfuzz>=3.0.0
 pyspellchecker>=0.8.0
 sounddevice>=0.4.6
+soundfile>=0.12.1
 scipy>=1.11.0
 pynput>=1.7.6
 pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'

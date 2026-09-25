@@ -308,7 +308,9 @@ class VoiceDictationController(QObject):
         # user was typing in is still frontmost. We paste straight into it (exactly
         # like the quick-search auto-popup). The old set_foreground_hwnd_robust()
         # restore is what caused the visible "switch to Filect and back".
-        QTimer.singleShot(120, lambda: self._insert_text(text))
+        # 40ms is just enough for the overlay hide() to flush; the old 120ms existed to
+        # let the (now-removed) focus restore settle, so we don't need it any more.
+        QTimer.singleShot(40, lambda: self._insert_text(text))
 
     def _on_error(self, msg: str):
         logger.warning(f"Dictation error: {msg}")

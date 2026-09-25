@@ -32,7 +32,7 @@ const DAILY_LIMIT_SECONDS = 3 * 60 * 60; // 3 hours of audio per user per UTC da
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, content-type, x-client-info, apikey",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-client-info, apikey, x-audio-filename, x-audio-language",
 };
 
 function json(body: unknown, status = 200) {
@@ -54,27 +54,24 @@ serve(async (req) => {
     const { data: { user }, error: authError } = await supabase.auth.getUser(token);
     if (authError || !user) return json({ error: "Invalid token" }, 401);
 
-    // 2) Entitled? Same source of truth as openai-proxy — fail closed on error.
-    const { data: entRows, error: entError } = await supabase.rpc("get_entitlement", {
-      p_user_id: user.id,
-    });
-    if (entError) {
-      console.error("Entitlement check error:", entError);
+    // 2+3) Entitlement AND today's usage in ONE parallel round-trip (both only need
+    // user.id) — saves a serial hop. Same entitlement source of truth as openai-proxy;
+    // fail closed on error.
+    const today = new Date().toISOString().slice(0, 10); // UTC yyyy-mm-dd
+    const [entRes, usageRes] = await Promise.all([
+      supabase.rpc("get_entitlement", { p_user_id: user.id }),
+      supabase.from("voice_usage").select("seconds").eq("user_id", user.id).eq("day", today),
+    ]);
+    if (entRes.error) {
+      console.error("Entitlement check error:", entRes.error);
       return json({ error: "Entitlement check failed" }, 403);
     }
-    const ent = Array.isArray(entRows) ? entRows[0] : entRows;
+    const ent = Array.isArray(entRes.data) ? entRes.data[0] : entRes.data;
     if (!ent?.entitled) return json({ error: "No active subscription" }, 403);
 
-    // 3) Fair-use ceiling: sum today's audio-seconds for this user.
-    // ponytail: sums the day's rows in JS; swap for an aggregate RPC only if a
-    // heavy user's daily row count ever gets large enough to matter.
-    const today = new Date().toISOString().slice(0, 10); // UTC yyyy-mm-dd
-    const { data: usageRows } = await supabase
-      .from("voice_usage")
-      .select("seconds")
-      .eq("user_id", user.id)
-      .eq("day", today);
-    const usedSeconds = (usageRows ?? []).reduce(
+    // ponytail: sums the day's rows in JS; swap for an aggregate RPC only if a heavy
+    // user's daily row count ever gets large enough to matter.
+    const usedSeconds = (usageRes.data ?? []).reduce(
       (s, r) => s + Number(r.seconds || 0),
       0,
     );
@@ -82,13 +79,26 @@ serve(async (req) => {
       return json({ error: "Daily voice limit reached", reason: "rate_limited" }, 429);
     }
 
-    // 4) Decode the audio the client sent.
-    const body = await req.json();
-    const b64 = body.audio_base64 as string | undefined;
-    if (!b64) return json({ error: "Missing audio_base64" }, 400);
-    const filename = (body.audio_filename as string) || "audio.wav";
-    const language = body.language as string | undefined; // optional; xAI auto-detects
-    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    // 4) Read the audio. New clients send a RAW binary body (application/octet-stream,
+    // metadata in headers) — no base64, ~33% smaller upload. Older release clients send
+    // base64 JSON. Support BOTH so deploying this doesn't break users who haven't
+    // updated their app yet.
+    let bytes: Uint8Array;
+    let filename: string;
+    let language: string | undefined;
+    if ((req.headers.get("content-type") || "").includes("application/json")) {
+      const body = await req.json();
+      const b64 = body.audio_base64 as string | undefined;
+      if (!b64) return json({ error: "Missing audio_base64" }, 400);
+      bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      filename = (body.audio_filename as string) || "audio.wav";
+      language = body.language as string | undefined;
+    } else {
+      bytes = new Uint8Array(await req.arrayBuffer());
+      if (bytes.length === 0) return json({ error: "Missing audio body" }, 400);
+      filename = req.headers.get("x-audio-filename") || "audio.flac";
+      language = req.headers.get("x-audio-language") || undefined; // xAI auto-detects
+    }
 
     // 5) Forward to xAI Grok Voice Transcribe 2.0 (multipart/form-data).
     const form = new FormData();
@@ -111,14 +121,18 @@ serve(async (req) => {
     const text = (data.text || "").trim();
     const duration = Number(data.duration || 0); // xAI returns audio length in seconds
 
-    // 6) Log real audio-seconds (accurate cost + drives the fair-use ceiling).
+    // 6) Log real audio-seconds AFTER replying — keep the DB write OFF the response
+    // critical path (fire-and-forget via EdgeRuntime.waitUntil so it adds no latency).
     if (duration > 0) {
-      const { error: logErr } = await supabase.from("voice_usage").insert({
-        user_id: user.id,
-        day: today,
-        seconds: duration,
-      });
-      if (logErr) console.error("voice_usage log failed:", logErr);
+      const logPromise = supabase
+        .from("voice_usage")
+        .insert({ user_id: user.id, day: today, seconds: duration })
+        .then(({ error }) => {
+          if (error) console.error("voice_usage log failed:", error);
+        });
+      // EdgeRuntime is provided by the Supabase Edge runtime; the promise still runs
+      // in the background if it's somehow unavailable.
+      (globalThis as any).EdgeRuntime?.waitUntil?.(logPromise);
     }
 
     return json({ text, duration });

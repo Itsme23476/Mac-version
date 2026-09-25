@@ -53,22 +53,26 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> Dict[st
                 "message": "Please sign in to use voice dictation."}
     try:
         with open(audio_path, "rb") as f:
-            audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+            audio_bytes = f.read()
     except Exception as e:
         return {"ok": False, "error": "network", "message": f"Could not read audio: {e}"}
 
-    payload: Dict[str, Any] = {
-        "audio_base64": audio_b64,
-        "audio_filename": os.path.basename(audio_path),
+    # Send the audio as a RAW binary body (not base64-in-JSON) — base64 inflates the
+    # payload ~33%, so raw bytes upload faster, which mainly helps slow connections.
+    # Filename + optional language ride along in headers.
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+        "X-Audio-Filename": os.path.basename(audio_path),
     }
     if language:
-        payload["language"] = language
+        headers["X-Audio-Language"] = language
 
     try:
         r = requests.post(
             TRANSCRIBE_URL,
-            json=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            data=audio_bytes,
+            headers=headers,
             timeout=45,
         )
     except Exception as e:
@@ -164,9 +168,19 @@ class VoiceRecorder(QThread):
         logger.info(f"Captured {len(audio) / SAMPLE_RATE:.1f}s of audio; transcribing…")
         tmp = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                tmp = f.name
-                wavfile.write(tmp, SAMPLE_RATE, audio)
+            # Encode FLAC: lossless (identical transcripts — zero accuracy cost) and
+            # ~2-3x smaller than WAV, so a smaller upload. Mainly helps users on slow
+            # connections; no effect on quality. Falls back to WAV if FLAC is missing.
+            try:
+                import soundfile as sf
+                with tempfile.NamedTemporaryFile(suffix=".flac", delete=False) as f:
+                    tmp = f.name
+                sf.write(tmp, audio, SAMPLE_RATE, format="FLAC", subtype="PCM_16")
+            except Exception as e:
+                logger.warning(f"FLAC encode unavailable ({e}); sending WAV instead")
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    tmp = f.name
+                    wavfile.write(tmp, SAMPLE_RATE, audio)
             result = transcribe_audio(tmp, language=self.language)
             if result.get("ok"):
                 self.finished.emit(result.get("text", ""))

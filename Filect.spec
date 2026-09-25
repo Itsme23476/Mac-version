@@ -92,6 +92,7 @@ hidden_imports = [
     'rapidfuzz',
     'spellchecker',
     'sounddevice',
+    'soundfile',
     'scipy',
     'scipy.io',
     'scipy.io.wavfile',
