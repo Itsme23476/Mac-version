@@ -375,6 +375,15 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.setup_connections()
         self.setup_quick_search()
+
+        # Voice dictation (Filect Voice) — global push-to-talk. Guarded so a
+        # dictation problem can never block app launch.
+        self.voice_dictation = None
+        try:
+            from app.ui.dictation import VoiceDictationController
+            self.voice_dictation = VoiceDictationController(self)
+        except Exception as e:
+            logger.warning(f"Voice dictation setup failed: {e}")
         
         # Enable drag and drop
         self.setAcceptDrops(True)
@@ -437,6 +446,11 @@ class MainWindow(QMainWindow):
                 from app.core.supabase_client import track, supabase_auth
                 if supabase_auth.is_authenticated:
                     track("session_ended", duration_seconds=int(_time.time() - start))
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'voice_dictation', None):
+                self.voice_dictation.cleanup()
         except Exception:
             pass
         super().closeEvent(event)

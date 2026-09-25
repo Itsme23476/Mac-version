@@ -36,7 +36,23 @@ def _check_accessibility_permission() -> bool:
 
 
 def _request_accessibility_permission() -> None:
-    """Open System Preferences to the Accessibility pane."""
+    """Prompt for Accessibility permission.
+
+    Prefer AXIsProcessTrustedWithOptions(prompt=True): this REGISTERS the app in the
+    Accessibility list AND shows the native "Open System Settings" dialog, so the user
+    can grant with one toggle instead of manually adding the app by path. Falls back to
+    just opening the Accessibility pane if the API isn't available.
+    """
+    try:
+        from ApplicationServices import AXIsProcessTrustedWithOptions
+        try:
+            from ApplicationServices import kAXTrustedCheckOptionPrompt as PROMPT_KEY
+        except Exception:
+            PROMPT_KEY = "AXTrustedCheckOptionPrompt"  # the CFString's literal value
+        AXIsProcessTrustedWithOptions({PROMPT_KEY: True})
+        return
+    except Exception as e:
+        logger.warning(f"AXIsProcessTrustedWithOptions unavailable ({e}); opening pane")
     try:
         subprocess.run([
             'open',
@@ -158,9 +174,13 @@ _MAC_KEYCODES = {
 }
 
 
-def _register_hotkey_carbon(sequence: str, on_activated: Callable[[], None]
+def _register_hotkey_carbon(sequence: str, on_activated: Callable[[], None],
+                            on_released: Optional[Callable[[], None]] = None
                             ) -> Optional[Tuple[int, Any, int]]:
     """Register a TRUE system-wide hotkey via Carbon's RegisterEventHotKey.
+
+    If on_released is given, the handler is also installed for kEventHotKeyReleased so
+    callers can implement hold-to-talk / press-and-release gestures (used by dictation).
 
     Unlike NSEvent global monitors — which silently receive nothing unless the
     app has Accessibility / Input-Monitoring permission — RegisterEventHotKey is
@@ -184,6 +204,7 @@ def _register_hotkey_carbon(sequence: str, on_activated: Callable[[], None]
 
     kEventClassKeyboard = 0x6B657962  # 'keyb'
     kEventHotKeyPressed = 5
+    kEventHotKeyReleased = 6
     # Carbon event modifier masks (NOT the same as NSEvent masks).
     CARBON_CMD, CARBON_SHIFT, CARBON_OPTION, CARBON_CONTROL = 0x0100, 0x0200, 0x0800, 0x1000
 
@@ -217,8 +238,17 @@ def _register_hotkey_carbon(sequence: str, on_activated: Callable[[], None]
 
     def _handler(_next_handler, _event, _user_data):
         try:
-            # Coalesce rapid double-fires (key auto-repeat / synthetic injection)
-            # so a single press can't trigger the popup twice.
+            # In release-capable mode, route pressed vs released by the event kind and
+            # forward RAW events (no coalescing) so hold/tap timing is accurate.
+            if on_released is not None:
+                kind = carbon.GetEventKind(_event)
+                if kind == kEventHotKeyReleased:
+                    on_released()
+                    return 0
+                on_activated()
+                return 0
+            # Press-only mode: coalesce rapid double-fires (key auto-repeat / synthetic
+            # injection) so a single press can't trigger the popup twice.
             now = time.monotonic()
             if now - _last_fire[0] < 0.25:
                 return 0  # noErr
@@ -249,15 +279,20 @@ def _register_hotkey_carbon(sequence: str, on_activated: Callable[[], None]
     carbon.UnregisterEventHotKey.argtypes = [ctypes.c_void_p]
     carbon.RemoveEventHandler.restype = ctypes.c_int32
     carbon.RemoveEventHandler.argtypes = [ctypes.c_void_p]
+    carbon.GetEventKind.restype = ctypes.c_uint32
+    carbon.GetEventKind.argtypes = [ctypes.c_void_p]
 
     target = carbon.GetApplicationEventTarget()
     if not target:
         raise OSError("GetApplicationEventTarget returned NULL")
 
-    spec = _EventTypeSpec(kEventClassKeyboard, kEventHotKeyPressed)
+    # Install for pressed, plus released when the caller wants hold/tap gestures.
+    _kinds = [kEventHotKeyPressed] + ([kEventHotKeyReleased] if on_released is not None else [])
+    specs = (_EventTypeSpec * len(_kinds))(
+        *[_EventTypeSpec(kEventClassKeyboard, k) for k in _kinds])
     handler_ref = ctypes.c_void_p()
     err = carbon.InstallEventHandler(
-        target, handler_proc, 1, ctypes.byref(spec), None, ctypes.byref(handler_ref))
+        target, handler_proc, len(_kinds), specs, None, ctypes.byref(handler_ref))
     if err != 0:
         raise OSError(f"InstallEventHandler failed (OSStatus={err})")
 
@@ -279,7 +314,8 @@ def _register_hotkey_carbon(sequence: str, on_activated: Callable[[], None]
         'hotkey_ref': hotkey_ref,
         'handler_ref': handler_ref,
         'handler_proc': handler_proc,
-        'spec': spec,
+        'specs': specs,                       # keep the EventTypeSpec array alive
+        'supports_release': on_released is not None,
     }
     _hotkey_listeners.append(handle)
     hid = len(_hotkey_listeners) - 1
@@ -366,24 +402,113 @@ def _register_hotkey_nsevent(sequence: str, on_activated: Callable[[], None]
     return (hotkey_id, handle, 0)
 
 
+def _register_fn_tap(on_pressed: Callable[[], None],
+                     on_released: Optional[Callable[[], None]] = None,
+                     override: bool = True) -> Optional[Tuple[int, Any, int]]:
+    """Capture the Fn / Globe key via a CGEventTap so dictation can use it for
+    hold-to-talk. With override=True the Fn key event is CONSUMED, so it overrides
+    macOS's default Globe action (emoji / dictation / input-switch) and every other app.
+
+    The Fn key is a special modifier that Carbon's RegisterEventHotKey can't bind, so we
+    watch flagsChanged events for keycode 63 (the Globe key) toggling the secondary-fn
+    flag. Needs the app trusted for Accessibility / Input Monitoring, or CGEventTapCreate
+    returns NULL. Runs its own CFRunLoop on a daemon thread and uses only pure CGEvent
+    getters (never NSEvent.eventWithCGEvent_, which crashes on CapsLock on recent macOS).
+    """
+    import threading
+    from Quartz import (
+        CGEventTapCreate, CGEventTapEnable, CGEventMaskBit,
+        CGEventGetFlags, CGEventGetIntegerValueField,
+        CFMachPortCreateRunLoopSource, CFRunLoopAddSource, CFRunLoopGetCurrent,
+        CFRunLoopRun, CFRunLoopStop, kCFRunLoopCommonModes,
+        kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
+        kCGEventFlagsChanged, kCGEventTapDisabledByTimeout,
+        kCGEventTapDisabledByUserInput, kCGKeyboardEventKeycode,
+    )
+    FN_KEYCODE = 63                 # the Globe / fn key
+    FN_FLAG = 0x800000              # kCGEventFlagMaskSecondaryFn
+    st = {'down': False, 'tap': None, 'runloop': None, 'thread': None}
+
+    def _cb(proxy, etype, event, refcon):
+        try:
+            if etype in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
+                if st['tap'] is not None:
+                    CGEventTapEnable(st['tap'], True)   # system disabled us -> re-arm
+                return event
+            if CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) != FN_KEYCODE:
+                return event                            # another modifier -> never touch it
+            fn_now = bool(CGEventGetFlags(event) & FN_FLAG)
+            if fn_now and not st['down']:
+                st['down'] = True
+                on_pressed()
+            elif (not fn_now) and st['down']:
+                st['down'] = False
+                if on_released is not None:
+                    on_released()
+            return None if override else event          # consume Fn -> override system+apps
+        except Exception as e:
+            logger.error(f"Fn tap callback error: {e}")
+            return event
+
+    def _run():
+        tap = CGEventTapCreate(
+            kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
+            CGEventMaskBit(kCGEventFlagsChanged), _cb, None)
+        if not tap:
+            logger.error("Fn tap: CGEventTapCreate returned NULL — grant Accessibility / "
+                         "Input Monitoring to Filect, then relaunch")
+            return
+        st['tap'] = tap
+        source = CFMachPortCreateRunLoopSource(None, tap, 0)
+        st['runloop'] = CFRunLoopGetCurrent()
+        CFRunLoopAddSource(st['runloop'], source, kCFRunLoopCommonModes)
+        CGEventTapEnable(tap, True)
+        logger.info(f"Fn key tap installed (override={override})")
+        CFRunLoopRun()
+
+    t = threading.Thread(target=_run, daemon=True, name="filect-fn-tap")
+    st['thread'] = t
+    t.start()
+
+    handle = {'kind': 'fn_tap', 'supports_release': True, '_st': st}
+    _hotkey_listeners.append(handle)
+    return (len(_hotkey_listeners) - 1, handle, 0)
+
+
 def register_global_hotkey(
     parent: Any,
     sequence: str,
-    on_activated: Callable[[], None]
+    on_activated: Callable[[], None],
+    on_released: Optional[Callable[[], None]] = None,
 ) -> Optional[Tuple[int, Any, int]]:
     """
-    Register a global hotkey on macOS using pynput.
-    
+    Register a global hotkey on macOS.
+
     Args:
         parent: Parent widget (unused on macOS, kept for API compatibility)
         sequence: Hotkey sequence string (e.g., 'ctrl+alt+h', 'cmd+shift+space')
-        on_activated: Callback function to call when hotkey is pressed
-    
+        on_activated: Callback to call on key-down (press).
+        on_released: Optional callback to call on key-up (release). Only the Carbon
+            backend delivers this; when it does, the returned handle dict has
+            'supports_release': True. Callers use it for hold-to-talk gestures and must
+            degrade to press-only if it's absent.
+
     Returns:
         Tuple of (hotkey_id, listener, 0) on success, None on failure
     """
     global _hotkey_listeners
-    
+
+    # Fn / Globe key: not a Carbon-registerable key — use a CGEventTap that also
+    # CONSUMES it so it overrides the system Globe action and other apps.
+    if (sequence or '').strip().lower() in ('fn', 'globe', 'function'):
+        try:
+            result = _register_fn_tap(on_activated, on_released, override=True)
+            if result:
+                return result
+        except Exception as e:
+            logger.error(f"Fn key registration failed: {e}", exc_info=True)
+        return None
+
     # Use Cocoa's native NSEvent global+local monitors instead of pynput.
     # pynput runs its CGEventTap on a background thread, and on macOS Sequoia
     # the path `NSEvent.eventWithCGEvent_` → TSMSetCapsLockKeyTransitionDetected
@@ -395,7 +520,7 @@ def register_global_hotkey(
     # is frontmost. This is the reliable path on modern macOS; NSEvent monitors
     # below only work over other apps if Accessibility happens to be granted.
     try:
-        result = _register_hotkey_carbon(sequence, on_activated)
+        result = _register_hotkey_carbon(sequence, on_activated, on_released)
         if result:
             return result
     except Exception as e:
@@ -637,6 +762,16 @@ def unregister_global_hotkey(hotkey_id: int, filt: Any) -> None:
                     try: NSEvent.removeMonitor_(m)
                     except Exception: pass
             logger.info(f"Unregistered NSEvent hotkey (id={hotkey_id})")
+        elif isinstance(filt, dict) and filt.get('kind') == 'fn_tap':
+            st = filt.get('_st') or {}
+            try:
+                from Quartz import CGEventTapEnable, CFRunLoopStop
+                if st.get('tap') is not None:
+                    CGEventTapEnable(st['tap'], False)
+                if st.get('runloop') is not None:
+                    CFRunLoopStop(st['runloop'])   # ends the daemon thread's run loop
+            except Exception: pass
+            logger.info(f"Unregistered Fn tap (id={hotkey_id})")
         elif filt is not None and hasattr(filt, 'stop'):
             filt.stop()
             logger.info(f"Unregistered global hotkey (id={hotkey_id})")

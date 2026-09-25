@@ -32,6 +32,9 @@ class Settings:
         self.quick_search_autopaste: bool = True
         self.quick_search_auto_confirm: bool = True
         self.quick_search_geometry: Dict[str, int] = {}
+        # Voice dictation (Filect Voice) — global push-to-talk
+        self.dictation_enabled: bool = True
+        self.dictation_shortcut: str = 'fn'  # Fn/Globe key (CGEventTap capture, overrides system)
         # Theme: 'dark' or 'light'
         self.theme: str = 'dark'
         # Auto-index downloads folder (legacy - kept for compatibility)
@@ -255,6 +258,10 @@ class Settings:
         # else keep default 'openai'
         self.use_openai_search_rerank = bool(data.get('use_openai_search_rerank', self.use_openai_search_rerank))
         self.use_quick_search = bool(data.get('use_quick_search', self.use_quick_search))
+        self.dictation_enabled = bool(data.get('dictation_enabled', self.dictation_enabled))
+        ds = data.get('dictation_shortcut')
+        if isinstance(ds, str) and ds.strip():
+            self.dictation_shortcut = ds.strip().lower()
         k = data.get('openai_api_key')
         if isinstance(k, str) and k.strip():
             self.openai_api_key = k.strip()
@@ -353,6 +360,8 @@ class Settings:
             'quick_search_autopaste': self.quick_search_autopaste,
             'quick_search_auto_confirm': self.quick_search_auto_confirm,
             'quick_search_geometry': self.quick_search_geometry,
+            'dictation_enabled': self.dictation_enabled,
+            'dictation_shortcut': self.dictation_shortcut,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
             'watch_common_folders': self.watch_common_folders,
@@ -403,6 +412,16 @@ class Settings:
 
     def set_quick_search_auto_confirm(self, use: bool) -> None:
         self.quick_search_auto_confirm = bool(use)
+        self._save_config()
+
+    # Voice dictation setters
+    def set_dictation_enabled(self, on: bool) -> None:
+        self.dictation_enabled = bool(on)
+        self._save_config()
+
+    def set_dictation_shortcut(self, shortcut: str) -> None:
+        sc = (shortcut or '').strip().lower() or 'ctrl+shift+d'
+        self.dictation_shortcut = sc
         self._save_config()
 
     def set_theme(self, theme: str) -> None:

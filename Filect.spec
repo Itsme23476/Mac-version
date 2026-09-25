@@ -41,6 +41,7 @@ hidden_imports = [
     'app.core.text_extract',
     'app.core.update_checker',
     'app.core.vision',
+    'app.core.transcription',
     'app.ui',
     'app.ui.main_window',
     'app.ui.auth_dialog',
@@ -52,6 +53,9 @@ hidden_imports = [
     'app.ui.mac_hotkey',
     'app.ui.win_hotkey',
     'app.ui.contextual_tips',
+    'app.ui.dictation',
+    'app.ui.dictation_overlay',
+    'app.ui.mac_spaces',
     'app.version',
     
     # PySide6 modules
@@ -174,17 +178,30 @@ coll = COLLECT(
     name='Filect',
 )
 
+# --- Dev-build identity override -------------------------------------------------
+# A local dev build must NOT share the release app's bundle id. macOS TCC keys the
+# Accessibility grant on the bundle id, so a shared id makes the grant bind to the
+# installed /Applications/Filect.app instead of this build (the two collapse into a
+# single "Filect" entry and the dev build is never actually trusted). FILECT_DEV=1
+# builds a separate "Filect Dev" app with its own id + URL scheme. Release builds
+# (no env var) are byte-for-byte unchanged.
+_DEV = os.environ.get('FILECT_DEV') == '1'
+_BUNDLE_NAME = 'Filect Dev.app' if _DEV else 'Filect.app'
+_BUNDLE_ID = 'com.filect.filesearch.dev' if _DEV else 'com.filect.filesearch'
+_DISPLAY_NAME = 'Filect Dev' if _DEV else 'Filect'
+_URL_SCHEME = 'filectdev' if _DEV else 'filect'
+
 app = BUNDLE(
     coll,
-    name='Filect.app',
+    name=_BUNDLE_NAME,
     icon=os.path.join(APP_DIR, 'resources', 'icon.icns'),
-    bundle_identifier='com.filect.filesearch',
+    bundle_identifier=_BUNDLE_ID,
     info_plist={
-        'CFBundleName': 'Filect',
-        'CFBundleDisplayName': 'Filect',
-        'CFBundleIdentifier': 'com.filect.filesearch',
-        'CFBundleVersion': '14.1.18',
-        'CFBundleShortVersionString': '14.1.18',
+        'CFBundleName': _DISPLAY_NAME,
+        'CFBundleDisplayName': _DISPLAY_NAME,
+        'CFBundleIdentifier': _BUNDLE_ID,
+        'CFBundleVersion': '14.2.0',
+        'CFBundleShortVersionString': '14.2.0',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleExecutable': 'Filect',
@@ -198,6 +215,7 @@ app = BUNDLE(
         'NSDesktopFolderUsageDescription': 'Filect needs access to your Desktop folder to search and organize files.',
         'NSDocumentsFolderUsageDescription': 'Filect needs access to your Documents folder to search and organize files.',
         'NSDownloadsFolderUsageDescription': 'Filect needs access to your Downloads folder to search and organize files.',
+        'NSMicrophoneUsageDescription': 'Filect uses your microphone for voice dictation and voice commands.',
         'NSSupportsAutomaticTermination': False,
         'NSSupportsSuddenTermination': False,
         'NSPrincipalClass': 'NSApplication',
@@ -205,7 +223,7 @@ app = BUNDLE(
         'CFBundleURLTypes': [
             {
                 'CFBundleURLName': 'io.filect.app',
-                'CFBundleURLSchemes': ['filect'],
+                'CFBundleURLSchemes': [_URL_SCHEME],
             }
         ],
     },
