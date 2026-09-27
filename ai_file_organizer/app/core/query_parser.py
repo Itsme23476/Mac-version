@@ -783,9 +783,27 @@ def parse_query(query: str) -> Dict:
             # If nothing remains, keep the original as search term (don't strip)
             break  # Only use first match
     
+    # Strip conversational lead-ins/trailers that VOICE queries add (typed queries almost
+    # never have these). Phrases go FIRST, so a trailer like "in my machine" is removed
+    # without losing 'machine' as a standalone search term.
+    conversational_phrases = [
+        r"\b(?:can|could|would|will)\s+you\b",
+        r"\bdo\s+i\s+have\b",
+        r"\bi\s*'?m\s+looking\s+for\b", r"\blooking\s+for\b",
+        r"\bwhere\s+(?:is|are)\b",
+        r"\bthat\s+i\s+have\b",
+        r"\b(?:on|in|from)\s+my\s+(?:machine|computer|laptop|mac|pc|desktop|device|drive|system)\b",
+        r"\bsomewhere\b",
+    ]
+    for _pat in conversational_phrases:
+        clean_query = re.sub(_pat, ' ', clean_query, flags=re.IGNORECASE)
+    clean_query = re.sub(r'[?!]', ' ', clean_query)   # drop ? / ! — never in filenames
+
     # Clean up the query (remove extra spaces, common filler words)
-    # These are words that users commonly type but don't add search value
-    filler_words = r'\b(i|the|a|an|my|from|created|made|that|which|were|was|in|on|all|show|get|find|me|for|with|files|file)\b'
+    # These are words that users commonly type/say but don't add search value.
+    filler_words = (r'\b(i|the|a|an|my|from|created|made|that|which|were|was|in|on|all|'
+                    r'show|get|find|me|for|with|files|file|can|you|could|would|please|'
+                    r'have|has|do|does)\b')
     clean_query = re.sub(filler_words, '', clean_query, flags=re.IGNORECASE)
     clean_query = re.sub(r'\s+', ' ', clean_query).strip()
     

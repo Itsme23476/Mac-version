@@ -108,9 +108,11 @@ class DictationIndicator(QWidget):
 class VoiceDictationController(QObject):
     """Owns the dictation hotkey, the recorder, and text insertion."""
 
-    # thread-safe bridges: native hotkey callbacks (press/release) -> UI thread
-    _press_sig = Signal()
+    # thread-safe bridges: native hotkey callbacks (press/release) -> UI thread.
+    # _press_sig carries whether Shift was held at press (Fn = dictate, Fn+Shift = search).
+    _press_sig = Signal(bool)
     _release_sig = Signal()
+    _search_ready = Signal(str, str)  # (spoken text, distilled query) -> open popup (UI thread)
 
     def __init__(self, main_window):
         super().__init__(main_window)
@@ -129,11 +131,13 @@ class VoiceDictationController(QObject):
         self._ignore_next_release = False
         self._key_down = False        # is the hotkey physically held right now
         self._got_second_tap = False  # a double-tap is in progress -> will latch
+        self._mode = "dictate"        # "dictate" | "search" — set at capture start from Shift
         self._indicator = DictationOverlay() if _OVERLAY_OK else DictationIndicator()
         # Hotkey callbacks fire on the native event thread; emit -> queued slots run on
         # the UI thread (same pattern as setup_quick_search).
         self._press_sig.connect(self._on_press, Qt.QueuedConnection)
         self._release_sig.connect(self._on_release, Qt.QueuedConnection)
+        self._search_ready.connect(self._open_search, Qt.QueuedConnection)
         if settings.dictation_enabled:
             self.register_hotkey()
 
@@ -145,7 +149,7 @@ class VoiceDictationController(QObject):
         try:
             self._hotkey = register_global_hotkey(
                 self._mw, seq,
-                lambda: self._press_sig.emit(),
+                lambda shift=False: self._press_sig.emit(bool(shift)),
                 on_released=lambda: self._release_sig.emit(),
             )
             if self._hotkey:
@@ -184,8 +188,8 @@ class VoiceDictationController(QObject):
     HOLD_SEC = 0.35
     DOUBLE_TAP_SEC = 0.30
 
-    def _on_press(self):
-        """Key-down."""
+    def _on_press(self, shift=False):
+        """Key-down. Shift held at press selects the mode: Fn+Shift = search, Fn = dictate."""
         if not self._gesture_mode:
             return self._toggle()            # backend has no key-up -> tap-to-toggle
         was_down = self._key_down
@@ -204,7 +208,8 @@ class VoiceDictationController(QObject):
             if not was_down:
                 self._got_second_tap = True
             return
-        # idle -> start recording (so a hold captures from the first moment)
+        # idle -> start a fresh capture. Fn+Shift = search, Fn alone = dictate.
+        self._mode = "search" if shift else "dictate"
         self._press_time = time.monotonic()
         self._got_second_tap = False
         self._start()
@@ -285,6 +290,10 @@ class VoiceDictationController(QObject):
         self._recorder.level.connect(self._indicator.set_level)
         self._state = "recording"
         self._recorder.start()
+        try:
+            self._indicator.set_mode(self._mode)   # recolor the pill: search vs dictate
+        except Exception:
+            pass
         self._indicator.show_state("listening")
 
     def _stop(self):
@@ -304,6 +313,9 @@ class VoiceDictationController(QObject):
         if not text:
             self._status("No speech detected.")
             return
+        if self._mode == "search":
+            self._do_search(text)
+            return
         # Do NOT touch focus: the overlay is a non-activating panel, so the app the
         # user was typing in is still frontmost. We paste straight into it (exactly
         # like the quick-search auto-popup). The old set_foreground_hwnd_robust()
@@ -320,6 +332,41 @@ class VoiceDictationController(QObject):
         self._ignore_next_release = False
         self._got_second_tap = False
         self._status(msg or "Dictation failed.")
+
+    def _do_search(self, raw_query: str):
+        """Voice search (Fn+Shift): distill the spoken sentence into keywords via the LLM
+        OFF the UI thread, then open the popup. Falls back to the raw transcript if the
+        distiller fails or the user is over the monthly cap."""
+        import threading
+        self._status("Preparing search…")
+
+        def worker():
+            cleaned = None
+            try:
+                from app.core.transcription import distill_search_query
+                cleaned = distill_search_query(raw_query)
+            except Exception as e:
+                logger.warning(f"Query distillation failed: {e}")
+            self._search_ready.emit(raw_query, cleaned or raw_query)
+
+        threading.Thread(target=worker, daemon=True, name="filect-distill").start()
+
+    def _open_search(self, spoken_text: str, search_query: str):
+        """Open the quick-search popup showing what the user SAID, but searching on the
+        distilled keywords (UI thread). Same search + reveal-in-Finder as typing."""
+        try:
+            qo = getattr(self._mw, "quick_overlay", None)
+            if qo is None:
+                logger.warning("Voice search: quick_overlay not available")
+                self._status("Search isn't available.")
+                return
+            qo.show_centered_bottom()
+            qo.run_voice_query(spoken_text, search_query)   # display spoken, search distilled
+            logger.info(f"Voice search: said {spoken_text!r} -> searched {search_query!r}")
+            self._status(f"Searching: {search_query}")
+        except Exception as e:
+            logger.error(f"Voice search failed: {e}")
+            self._status("Search failed.")
 
     def _insert_text(self, text: str):
         # macOS: pynput typing / Cmd+V paste silently no-op without Accessibility

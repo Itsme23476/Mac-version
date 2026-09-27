@@ -36,7 +36,7 @@ BOTTOM_GAP = 80                   # px above the bottom edge of the screen
 # --- look ---------------------------------------------------------------------
 PILL_BG = QColor(10, 10, 18, 235)          # #0A0A12 ~92% opacity
 BORDER = QColor(255, 255, 255, 28)
-PURPLE = QColor("#7C4DFF")                 # brand purple
+PURPLE = QColor("#7C4DFF")                 # brand purple (both modes; matches the app + popup)
 PURPLE_LIGHT = QColor("#B39DFF")
 
 # --- bars ---------------------------------------------------------------------
@@ -70,6 +70,7 @@ class DictationOverlay(QWidget):
         self.setWindowTitle("Filect Voice")  # lets _configure_macos find the NSWindow by title
 
         self._state = STATE_LISTENING
+        self._mode = "dictate"                   # "dictate" | "search" — drives accent color
         self._phase = 0.0                       # advances every frame, drives motion
         self._level_target = 0.0                # set by set_level, clamped 0..1
         self._level = 0.0                        # eased value the paint loop follows
@@ -83,6 +84,16 @@ class DictationOverlay(QWidget):
         self._done_timer = QTimer(self)
         self._done_timer.setSingleShot(True)
         self._done_timer.timeout.connect(self.hide)
+
+    def set_mode(self, mode: str) -> None:
+        """Recolor the pill by mode: 'search' = teal, 'dictate' = purple."""
+        self._mode = "search" if mode == "search" else "dictate"
+
+    def _accent(self) -> QColor:
+        return PURPLE          # both modes use brand purple (matches the results popup)
+
+    def _accent_light(self) -> QColor:
+        return PURPLE_LIGHT    # search mode is distinguished by the 🔍 icon, not color
 
     # -- public API ------------------------------------------------------------
     def show_state(self, state: str) -> None:
@@ -229,7 +240,25 @@ class DictationOverlay(QWidget):
         else:
             self._paint_done(p, pill)
 
+        # Search mode: a small magnifying glass so it's distinguishable from dictation
+        # without changing the color (keeps the pill consistent with the results popup).
+        if self._mode == "search" and self._state != STATE_DONE:
+            self._paint_search_icon(p, pill)
+
         p.end()
+
+    def _paint_search_icon(self, p: QPainter, pill: QRectF) -> None:
+        """Small magnifying glass on the left of the pill, marking search mode."""
+        r = 7.0
+        cx = pill.left() + 30
+        cy = pill.center().y()
+        pen = QPen(PURPLE_LIGHT, 2.4)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        d = r * 0.72                      # handle from the lens's lower-right
+        p.drawLine(QPointF(cx + d, cy + d), QPointF(cx + d + 5, cy + d + 5))
 
     def _paint_glow(self, p: QPainter, pill: QRectF) -> None:
         """Fake a soft outer glow with a few expanding low-alpha halos."""
@@ -238,7 +267,7 @@ class DictationOverlay(QWidget):
             alpha = int(22 * (1 - i / GLOW_MARGIN))
             if alpha <= 0:
                 continue
-            c = QColor(PURPLE)
+            c = QColor(self._accent())
             c.setAlpha(alpha)
             p.setBrush(c)
             p.drawRoundedRect(pill.adjusted(-i, -i, i, i), CORNER + i, CORNER + i)
@@ -254,8 +283,8 @@ class DictationOverlay(QWidget):
             bar = QRectF(x, cy - h / 2.0, BAR_W, h)
 
             grad = QLinearGradient(bar.topLeft(), bar.bottomLeft())
-            grad.setColorAt(0.0, PURPLE_LIGHT)
-            grad.setColorAt(1.0, PURPLE)
+            grad.setColorAt(0.0, self._accent_light())
+            grad.setColorAt(1.0, self._accent())
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(grad))
             p.drawRoundedRect(bar, BAR_W / 2.0, BAR_W / 2.0)
@@ -269,7 +298,7 @@ class DictationOverlay(QWidget):
         p.setPen(Qt.NoPen)
         for i in range(3):
             pulse = 0.5 + 0.5 * math.sin(self._phase * 1.6 - i * 0.9)
-            c = QColor(PURPLE)
+            c = QColor(self._accent())
             c.setAlpha(90 + int(150 * pulse))
             p.setBrush(c)
             rad = r * (0.7 + 0.5 * pulse)
@@ -299,7 +328,7 @@ class DictationOverlay(QWidget):
             t = (draw - 0.5) / 0.5
             path.lineTo(p2 + (p3 - p2) * t)
 
-        pen = QPen(PURPLE_LIGHT, 4)
+        pen = QPen(self._accent_light(), 4)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         p.setPen(pen)

@@ -209,6 +209,27 @@ def check_lone_tap_is_discarded():
         c.cleanup()
 
 
+def check_shift_selects_search_mode():
+    """Holding Shift at press (Fn+Shift) selects SEARCH mode: the transcript is routed to
+    the quick-search popup via _do_search, NOT pasted. Fn alone stays dictate."""
+    with patch.object(dictation, "VoiceRecorder", FakeRecorder):
+        c = _new_controller()
+        c._gesture_mode = True
+        c._do_search = MagicMock()
+        c._insert_text = MagicMock()
+        c._on_press(shift=True)                       # Fn+Shift -> search
+        assert c._mode == "search", "Shift at press selects search mode"
+        c._press_time -= 1.0                          # simulate a hold
+        c._on_release()                               # -> transcribing
+        c._recorder.finished.emit("budget spreadsheet")
+        deadline = time.time() + 1.5
+        while not c._do_search.called and time.time() < deadline:
+            QCoreApplication.processEvents(); time.sleep(0.02)
+        c._do_search.assert_called_once_with("budget spreadsheet")
+        c._insert_text.assert_not_called()            # search must not paste
+        c.cleanup()
+
+
 def check_transcription_results_map_correctly():
     """The transcription client turns server responses into the right outcomes:
     success -> trimmed text; and each error into a clear code the UI can act on."""
@@ -248,6 +269,7 @@ CHECKS = [
     check_hold_to_talk,
     check_double_tap_latches_hands_free,
     check_lone_tap_is_discarded,
+    check_shift_selects_search_mode,
     check_transcription_results_map_correctly,
 ]
 

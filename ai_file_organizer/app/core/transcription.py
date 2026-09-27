@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 SUPABASE_URL = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
 TRANSCRIBE_URL = f"{SUPABASE_URL}/functions/v1/transcribe"
+DISTILL_URL = f"{SUPABASE_URL}/functions/v1/distill-query"
 
 SAMPLE_RATE = 16000  # 16 kHz mono — plenty for speech, small payloads
 
@@ -97,6 +98,32 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> Dict[st
     logger.error(f"Transcribe proxy error {r.status_code}: {r.text[:300]}")
     return {"ok": False, "error": "provider",
             "message": "Transcription failed — please try again."}
+
+
+def distill_search_query(text: str) -> Optional[str]:
+    """Turn a spoken search sentence into tight keywords via the distill-query edge
+    function (LLM). Returns the cleaned query, or None on ANY failure/cap so the caller
+    falls back to the raw transcript (search still works)."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    token = _get_auth_token()
+    if not token:
+        return None
+    try:
+        r = requests.post(
+            DISTILL_URL,
+            json={"text": text},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            q = (r.json().get("query") or "").strip()
+            return q or None
+        logger.warning(f"distill-query returned {r.status_code}")
+    except Exception as e:
+        logger.warning(f"distill_search_query failed: {e}")
+    return None
 
 
 def _rms_level(chunk_int16) -> float:

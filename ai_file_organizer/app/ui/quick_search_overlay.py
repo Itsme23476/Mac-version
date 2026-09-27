@@ -1165,9 +1165,26 @@ class QuickSearchOverlay(QDialog):
         finally:
             self._hidden_windows = []
 
+    def run_voice_query(self, display_text: str, search_text: str):
+        """Voice search: show `display_text` (what the user SAID) in the box, but run the
+        actual search on `search_text` (the distilled keywords). Decouples the visible
+        text from the query for this one search; typed search is unaffected."""
+        try:
+            self._debounce.stop()
+        except Exception:
+            pass
+        self.input.blockSignals(True)
+        self.input.setText(display_text or '')
+        self.input.blockSignals(False)
+        self._voice_query = (search_text or display_text or '').strip()
+        self._run_search()
+
     def _run_search(self):
         """Start a background search. If a search is already running, queue the new query."""
-        q = self.input.text().strip()
+        # Voice search sets _voice_query so the box can show the spoken sentence while the
+        # search runs on the distilled keywords. One-shot; typed search uses the box text.
+        q = (getattr(self, '_voice_query', None) or self.input.text()).strip()
+        self._voice_query = None
         
         if not q:
             # Empty query - clear results immediately

@@ -138,6 +138,40 @@ Documents (Known Folder Move), you'll hit the identical slowdown. Build from a
 non-synced path like `C:\dev\App-interface`. Also keep ≥15–20 GB free; a near-full disk
 compounds it.
 
+## 6. Voice SEARCH (Mode B1) — find a file by talking
+
+Built on top of dictation. Gesture: **Fn + Shift** (Shift held at Fn-down → search mode;
+Fn alone → dictate). The pill stays brand-purple but shows a 🔍 in search mode (color is
+kept consistent with the results popup; the icon marks the mode).
+
+**Flow:** hold Fn+Shift → speak → transcribe → **distill the spoken sentence into keywords**
+→ open the app's existing quick-search popup, **showing the spoken sentence but searching
+on the distilled keywords** → user picks a result / reveal-in-Finder (all reused).
+
+**Query distillation (two layers):**
+1. **Free phrase-list cleaning** in `query_parser.parse_query` (shared, portable) strips
+   conversational lead-ins/trailers ("can you", "find me", "in my machine", …). Handles the
+   common cases at zero cost/latency.
+2. **LLM distillation** via a **new shared edge function `distill-query`** (SHARED BACKEND —
+   already deployed + the `voice_search_usage` table migration already applied; Windows just
+   calls it). Client POSTs `{text}` → gets `{query, distilled}`. It: auths, gates on
+   `get_entitlement`, enforces a **per-user 50,000/month cap** (`voice_search_usage` +
+   `increment_voice_search` RPC), then calls OpenAI `gpt-4o-mini` (`OPENAI_API_KEY` secret).
+   ❌ Over the cap or on ANY error it returns the raw text — the client always falls back to
+   the raw transcript so search never breaks. Cost is negligible (~$0.00003/call).
+
+**Display vs. search decoupling:** the quick-search overlay got a `run_voice_query(display,
+search)` method — sets the box text to `display` (what was said) with signals blocked, then
+runs the worker on `search` (distilled). `_run_search` prefers a one-shot `_voice_query`.
+Windows' quick-search widget needs the same tiny decouple.
+
+**Per-platform:**
+- Hotkey: Fn+Shift is Mac-only. Windows has no OS-visible Fn — pick a different chord and
+  detect its modifier at key-down in the `WH_KEYBOARD_LL` hook (§1).
+- The distill client call + the phrase-list parser are portable Python; copy as-is.
+- Shared backend (do NOT redeploy from Windows): `distill-query` function, `voice_search_usage`
+  table, `increment_voice_search` RPC, `OPENAI_API_KEY` secret.
+
 ## Test
 One readable script proves the logic offline (mic/network/permissions faked):
 `voice_dictation_check.py` — 9 checks incl. hold-to-talk and quick-tap-latch. Run headless:
