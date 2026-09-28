@@ -30,12 +30,16 @@ SAMPLE_RATE = 16000  # 16 kHz mono — plenty for speech, small payloads
 
 
 def _get_auth_token() -> Optional[str]:
-    """Current user's Supabase access token (same source as vision.py)."""
+    """Current user's Supabase access token — the LIVE, auto-refreshed one.
+
+    Uses supabase_auth.get_access_token() (which pulls from the gotrue client's
+    session and refreshes near expiry) rather than the cached _access_token, which
+    went stale on background token rotation and caused 401 'session expired'."""
     try:
         from .supabase_client import supabase_auth
-        if supabase_auth.is_authenticated:
-            return supabase_auth._access_token
-        return None
+        if not supabase_auth.is_authenticated:
+            return None
+        return supabase_auth.get_access_token()
     except Exception as e:
         logger.error(f"Failed to get auth token: {e}")
         return None

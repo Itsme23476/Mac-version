@@ -592,7 +592,23 @@ class AuthDialog(QDialog):
         apply_titlebar_theme(self)
         if hasattr(self, 'google_login_button'):
             self._reset_google_button()
-    
+        # Agent (LSUIElement) app: give the login dialog CanJoinAllSpaces|
+        # FullScreenAuxiliary so it appears on the user's active Space — including a
+        # full-screen app's Space — instead of being stranded off-Space (which would
+        # lock the user out after a sign-out). Same fix as the sign-out confirm.
+        try:
+            import sys
+            if sys.platform == 'darwin':
+                import objc
+                from ctypes import c_void_p
+                view = objc.objc_object(c_void_p=int(self.winId()))
+                nswin = view.window() if view is not None else None
+                if nswin is not None:
+                    nswin.setCollectionBehavior_((1 << 0) | (1 << 8))
+                    nswin.orderFrontRegardless()
+        except Exception as e:
+            logger.warning(f"[AUTH] join active space failed: {e}")
+
     def _setup_ui(self):
         """Set up the dialog UI."""
         layout = QVBoxLayout(self)

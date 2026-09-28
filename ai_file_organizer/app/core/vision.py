@@ -38,12 +38,12 @@ from .settings import settings
 
 
 def _get_auth_token() -> Optional[str]:
-    """Get the current user's auth token for API calls."""
+    """Get the current user's auth token for API calls (live, auto-refreshed)."""
     try:
         from .supabase_client import supabase_auth
-        if supabase_auth.is_authenticated:
-            return supabase_auth._access_token
-        return None
+        if not supabase_auth.is_authenticated:
+            return None
+        return supabase_auth.get_access_token()
     except Exception as e:
         logger.error(f"Failed to get auth token: {e}")
         return None

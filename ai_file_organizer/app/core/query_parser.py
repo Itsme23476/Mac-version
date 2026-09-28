@@ -803,7 +803,11 @@ def parse_query(query: str) -> Dict:
     # These are words that users commonly type/say but don't add search value.
     filler_words = (r'\b(i|the|a|an|my|from|created|made|that|which|were|was|in|on|all|'
                     r'show|get|find|me|for|with|files|file|can|you|could|would|please|'
-                    r'have|has|do|does)\b')
+                    r'have|has|do|does|'
+                    # bare "pc": "...in my PC" often distills to a stray "PC" that
+                    # then searches for a file NAMED pc -> 0 results. (Only "pc" —
+                    # NOT computer/machine, which break "computer science" etc.)
+                    r'pc)\b')
     clean_query = re.sub(filler_words, '', clean_query, flags=re.IGNORECASE)
     clean_query = re.sub(r'\s+', ' ', clean_query).strip()
     

@@ -6,6 +6,7 @@ Uses individual packages (supabase-auth, postgrest) instead of full supabase pac
 import calendar
 import logging
 import sys
+import threading
 import webbrowser
 from datetime import datetime, date, timezone, timedelta
 from typing import Optional, Dict, Any
@@ -79,7 +80,8 @@ class SupabaseAuth:
         self._session: Optional[Dict[str, Any]] = None
         self._subscription: Optional[Dict[str, Any]] = None
         self._access_token: Optional[str] = None
-        
+        self._token_lock = threading.Lock()  # serialize concurrent token refreshes
+
         if SUPABASE_AVAILABLE:
             try:
                 # Initialize GoTrue client for authentication
@@ -87,6 +89,12 @@ class SupabaseAuth:
                     url=f"{SUPABASE_URL}/auth/v1",
                     headers={"apikey": SUPABASE_ANON_KEY}
                 )
+                # Capture tokens whenever gotrue rotates the session (background /
+                # on-demand refresh) so our in-memory + on-disk copies never go stale.
+                try:
+                    self._auth_client.on_auth_state_change(self._on_auth_state_change)
+                except Exception as e:
+                    logger.warning(f"Could not register auth-state listener: {e}")
                 logger.info("Supabase auth client initialized")
             except Exception as e:
                 logger.error(f"Failed to initialize Supabase auth client: {e}")
@@ -99,9 +107,10 @@ class SupabaseAuth:
             return None
         
         headers = {"apikey": SUPABASE_ANON_KEY}
-        if self._access_token:
-            headers["Authorization"] = f"Bearer {self._access_token}"
-        
+        token = self.get_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
         return SyncPostgrestClient(
             base_url=f"{SUPABASE_URL}/rest/v1",
             headers=headers
@@ -326,7 +335,58 @@ class SupabaseAuth:
         except Exception as e:
             logger.error(f"Session refresh failed: {e}")
         return False
-    
+
+    def _persist_session_obj(self, session) -> None:
+        """Sync our in-memory cache AND the on-disk tokens from a live gotrue Session.
+
+        gotrue rotates tokens (background + on-demand refresh) and updates only its
+        own storage. Without this, self._access_token went stale -> transcribe got
+        401 'session expired' mid-session, and the on-disk refresh token went stale
+        -> next launch failed with 'Invalid Refresh Token: Already Used'."""
+        if not session:
+            return
+        try:
+            sess = self._extract_session_dict(session)
+            access = sess.get('access_token') or getattr(session, 'access_token', None)
+            refresh = sess.get('refresh_token') or getattr(session, 'refresh_token', None)
+            if not access:
+                return
+            self._session = sess
+            self._access_token = access
+            if refresh:
+                from app.core.settings import settings
+                email = (self._user.get('email') if self._user else None) or settings.auth_user_email or ''
+                settings.set_auth_tokens(access, refresh, email)
+        except Exception as e:
+            logger.warning(f"Failed to sync/persist rotated session: {e}")
+
+    def _on_auth_state_change(self, event, session) -> None:
+        """Persist rotated tokens when gotrue signs in or refreshes the session."""
+        try:
+            name = str(getattr(event, 'value', event))
+            if session and ('TOKEN_REFRESHED' in name or 'SIGNED_IN' in name or 'USER_UPDATED' in name):
+                self._persist_session_obj(session)
+        except Exception as e:
+            logger.warning(f"auth-state listener error: {e}")
+
+    def get_access_token(self) -> Optional[str]:
+        """Return a CURRENTLY-VALID bearer token.
+
+        Sources it from the gotrue client's live session, which auto-refreshes when
+        the token is near expiry, then syncs our caches. This is the only correct
+        token source: the cached self._access_token goes stale whenever gotrue
+        rotates the session, which broke voice dictation/search with 401s."""
+        if self._auth_client is not None:
+            with self._token_lock:
+                try:
+                    session = self._auth_client.get_session()  # refreshes if expired
+                    if session and getattr(session, 'access_token', None):
+                        self._persist_session_obj(session)
+                        return session.access_token
+                except Exception as e:
+                    logger.warning(f"get_access_token: live session unavailable ({e}); using cached token")
+        return self._access_token
+
     def check_subscription(self) -> Dict[str, Any]:
         """
         Check if current user has an active subscription.
@@ -1025,7 +1085,7 @@ def track(event_name: str, **props) -> None:
             user_id = supabase_auth._user.get('id')
         if not user_id:
             return  # not signed in yet — nothing to attribute the event to
-        token = getattr(supabase_auth, '_access_token', None) or getattr(supabase_auth, 'access_token', None)
+        token = supabase_auth.get_access_token()
         if not token:
             return
         payload = {

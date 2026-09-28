@@ -978,12 +978,29 @@ class ModernConfirmDialog(QDialog):
         self._drag_pos = None
         event.accept()
     
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Agent (menu-bar / LSUIElement) app: bring this modal to the front and
+        # activate the app so it lands on the user's CURRENT Space and can receive
+        # clicks. Without activation an accessory-app frameless modal opens unfocused
+        # / off-Space and the app looks frozen. The sign-out path also flips the app
+        # to Regular activation policy, which is what actually lets this take effect.
+        try:
+            self.raise_()
+            self.activateWindow()
+            import sys
+            if sys.platform == 'darwin':
+                from AppKit import NSApp
+                NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+
     def accept(self):
         self.result_accepted = True
         super().accept()
-    
+
     @staticmethod
-    def ask(parent, title: str, message: str, details: list = None, 
+    def ask(parent, title: str, message: str, details: list = None,
             highlight_text: str = "", info_text: str = "",
             yes_text: str = "Yes", no_text: str = "No") -> bool:
         """Show dialog and return True if user clicked Yes."""

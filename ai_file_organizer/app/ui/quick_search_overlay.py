@@ -392,8 +392,8 @@ class QuickSearchOverlay(QDialog):
         self._debounce.timeout.connect(self._run_search)
         self.input.textChanged.connect(self._debounce.start)
 
-        self.input.returnPressed.connect(self._accept_selection)
-        self.results.itemDoubleClicked.connect(self._accept_selection)
+        self.input.returnPressed.connect(self._primary_action)
+        self.results.itemDoubleClicked.connect(self._primary_action)
         self.results.itemSelectionChanged.connect(self._on_selection_changed)
         self.results.cellClicked.connect(self._on_cell_clicked)
 
@@ -407,7 +407,7 @@ class QuickSearchOverlay(QDialog):
         self.btn_fill.setDefault(True)
         self.btn_fill.setEnabled(False)
         self.btn_fill.setToolTip("Fill path into file dialog (Enter)")
-        self.btn_fill.clicked.connect(self._accept_selection)
+        self.btn_fill.clicked.connect(self._primary_action)
         btn_row.addWidget(self.btn_fill)
 
         self.btn_copy_path = QPushButton("Copy Path")
@@ -689,6 +689,8 @@ class QuickSearchOverlay(QDialog):
             logger.error(f"[QS] Error creating comprehensive debug report: {e}")
 
     def show_centered_bottom(self):
+        # Default to Fill (typed / file-dialog use); run_voice_query() flips it to Open.
+        self._set_primary_mode("fill")
         # Capture state BEFORE showing the popup
         self.capture_state_before_popup()
         
@@ -1177,7 +1179,26 @@ class QuickSearchOverlay(QDialog):
         self.input.setText(display_text or '')
         self.input.blockSignals(False)
         self._voice_query = (search_text or display_text or '').strip()
+        self._set_primary_mode("open")   # voice search -> primary action opens the file
         self._run_search()
+
+    def _set_primary_mode(self, mode: str):
+        """'open' (voice search: primary button + Enter OPEN the file) vs 'fill' (typed /
+        file-dialog use: primary button + Enter autofill the path)."""
+        self._voice_mode = (mode == "open")
+        if self._voice_mode:
+            self.btn_fill.setText("Open")
+            self.btn_fill.setToolTip("Open the file (Enter)")
+        else:
+            self.btn_fill.setText("Fill")
+            self.btn_fill.setToolTip("Fill path into file dialog (Enter)")
+
+    def _primary_action(self):
+        """Route Enter / the primary button to Open (voice) or Fill (typed)."""
+        if getattr(self, "_voice_mode", False):
+            self._open_selection()
+        else:
+            self._accept_selection()
 
     def _run_search(self):
         """Start a background search. If a search is already running, queue the new query."""
@@ -1310,7 +1331,7 @@ class QuickSearchOverlay(QDialog):
             # If no selection, select first row first
             if self.results.currentRow() < 0 and self.results.rowCount() > 0:
                 self.results.selectRow(0)
-            self._accept_selection()
+            self._primary_action()
             return
         super().keyPressEvent(e)
     

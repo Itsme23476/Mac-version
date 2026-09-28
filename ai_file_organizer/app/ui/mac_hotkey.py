@@ -427,6 +427,7 @@ def _register_fn_tap(on_pressed: Callable[[], None],
     )
     FN_KEYCODE = 63                 # the Globe / fn key
     FN_FLAG = 0x800000              # kCGEventFlagMaskSecondaryFn
+    SHIFT_FLAG = 0x20000            # kCGEventFlagMaskShift
     st = {'down': False, 'tap': None, 'runloop': None, 'thread': None}
 
     def _cb(proxy, etype, event, refcon):
@@ -437,10 +438,17 @@ def _register_fn_tap(on_pressed: Callable[[], None],
                 return event
             if CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) != FN_KEYCODE:
                 return event                            # another modifier -> never touch it
-            fn_now = bool(CGEventGetFlags(event) & FN_FLAG)
+            flags = CGEventGetFlags(event)
+            fn_now = bool(flags & FN_FLAG)
             if fn_now and not st['down']:
                 st['down'] = True
-                on_pressed()
+                # Report whether Shift is held at Fn-down so the caller can pick a mode
+                # (Fn alone vs Fn+Shift). Older callers that take no arg still work.
+                shift_held = bool(flags & SHIFT_FLAG)
+                try:
+                    on_pressed(shift_held)
+                except TypeError:
+                    on_pressed()
             elif (not fn_now) and st['down']:
                 st['down'] = False
                 if on_released is not None:

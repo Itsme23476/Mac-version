@@ -61,3 +61,5 @@ Output/
 
 # Secrets
 .github_token
+venv311/
+supabase/.temp/

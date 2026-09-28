@@ -3259,20 +3259,49 @@ class MainWindow(QMainWindow):
             self.exclusions_toggle_btn.setText("▶ 🛡️ Exclusions (Advanced)")
     
     def _sign_out(self):
-        """Sign out the current user and show login dialog."""
-        from app.ui.organize_page import ModernConfirmDialog
-        
-        confirmed = ModernConfirmDialog.ask(
-            self,
-            title="Sign Out",
-            message="Are you sure you want to sign out?",
-            info_text="You'll need to sign in again to use the app.",
-            yes_text="Sign Out",
-            no_text="Cancel"
-        )
-        
-        if confirmed:
+        """Confirm, then sign out — via an INLINE two-click confirm on the button
+        itself, deliberately NOT a dialog window.
+
+        Why (proven by logging): this is an agent app (LSUIElement). A separate confirm
+        window opens on the app's own Space, and macOS will not reliably move it onto a
+        secondary / dynamic active Space (e.g. the Space you land on after the Google
+        sign-in browser flow) — the confirm stayed onActiveSpace=False on Space 680 even
+        with CanJoinAllSpaces|FullScreenAuxiliary set, so its modal loop froze the app.
+        The MAIN window is always on the user's active Space, so a confirm rendered on
+        the button can never be stranded. (The post-sign-out login dialog is fine because
+        _perform_sign_out_and_reauth hides the main window first, so login opens as the
+        primary window on the active Space.)"""
+        btn = getattr(self, 'signout_btn', None)
+        if btn is None:
             self._perform_sign_out_and_reauth()
+            return
+        if getattr(self, '_signout_armed', False):
+            # Second click within the window -> confirmed.
+            self._signout_armed = False
+            t = getattr(self, '_signout_arm_timer', None)
+            if t is not None:
+                t.stop()
+            btn.setText("Sign Out")
+            self._perform_sign_out_and_reauth()
+            return
+        # First click -> arm; auto-revert after a few seconds if not confirmed.
+        self._signout_armed = True
+        btn.setText("Click again to confirm")
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(self._disarm_signout)
+        t.start(4000)
+        self._signout_arm_timer = t
+
+    def _disarm_signout(self):
+        """Revert the Sign Out button if the confirming second click never came."""
+        self._signout_armed = False
+        btn = getattr(self, 'signout_btn', None)
+        if btn is not None:
+            try:
+                btn.setText("Sign Out")
+            except Exception:
+                pass
 
     def _perform_sign_out_and_reauth(self):
         """Clear the session and route back to the login dialog. Shared by the
@@ -3819,23 +3848,9 @@ class MainWindow(QMainWindow):
         if do_open:
             logger.info(f"[QS] Opening file: {path}")
             self.open_file_in_os(path)
-            # Re-activate popup so it stays focused and on top for rapid multi-file opening
-            # User can click outside the popup to focus on opened files
-            # Use delayed re-activation to combat apps that aggressively steal focus
-            if hasattr(self, 'quick_overlay') and self.quick_overlay:
-                overlay = self.quick_overlay
-                overlay._allow_reactivation = True  # Enable reactivation for this open
-                def reactivate():
-                    # Only reactivate if user hasn't clicked outside the popup
-                    if overlay.isVisible() and overlay._allow_reactivation:
-                        overlay.raise_()
-                        overlay.activateWindow()
-                # Immediate activation
-                overlay.raise_()
-                overlay.activateWindow()
-                # Delayed re-activation to reclaim focus if an app steals it
-                QTimer.singleShot(100, reactivate)
-                QTimer.singleShot(300, reactivate)
+            # Voice search is find-and-open: the popup already closed itself in
+            # _open_selection. Don't try to reclaim focus afterwards — the file's
+            # app should come forward, and fighting it caused a flicker/half-minimize.
             return
         
         # Copy to clipboard
