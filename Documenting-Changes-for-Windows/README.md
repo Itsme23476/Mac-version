@@ -39,7 +39,8 @@ So for a feature whose backend is shared, the Windows work is **client-side only
 
 | # | Feature | Guide | Mac status |
 |---|---------|-------|------------|
-| 1 | Voice dictation (Grok Voice Transcribe 2.0) | [voice-dictation.md](voice-dictation.md) | Phases 0–2 done; 3–5 pending |
+| 1 | Voice dictation + voice search (Grok Voice Transcribe 2.0) | [voice-dictation.md](voice-dictation.md) | Done on Mac |
+| 2 | Auth session + sign-out fixes (bugs we hit & fixed) | [session-auth-and-signout-fixes.md](session-auth-and-signout-fixes.md) | Done on Mac |
 
 ---
 
