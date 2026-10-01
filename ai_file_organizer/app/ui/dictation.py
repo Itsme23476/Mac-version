@@ -113,6 +113,8 @@ class VoiceDictationController(QObject):
     _press_sig = Signal(bool)
     _release_sig = Signal()
     _search_ready = Signal(str, str)  # (spoken text, distilled query) -> open popup (UI thread)
+    _final_ready = Signal(str)        # final dictation text (after optional AI cleanup) -> paste
+    dictation_saved = Signal()        # a dictation was saved to History -> refresh the card
 
     def __init__(self, main_window):
         super().__init__(main_window)
@@ -138,6 +140,7 @@ class VoiceDictationController(QObject):
         self._press_sig.connect(self._on_press, Qt.QueuedConnection)
         self._release_sig.connect(self._on_release, Qt.QueuedConnection)
         self._search_ready.connect(self._open_search, Qt.QueuedConnection)
+        self._final_ready.connect(self._on_final, Qt.QueuedConnection)
         if settings.dictation_enabled:
             self.register_hotkey()
 
@@ -284,7 +287,8 @@ class VoiceDictationController(QObject):
             self._prev_pid = get_foreground_hwnd() if _HOTKEY_OK else None
         except Exception:
             self._prev_pid = None
-        self._recorder = VoiceRecorder()
+        self._recorder = VoiceRecorder(terms=settings.dictation_custom_terms,
+                                       language=(settings.dictation_language or None))
         self._recorder.finished.connect(self._on_text)
         self._recorder.error.connect(self._on_error)
         self._recorder.level.connect(self._indicator.set_level)
@@ -305,23 +309,63 @@ class VoiceDictationController(QObject):
     def _on_text(self, text: str):
         text = (text or "").strip()
         logger.info(f"Transcript received: {len(text)} chars")
-        self._indicator.hide()
         self._state = "idle"
         self._latched = False
         self._ignore_next_release = False
         self._got_second_tap = False
         if not text:
+            self._indicator.hide()
             self._status("No speech detected.")
             return
         if self._mode == "search":
+            self._indicator.hide()
             self._do_search(text)
             return
-        # Do NOT touch focus: the overlay is a non-activating panel, so the app the
-        # user was typing in is still frontmost. We paste straight into it (exactly
-        # like the quick-search auto-popup). The old set_foreground_hwnd_robust()
-        # restore is what caused the visible "switch to Filect and back".
-        # 40ms is just enough for the overlay hide() to flush; the old 120ms existed to
-        # let the (now-removed) focus restore settle, so we don't need it any more.
+        # Optional Polishing (Voice > Polishing: none/light/polished): polish the
+        # transcript off the UI thread (it's a network call), then paste. none = raw.
+        level = getattr(settings, 'dictation_polish_level', 'none')
+        if level in ("light", "polished"):
+            # Keep the pill up (processing) through the polish round-trip so there's
+            # visible feedback instead of a dead ~2s wait; _on_final hides it.
+            try:
+                self._indicator.show_state("transcribing")
+            except Exception:
+                pass
+            self._status("Polishing…")
+            import threading
+
+            def _clean():
+                cleaned = text
+                try:
+                    from app.core.transcription import clean_transcript
+                    # Pass Custom Words so cleanup fixes/keeps them (Filect != Firefox).
+                    cleaned = clean_transcript(text, level, settings.dictation_custom_terms)
+                except Exception as e:
+                    logger.warning(f"Polishing failed: {e}")
+                self._final_ready.emit(cleaned or text)
+            threading.Thread(target=_clean, daemon=True).start()
+            return
+        self._indicator.hide()
+        self._final_ready.emit(text)
+
+    def _on_final(self, text: str):
+        """Final dictation text (raw, or AI-polished). Hide the pill, save to History,
+        notify the UI, then paste. Do NOT touch focus: the overlay is a non-activating
+        panel, so the app the user was typing in is still frontmost and we paste straight
+        into it. The 40ms lets the overlay hide() flush."""
+        self._indicator.hide()
+        text = (text or "").strip()
+        if not text:
+            return
+        try:
+            from app.core import dictation_history
+            dictation_history.add(text)
+        except Exception as e:
+            logger.warning(f"history save failed: {e}")
+        try:
+            self.dictation_saved.emit()  # live-refresh the Voice page History card
+        except Exception:
+            pass
         QTimer.singleShot(40, lambda: self._insert_text(text))
 
     def _on_error(self, msg: str):

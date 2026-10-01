@@ -169,6 +169,14 @@ serve(async () => {
     .from("abandoned_checkouts").select("email").not("discount_sent_at", "is", null);
   const discountedEmails = new Set((priorDiscounted ?? []).map((r) => r.email));
 
+  // Safety net: never email anyone who already has a LIVE subscription, no
+  // matter what their row's converted_at says. Guards against webhook ordering
+  // races where an expired-session row is inserted (and backdated) AFTER the
+  // user already subscribed, so converted_at was never set on it.
+  const { data: liveSubs } = await supabase
+    .from("subscriptions").select("user_id").in("status", ["active", "trialing", "past_due"]);
+  const liveUserIds = new Set((liveSubs ?? []).map((r) => r.user_id));
+
   // 24h nudge: created > 24h ago, no nudge sent, not converted
   const { data: nudgeCandidates } = await supabase
     .from("abandoned_checkouts")
@@ -179,6 +187,14 @@ serve(async () => {
 
   let nudgeSent = 0;
   for (const row of nudgeCandidates ?? []) {
+    if (row.user_id && liveUserIds.has(row.user_id)) {
+      // Already a paying/trialing customer — mark converted so it drops out of
+      // BOTH the nudge and discount stages and is never emailed.
+      await supabase.from("abandoned_checkouts")
+        .update({ converted_at: now.toISOString() })
+        .eq("id", row.id);
+      continue;
+    }
     if (nudgedEmails.has(row.email)) {
       // Already nudged via another row — suppress this duplicate fully
       // (mark both stages handled) so it never sends an email.
@@ -212,6 +228,12 @@ serve(async () => {
 
   let discountSent = 0;
   for (const row of discountCandidates ?? []) {
+    if (row.user_id && liveUserIds.has(row.user_id)) {
+      await supabase.from("abandoned_checkouts")
+        .update({ converted_at: now.toISOString() })
+        .eq("id", row.id);
+      continue;
+    }
     if (discountedEmails.has(row.email)) {
       await supabase.from("abandoned_checkouts")
         .update({ discount_sent_at: now.toISOString() })

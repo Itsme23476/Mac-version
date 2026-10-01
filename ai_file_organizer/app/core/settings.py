@@ -35,6 +35,13 @@ class Settings:
         # Voice dictation (Filect Voice) — global push-to-talk
         self.dictation_enabled: bool = True
         self.dictation_shortcut: str = 'fn'  # Fn/Globe key (CGEventTap capture, overrides system)
+        self.dictation_custom_terms: List[str] = []  # Voice > Custom Words: key-term biasing so
+        #   names/jargon/brand terms get spelled right (passed to Grok's key-term biasing).
+        self.dictation_polish_level: str = 'none'  # Voice > Polishing: 'none' | 'light' |
+        #   'polished'. none = raw verbatim; light = strip filler/stumbles + fix punctuation;
+        #   polished = light + smooth phrasing. (Replaced the old on/off dictation_ai_cleanup.)
+        self.dictation_language: str = ''  # Voice > Language: '' = auto-detect; else a code
+        #   (e.g. 'en', 'es') forcing Grok to transcribe in exactly that language.
         # Theme: 'dark' or 'light'
         self.theme: str = 'dark'
         # Auto-index downloads folder (legacy - kept for compatibility)
@@ -262,6 +269,17 @@ class Settings:
         ds = data.get('dictation_shortcut')
         if isinstance(ds, str) and ds.strip():
             self.dictation_shortcut = ds.strip().lower()
+        ct = data.get('dictation_custom_terms')
+        if isinstance(ct, list):
+            self.dictation_custom_terms = [str(t).strip() for t in ct if str(t).strip()][:200]
+        pl = data.get('dictation_polish_level')
+        if isinstance(pl, str) and pl in ('none', 'light', 'polished'):
+            self.dictation_polish_level = pl
+        elif data.get('dictation_ai_cleanup'):  # migrate old on/off bool -> 'light'
+            self.dictation_polish_level = 'light'
+        lg = data.get('dictation_language')
+        if isinstance(lg, str):
+            self.dictation_language = lg.strip()
         k = data.get('openai_api_key')
         if isinstance(k, str) and k.strip():
             self.openai_api_key = k.strip()
@@ -362,6 +380,9 @@ class Settings:
             'quick_search_geometry': self.quick_search_geometry,
             'dictation_enabled': self.dictation_enabled,
             'dictation_shortcut': self.dictation_shortcut,
+            'dictation_custom_terms': self.dictation_custom_terms,
+            'dictation_polish_level': self.dictation_polish_level,
+            'dictation_language': self.dictation_language,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
             'watch_common_folders': self.watch_common_folders,

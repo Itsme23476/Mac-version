@@ -42,13 +42,7 @@ hidden_imports = [
     'app.core.update_checker',
     'app.core.vision',
     'app.core.transcription',
-    'app.core.dictation_history',
     'app.ui',
-    'app.ui.voice_cards',
-    'app.ui.voice_cards.custom_words_card',
-    'app.ui.voice_cards.language_card',
-    'app.ui.voice_cards.cleanup_card',
-    'app.ui.voice_cards.history_card',
     'app.ui.main_window',
     'app.ui.auth_dialog',
     'app.ui.theme_manager',
@@ -61,7 +55,6 @@ hidden_imports = [
     'app.ui.contextual_tips',
     'app.ui.dictation',
     'app.ui.dictation_overlay',
-    'app.ui.mac_spaces',
     'app.version',
     
     # PySide6 modules
@@ -98,7 +91,6 @@ hidden_imports = [
     'rapidfuzz',
     'spellchecker',
     'sounddevice',
-    'soundfile',
     'scipy',
     'scipy.io',
     'scipy.io.wavfile',
@@ -140,7 +132,7 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=hidden_imports,
-    hookspath=[],
+    hookspath=['/private/tmp/claude-501/-Users-damianosmalliaros-Desktop-Mac-app/8dbf7c4b-fd34-40f9-bb9c-d41f50644098/scratchpad/hooks'],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
@@ -185,30 +177,17 @@ coll = COLLECT(
     name='Filect',
 )
 
-# --- Dev-build identity override -------------------------------------------------
-# A local dev build must NOT share the release app's bundle id. macOS TCC keys the
-# Accessibility grant on the bundle id, so a shared id makes the grant bind to the
-# installed /Applications/Filect.app instead of this build (the two collapse into a
-# single "Filect" entry and the dev build is never actually trusted). FILECT_DEV=1
-# builds a separate "Filect Dev" app with its own id + URL scheme. Release builds
-# (no env var) are byte-for-byte unchanged.
-_DEV = os.environ.get('FILECT_DEV') == '1'
-_BUNDLE_NAME = 'Filect Dev.app' if _DEV else 'Filect.app'
-_BUNDLE_ID = 'com.filect.filesearch.dev' if _DEV else 'com.filect.filesearch'
-_DISPLAY_NAME = 'Filect Dev' if _DEV else 'Filect'
-_URL_SCHEME = 'filectdev' if _DEV else 'filect'
-
 app = BUNDLE(
     coll,
-    name=_BUNDLE_NAME,
+    name='Filect.app',
     icon=os.path.join(APP_DIR, 'resources', 'icon.icns'),
-    bundle_identifier=_BUNDLE_ID,
+    bundle_identifier='com.filect.filesearch',
     info_plist={
-        'CFBundleName': _DISPLAY_NAME,
-        'CFBundleDisplayName': _DISPLAY_NAME,
-        'CFBundleIdentifier': _BUNDLE_ID,
-        'CFBundleVersion': '14.2.0',
-        'CFBundleShortVersionString': '14.2.0',
+        'CFBundleName': 'Filect',
+        'CFBundleDisplayName': 'Filect',
+        'CFBundleIdentifier': 'com.filect.filesearch',
+        'CFBundleVersion': '14.1.18',
+        'CFBundleShortVersionString': '14.1.18',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleExecutable': 'Filect',
@@ -230,7 +209,7 @@ app = BUNDLE(
         'CFBundleURLTypes': [
             {
                 'CFBundleURLName': 'io.filect.app',
-                'CFBundleURLSchemes': [_URL_SCHEME],
+                'CFBundleURLSchemes': ['filect'],
             }
         ],
     },

@@ -30,17 +30,40 @@ serve(async (req) => {
     const email = session.customer_details?.email ?? session.customer_email;
     if (!email) return new Response("ok", { status: 200 });
 
+    const userId = session.metadata?.user_id ?? null;
+    const customerId =
+      typeof session.customer === "string" ? session.customer : null;
+
+    // Has this person ALREADY converted? Stripe fires `expired` ~24h after the
+    // session was created — long after a user who opened a second session and
+    // subscribed in the meantime. In that case the normal convert handlers ran
+    // BEFORE this row existed, so they had no row to flag and converted_at would
+    // stay null forever → the recovery cron would nudge an existing customer.
+    // Check the source of truth (a live subscription) and, if found, write the
+    // row already-converted so it never enters the recovery sequence.
+    let convertedAt: string | null = null;
+    if (userId || customerId) {
+      let q = supabase
+        .from("subscriptions")
+        .select("id")
+        .in("status", ["active", "trialing", "past_due"])
+        .limit(1);
+      q = userId ? q.eq("user_id", userId) : q.eq("stripe_customer_id", customerId);
+      const { data: liveSub } = await q.maybeSingle();
+      if (liveSub) convertedAt = new Date().toISOString();
+    }
+
     await supabase.from("abandoned_checkouts").upsert({
       stripe_session_id: session.id,
-      stripe_customer_id:
-        typeof session.customer === "string" ? session.customer : null,
-      user_id: session.metadata?.user_id ?? null,
+      stripe_customer_id: customerId,
+      user_id: userId,
       email,
       name: session.customer_details?.name ?? null,
       // The plan they were buying, so the recovery email can bring them back
       // to the exact plan (set by create-checkout-web in session metadata).
       plan: session.metadata?.plan ?? null,
       created_at: new Date(session.created * 1000).toISOString(),
+      converted_at: convertedAt,
     }, { onConflict: "stripe_session_id", ignoreDuplicates: true });
   }
 
@@ -197,6 +220,11 @@ serve(async (req) => {
   }
 
   // CONVERT (fallback): subscription created — match by customer id.
+  // Also handles the card-fingerprint abuse check: if a brand-new sub is on a
+  // free trial, look up the default payment method's fingerprint. If we've
+  // seen that card on a previous trial (under any email/account), cancel this
+  // sub immediately and mark the row so PaymentSuccess can redirect the user
+  // to /trial-blocked instead of /payment-success.
   if (event.type === "customer.subscription.created") {
     const sub = event.data.object as Stripe.Subscription;
     const customerId =
@@ -208,6 +236,59 @@ serve(async (req) => {
         .update({ converted_at: new Date().toISOString() })
         .eq("stripe_customer_id", customerId)
         .is("converted_at", null);
+    }
+
+    // Card-fingerprint check — only matters when this sub started a trial.
+    const isTrialing = sub.status === "trialing" || sub.trial_end;
+    const pmId = typeof sub.default_payment_method === "string"
+      ? sub.default_payment_method
+      : sub.default_payment_method?.id;
+    if (isTrialing && pmId) {
+      try {
+        const pm = await stripe.paymentMethods.retrieve(pmId);
+        const fingerprint = pm.card?.fingerprint;
+        if (fingerprint) {
+          // Has this card already been used for a trial on someone else's account?
+          const ourUserId = sub.metadata?.user_id;
+          const { data: prior } = await supabase
+            .from("subscriptions")
+            .select("user_id")
+            .eq("card_fingerprint", fingerprint)
+            .neq("user_id", ourUserId ?? "00000000-0000-0000-0000-000000000000")
+            .limit(1)
+            .maybeSingle();
+
+          if (prior) {
+            // ABUSE DETECTED. Cancel the sub immediately so the customer is
+            // never charged after the trial. PaymentSuccess will see the
+            // canceled + reason and redirect to /trial-blocked.
+            await stripe.subscriptions.cancel(sub.id, {
+              invoice_now: false,
+              prorate: false,
+            });
+            await supabase.from("subscriptions").upsert({
+              user_id: ourUserId,
+              stripe_customer_id: customerId,
+              stripe_subscription_id: sub.id,
+              status: "canceled",
+              card_fingerprint: fingerprint,
+              trial_blocked_reason: "duplicate_trial_card",
+              updated_at: new Date().toISOString(),
+            }, { onConflict: "stripe_subscription_id" });
+            console.log("[TRIAL BLOCKED] fingerprint", fingerprint, "user", ourUserId);
+          } else {
+            // Clean — record fingerprint so this user can't restart trials
+            // either (catches the same person trying repeatedly).
+            await supabase
+              .from("subscriptions")
+              .update({ card_fingerprint: fingerprint, updated_at: new Date().toISOString() })
+              .eq("stripe_subscription_id", sub.id);
+          }
+        }
+      } catch (e) {
+        console.error("fingerprint check failed:", e);
+        // Don't block legitimate signups on a fingerprint-check error.
+      }
     }
   }
 

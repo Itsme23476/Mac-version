@@ -382,6 +382,8 @@ class MainWindow(QMainWindow):
         try:
             from app.ui.dictation import VoiceDictationController
             self.voice_dictation = VoiceDictationController(self)
+            # Live-refresh the Voice page History card when a dictation is saved.
+            self.voice_dictation.dictation_saved.connect(self._on_dictation_saved)
         except Exception as e:
             logger.warning(f"Voice dictation setup failed: {e}")
         
@@ -632,7 +634,8 @@ class MainWindow(QMainWindow):
         self.setup_organize_page()    # Index 1
         self.setup_index_page()       # Index 2
         self.setup_settings_page()    # Index 3
-        
+        self.setup_voice_page()       # Index 4
+
         # Set default page to Search
         self.page_stack.setCurrentIndex(0)
         self.nav_buttons[0].setChecked(True)
@@ -684,6 +687,7 @@ class MainWindow(QMainWindow):
             ("🔍", "Search", 0),
             ("🗂️", "Organize", 1),
             ("📁", "Analyze Files", 2),
+            ("🎙️", "Voice", 4),
             ("⚙️", "Settings", 3),
         ]
         
@@ -764,11 +768,71 @@ class MainWindow(QMainWindow):
             self.tips_manager.hide_all_tips()
         
         self.page_stack.setCurrentIndex(index)
-        
+
+        # Voice page: refresh the History card so it shows the latest dictations.
+        if index == 4 and hasattr(self, 'voice_history_card'):
+            try:
+                self.voice_history_card.refresh()
+            except Exception:
+                pass
+
         # Show tips for new page after a tiny delay
         if hasattr(self, 'tips_manager'):
             QTimer.singleShot(150, self.tips_manager.show_tips_for_visible_widgets)
-    
+
+    def setup_voice_page(self):
+        """Voice page (index 4) — dictation sub-features as self-contained cards
+        (Custom Words, AI Cleanup, History), mirroring the Settings page layout."""
+        from PySide6.QtWidgets import QScrollArea
+        from app.ui.theme_manager import get_theme_colors
+        from app.ui.voice_cards.custom_words_card import VoiceCustomWordsCard
+        from app.ui.voice_cards.language_card import VoiceLanguageCard
+        from app.ui.voice_cards.cleanup_card import VoiceCleanupCard
+        from app.ui.voice_cards.history_card import VoiceHistoryCard
+
+        c = get_theme_colors()
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("voicePage")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+
+        page = QWidget()
+        page.setObjectName("voiceContent")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 30, 40, 30)
+        layout.setSpacing(16)
+
+        title = QLabel("🎙️  Voice")
+        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #7C4DFF; "
+                            "background: transparent; border: none;")
+        layout.addWidget(title)
+        subtitle = QLabel("Dictate with Fn (hold to talk, double-tap for hands-free); "
+                          "Fn+Shift searches your files by voice.")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet(f"color: {c['text_muted']}; font-size: 13px; "
+                               "background: transparent; border: none;")
+        layout.addWidget(subtitle)
+
+        layout.addWidget(VoiceCustomWordsCard())
+        layout.addWidget(VoiceLanguageCard())
+        layout.addWidget(VoiceCleanupCard())
+        self.voice_history_card = VoiceHistoryCard()
+        layout.addWidget(self.voice_history_card)
+        layout.addStretch()
+
+        scroll_area.setWidget(page)
+        self.page_stack.addWidget(scroll_area)   # Index 4
+
+    def _on_dictation_saved(self):
+        """A dictation was just saved — refresh the Voice History card so it updates
+        live (even while the Voice page is already open)."""
+        if hasattr(self, 'voice_history_card'):
+            try:
+                self.voice_history_card.refresh()
+            except Exception:
+                pass
+
     def setup_organize_tab(self):
         """Setup the file organization tab."""
         organize_widget = QWidget()

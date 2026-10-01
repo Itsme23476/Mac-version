@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 SUPABASE_URL = "https://gsvccxhdgcshiwgjvgfi.supabase.co"
 TRANSCRIBE_URL = f"{SUPABASE_URL}/functions/v1/transcribe"
 DISTILL_URL = f"{SUPABASE_URL}/functions/v1/distill-query"
+CLEAN_URL = f"{SUPABASE_URL}/functions/v1/clean-transcript"
 
 SAMPLE_RATE = 16000  # 16 kHz mono — plenty for speech, small payloads
 
@@ -45,12 +46,15 @@ def _get_auth_token() -> Optional[str]:
         return None
 
 
-def transcribe_audio(audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(audio_path: str, language: Optional[str] = None,
+                     terms: Optional[list] = None) -> Dict[str, Any]:
     """
     Send an audio file to the transcribe proxy and return a result dict:
         {ok: True,  text: str, duration: float}
         {ok: False, error: <code>, message: <human message>}
     error codes: not_authenticated | no_subscription | rate_limited | provider | network
+
+    `terms` = the user's Custom Words (key-term biasing) — names/jargon to spell right.
     """
     token = _get_auth_token()
     if not token:
@@ -72,6 +76,11 @@ def transcribe_audio(audio_path: str, language: Optional[str] = None) -> Dict[st
     }
     if language:
         headers["X-Audio-Language"] = language
+    if terms:
+        # Custom Words → Grok key-term biasing (comma-separated header, capped).
+        joined = ",".join(str(t).strip() for t in terms if str(t).strip())
+        if joined:
+            headers["X-Audio-Terms"] = joined[:4000]
 
     try:
         r = requests.post(
@@ -130,6 +139,65 @@ def distill_search_query(text: str) -> Optional[str]:
     return None
 
 
+def _normalize_peak(audio, target: float = 0.95, max_gain: float = 8.0):
+    """Boost a too-quiet recording so soft speech reaches the model at a strong, even
+    level — soft speech otherwise transcribes worse than loud speech.
+
+    It's a LINEAR peak gain: it preserves the waveform (so it never changes *what* was
+    said), only ever RAISES the level (never attenuates), scales the peak up to `target`
+    of full scale (below clipping, so no distortion), and caps the gain so a near-silent
+    clip (just room noise) isn't blown up. Already-loud/normal speech (peak within ~1%
+    of target) is returned unchanged. Returns int16."""
+    import numpy as np
+    if audio is None or len(audio) == 0:
+        return audio
+    peak = int(np.max(np.abs(audio.astype(np.int32))))
+    if peak <= 0:
+        logger.info("[NORMALIZE] silent clip (peak=0) — unchanged")
+        return audio  # silence — nothing to boost
+    frac = peak / 32767.0
+    raw_gain = (target * 32767.0) / peak
+    if raw_gain <= 1.01:
+        logger.info(f"[NORMALIZE] peak={frac:.2f} of full scale — already loud enough, unchanged")
+        return audio  # already loud enough; leave normal/loud speech alone
+    gain = min(raw_gain, max_gain)
+    capped = " (capped)" if raw_gain > max_gain else ""
+    logger.info(f"[NORMALIZE] quiet clip peak={frac:.2f} -> boosted x{gain:.1f}{capped}")
+    return np.clip(audio.astype(np.float32) * gain, -32768.0, 32767.0).astype(np.int16)
+
+
+def clean_transcript(text: str, level: str = "light", terms: Optional[list] = None) -> str:
+    """Polishing (optional): polish a dictation transcript via the clean-transcript edge
+    function (gpt-4o-mini). `level`: 'light' = strip filler/stumbles + fix punctuation;
+    'polished' = light + smooth phrasing. `terms` = the user's Custom Words, sent so the
+    cleanup NEVER alters them (otherwise the LLM "corrects" e.g. 'Filect' -> 'Firefox').
+    Returns the cleaned text, or the ORIGINAL on any failure — polishing must never break
+    dictation, so this always returns usable text."""
+    text = (text or "").strip()
+    if not text or level not in ("light", "polished"):
+        return text
+    token = _get_auth_token()
+    if not token:
+        return text
+    payload = {"text": text, "level": level}
+    if terms:
+        payload["terms"] = [str(t).strip() for t in terms if str(t).strip()][:200]
+    try:
+        r = requests.post(
+            CLEAN_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=12,
+        )
+        if r.status_code == 200:
+            cleaned = (r.json().get("text") or "").strip()
+            return cleaned or text
+        logger.warning(f"clean-transcript returned {r.status_code}")
+    except Exception as e:
+        logger.warning(f"clean_transcript failed: {e}")
+    return text
+
+
 def _rms_level(chunk_int16) -> float:
     """Normalized 0..1 loudness of an int16 audio chunk (drives the animation)."""
     import numpy as np
@@ -148,9 +216,10 @@ class VoiceRecorder(QThread):
     recording_stopped = Signal()    # mic released (before transcription result)
     level = Signal(float)           # live amplitude 0..1, for the animation
 
-    def __init__(self, language: Optional[str] = None, device=None):
+    def __init__(self, language: Optional[str] = None, device=None, terms=None):
         super().__init__()
         self.language = language
+        self.terms = terms  # Custom Words (key-term biasing) for this capture
         self.device = device  # sounddevice input device index/name; None = system default
         self.is_recording = False
         self._chunks = []
@@ -196,6 +265,8 @@ class VoiceRecorder(QThread):
             return
 
         audio = np.concatenate(self._chunks, axis=0)
+        # Even out volume so soft speech isn't transcribed worse than loud speech.
+        audio = _normalize_peak(audio)
         logger.info(f"Captured {len(audio) / SAMPLE_RATE:.1f}s of audio; transcribing…")
         tmp = None
         try:
@@ -212,7 +283,7 @@ class VoiceRecorder(QThread):
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     tmp = f.name
                     wavfile.write(tmp, SAMPLE_RATE, audio)
-            result = transcribe_audio(tmp, language=self.language)
+            result = transcribe_audio(tmp, language=self.language, terms=self.terms)
             if result.get("ok"):
                 self.finished.emit(result.get("text", ""))
             else:
@@ -233,4 +304,13 @@ if __name__ == "__main__":
     assert _rms_level(loud) == 1.0            # clamps
     quiet = (np.ones(1000) * 1000).astype("int16")
     assert 0.0 < _rms_level(quiet) < 1.0
+    # normalization: quiet clip boosted, loud/normal clip untouched, silence stays silent, no clipping
+    q = (np.ones(1000) * 2000).astype("int16")
+    b = _normalize_peak(q)
+    assert int(np.max(np.abs(b.astype("int32")))) > 2000                     # quiet got louder
+    assert int(np.max(np.abs(b.astype("int32")))) <= 32767                    # never clips
+    loud = (np.ones(1000) * 31500).astype("int16")
+    assert np.array_equal(_normalize_peak(loud), loud)                        # normal/loud unchanged
+    assert np.array_equal(_normalize_peak(np.zeros(1000, dtype="int16")),
+                          np.zeros(1000, dtype="int16"))                      # silence unchanged
     print("transcription self-check passed ✓")

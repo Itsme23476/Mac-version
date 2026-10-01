@@ -24,15 +24,41 @@ const supabase = createClient(
 
 const XAI_STT_URL = "https://api.x.ai/v1/stt";
 const XAI_MODEL = "grok-voice-transcribe-2.0";
-// Bias the model toward our own vocabulary so "Filect" stops becoming "file liked".
-const KEYTERMS = "Filect";
+// xAI STT key-term biasing: repeat the `keyterm` form field once per term.
+// Confirmed against docs.x.ai speech-to-text — field name "keyterm", up to 100
+// terms, each <=50 chars. "Filect" is always biased so it stops becoming "file liked".
+const KEYTERM_FIELD = "keyterm";
+const BASE_KEYTERMS = ["Filect"];
+const MAX_KEYTERMS = 100; // xAI per-request ceiling
+const MAX_KEYTERM_LEN = 50; // xAI per-term char ceiling
+
+// Normalize a raw term source (array or comma-separated string): trim, drop empties
+// and over-long entries, de-dupe case-insensitively.
+function cleanTerms(raw: unknown): string[] {
+  const arr = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+    ? raw.split(",")
+    : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of arr) {
+    const t = String(item ?? "").trim();
+    if (!t || t.length > MAX_KEYTERM_LEN) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
 // Fair-use ceiling — generous enough that only abuse hits it. Tune here.
 const DAILY_LIMIT_SECONDS = 3 * 60 * 60; // 3 hours of audio per user per UTC day
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, content-type, x-client-info, apikey, x-audio-filename, x-audio-language",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-client-info, apikey, x-audio-filename, x-audio-language, x-audio-terms",
 };
 
 function json(body: unknown, status = 200) {
@@ -86,6 +112,7 @@ serve(async (req) => {
     let bytes: Uint8Array;
     let filename: string;
     let language: string | undefined;
+    let terms: string[] = []; // user's custom words (key-term biasing)
     if ((req.headers.get("content-type") || "").includes("application/json")) {
       const body = await req.json();
       const b64 = body.audio_base64 as string | undefined;
@@ -93,18 +120,30 @@ serve(async (req) => {
       bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
       filename = (body.audio_filename as string) || "audio.wav";
       language = body.language as string | undefined;
+      terms = cleanTerms(body.terms); // JSON body: `terms` array
     } else {
       bytes = new Uint8Array(await req.arrayBuffer());
       if (bytes.length === 0) return json({ error: "Missing audio body" }, 400);
       filename = req.headers.get("x-audio-filename") || "audio.flac";
       language = req.headers.get("x-audio-language") || undefined; // xAI auto-detects
+      terms = cleanTerms(req.headers.get("x-audio-terms")); // raw path: comma-separated header
     }
 
     // 5) Forward to xAI Grok Voice Transcribe 2.0 (multipart/form-data).
     const form = new FormData();
     form.append("file", new Blob([bytes]), filename);
     form.append("model", XAI_MODEL);
-    form.append("keyterm", KEYTERMS);
+    // Key-term biasing: base brand term(s) + the user's custom words, repeated field,
+    // de-duped across both and capped at xAI's ceiling. Empty terms → base only
+    // (identical to previous behavior).
+    const seen = new Set<string>();
+    for (const kt of [...BASE_KEYTERMS, ...terms]) {
+      const k = kt.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      form.append(KEYTERM_FIELD, kt);
+      if (seen.size >= MAX_KEYTERMS) break;
+    }
     if (language) form.append("language", language);
 
     const xaiRes = await fetch(XAI_STT_URL, {
