@@ -875,8 +875,10 @@ class OrganizeOverlay(QWidget):
         if st == "plan":
             return int(getattr(self, "_plan_stack_h", 225))
         if st == "error":
+            # Fixed heights, generous enough for the real app's (larger-than-offscreen) fonts to
+            # wrap to 2-3 lines without clipping. Two set values: with vs without the folder picker.
             btn = getattr(self, "_error_pick_btn", None)
-            return 102 if (btn is not None and btn.isVisible()) else 42
+            return 134 if (btn is not None and btn.isVisible()) else 76
         return self._STACK_H.get(st, 34)
 
     def _fit(self) -> None:
