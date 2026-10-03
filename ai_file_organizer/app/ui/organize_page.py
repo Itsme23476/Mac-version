@@ -8179,12 +8179,28 @@ Caption: {file_info.get('caption', 'none')}
             self.voice_apply_error.emit("Couldn't move the files.")
             return
 
+        deleted_empty = 0
         if success:
             for m in self.current_moves:
                 try:
                     file_index.update_file_path(m["file_id"], m["destination_path"])
                 except Exception:
                     pass
+            # Clean up folders left empty by the move — same as the manual Organize flow:
+            # folders the files came out of, plus any other empty folders in the destination.
+            try:
+                source_folders = {Path(m["source_path"]).parent for m in filtered}
+                all_empty = list({*self._collect_empty_folders(source_folders),
+                                  *self._scan_all_empty_folders()})
+                all_empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
+                if all_empty:
+                    deleted_empty = self._delete_folders(all_empty)
+                    parents = {str(Path(p).parent) for p in all_empty
+                               if len(Path(p).parent.parts) > 2} - set(all_empty)
+                    if parents:
+                        deleted_empty += self._delete_folders(list(parents))
+            except Exception as e:
+                logger.warning(f"voice_apply empty-folder cleanup failed: {e}")
 
         try:
             from app.core.supabase_client import track
@@ -8201,7 +8217,11 @@ Caption: {file_info.get('caption', 'none')}
         if success:
             self.current_plan = None
             self.current_moves = []
-            self.voice_apply_done.emit(f"Organized {moved} file{'s' if moved != 1 else ''}. Revert anytime in History.")
+            msg = f"Organized {moved} file{'s' if moved != 1 else ''}."
+            if deleted_empty:
+                msg += f" Removed {deleted_empty} empty folder{'s' if deleted_empty != 1 else ''}."
+            msg += " Revert anytime in History."
+            self.voice_apply_done.emit(msg)
         else:
             self.voice_apply_error.emit(f"Moved {moved}, but {len(errors or [])} couldn't be moved.")
 

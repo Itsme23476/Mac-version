@@ -135,6 +135,11 @@ class VoiceOrganizeController(QObject):
                  "other": ["misc.txt"]},
                 str(Path.home() / "Desktop" / "test"), 13, 7)
             return
+        if text == "__demothink__":
+            logger.info("[voice organize] INJECT demo thinking")
+            self.overlay.present()
+            self.overlay.show_thinking("Analyzing your files…")
+            return
         if text == "__demoerror__":
             # DEV: show the couldn't-resolve error (with the folder picker) without the AI.
             logger.info("[voice organize] INJECT demo error")

@@ -32,7 +32,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import (
-    Qt, QTimer, QPointF, QPropertyAnimation, QEasingCurve, QRectF, Signal,
+    Qt, QTimer, QPointF, QSize, QPropertyAnimation, QEasingCurve, QRectF, Signal,
 )
 from PySide6.QtGui import (
     QGuiApplication, QCursor, QColor, QPainter, QPen, QLinearGradient, QBrush,
@@ -63,6 +63,9 @@ CARD_W = 420
 SHADOW_MARGIN = 22          # room around the card for the drop shadow
 WIDGET_W = CARD_W + SHADOW_MARGIN * 2
 TOP_MARGIN = 0              # flush to the top edge (VoiceOS notch style)
+STRIP_W = 132              # width of the minimized handle that sits under the notch
+TOPBAR_H = 28              # fixed height of the ✦ Organize / ✕ bar (don't query its sizeHint —
+                           # it intermittently reads 0 before realize, which cut panels short)
 
 N_BARS = 11
 _EASE = 0.28
@@ -164,6 +167,33 @@ class _Spinner(QWidget):
         p.end()
 
 
+class _FitStack(QStackedWidget):
+    """A QStackedWidget that sizes to its CURRENT page only. The stock widget reports the
+    tallest page's sizeHint forever (the cause of the giant black box / mis-sizing), regardless
+    of which page is shown. We forward the current page's size instead — and, crucially, use
+    heightForWidth at the real content width for pages with word-wrap labels (error/done/plan),
+    whose plain sizeHint height is computed at the wrong width and comes back far too tall."""
+
+    def _current_hint(self):
+        w = self.currentWidget()
+        if w is None:
+            return super().sizeHint()
+        s = QSize(w.sizeHint())
+        lay = w.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            # heightForWidth is reliable for word-wrap pages; the plain sizeHint height is
+            # computed at the wrong width and comes back far too tall. Use heightForWidth at the
+            # fixed card-inner width (self.width() can be stale right after a page rebuild).
+            s.setHeight(lay.heightForWidth(CARD_W - 36))
+        return s
+
+    def sizeHint(self):
+        return self._current_hint()
+
+    def minimumSizeHint(self):
+        return self._current_hint()
+
+
 # --- overlay -------------------------------------------------------------------
 class OrganizeOverlay(QWidget):
     """Frameless, non-activating floating panel that previews an organize plan."""
@@ -208,11 +238,12 @@ class OrganizeOverlay(QWidget):
         self._card.setObjectName("organizeCard")
         # VoiceOS-style: flush to the top edge (square top corners), rounded only at the bottom,
         # near-black — so it reads as expanding DOWN from the notch, not a floating card.
-        self._card.setStyleSheet(
+        self._card_style = (
             "QFrame#organizeCard { background-color: #0B0B10; border: none; "
             "border-top-left-radius: 0px; border-top-right-radius: 0px; "
             "border-bottom-left-radius: 22px; border-bottom-right-radius: 22px; }"
         )
+        self._card.setStyleSheet(self._card_style)
         shadow = QGraphicsDropShadowEffect(self._card)
         shadow.setBlurRadius(28)          # modest: resized on every hover peek, keep blur cheap
         shadow.setOffset(0, 8)
@@ -228,6 +259,7 @@ class OrganizeOverlay(QWidget):
         # clicking it tucks the panel back up into the notch (see mousePressEvent).
         self._topbar = QWidget()
         self._topbar.setStyleSheet("background: transparent;")
+        self._topbar.setFixedHeight(TOPBAR_H)       # fixed so _fit's math is deterministic
         self._topbar.setCursor(Qt.PointingHandCursor)
         self._topbar.setToolTip("Click to tuck back into the notch")
         top = QHBoxLayout(self._topbar)
@@ -251,8 +283,8 @@ class OrganizeOverlay(QWidget):
         top.addWidget(close, 0, Qt.AlignVCenter)
         col.addWidget(self._topbar)
 
-        # Swappable content.
-        self._stack = QStackedWidget()
+        # Swappable content. _FitStack sizes to the current page only (see its docstring).
+        self._stack = _FitStack()
         self._stack.setStyleSheet("background: transparent;")
         col.addWidget(self._stack)
 
@@ -268,6 +300,25 @@ class OrganizeOverlay(QWidget):
         for pg in (self._page_listening, self._page_thinking, self._page_plan,
                    self._page_applying, self._page_done, self._page_error):
             self._stack.addWidget(pg)
+
+        # Minimized handle: a small grabber shown at the notch when the panel is tucked away.
+        # Clicking anywhere on it pops the panel back down (see minimize()/restore()).
+        self._strip = QWidget()
+        self._strip.setStyleSheet("background: transparent;")
+        _sl = QHBoxLayout(self._strip)
+        _sl.setContentsMargins(0, 3, 0, 5)
+        _sl.addStretch(1)
+        _grab = QFrame()
+        _grab.setFixedSize(46, 5)
+        _grab.setStyleSheet("background: rgba(255,255,255,0.45); border-radius: 2px; border: none;")
+        _sl.addWidget(_grab)
+        _sl.addStretch(1)
+        self._strip.setVisible(False)
+        col.addWidget(self._strip)
+
+        self._minimized = False
+        self._state = "thinking"
+        self._plan_stack_h = 225        # deterministic plan height; recomputed per plan
 
     def _make_listening_page(self) -> QWidget:
         pg = QWidget()
@@ -299,8 +350,8 @@ class OrganizeOverlay(QWidget):
         pg = QWidget()
         pg.setStyleSheet("background: transparent;")
         lay = QHBoxLayout(pg)
-        lay.setContentsMargins(0, 8, 0, 8)
-        lay.setSpacing(12)
+        lay.setContentsMargins(0, 0, 0, 0)   # compact: no "analyzing" box bigger than its text
+        lay.setSpacing(10)
         lay.addStretch(1)
         self._thinking_spinner = _Spinner()
         lay.addWidget(self._thinking_spinner, 0, Qt.AlignVCenter)
@@ -375,29 +426,90 @@ class OrganizeOverlay(QWidget):
         super().resizeEvent(e)
         self._reassert_panel_style()
 
+    def minimize(self) -> None:
+        """Tuck the panel into a small clickable handle at the notch (reopenable by clicking it),
+        without fully closing. Unlike the ✕/Cancel close, the content is kept so a click on the
+        handle pops it straight back down."""
+        if self._minimized:
+            return
+        self._minimized = True
+        self._done_timer.stop()
+        self._stop_anim()
+        self._topbar.setVisible(False)
+        self._stack.setVisible(False)
+        self._strip.setVisible(True)
+        self._card.setStyleSheet("QFrame#organizeCard { background: transparent; border: none; }")
+        eff = self._card.graphicsEffect()
+        if eff is not None:
+            eff.setEnabled(False)          # no shadow on the bare handle
+        self.setFixedWidth(STRIP_W)
+        geo = self._screen_geo()
+        if geo is not None:
+            self.setMinimumHeight(0)
+            self.resize(STRIP_W, 22)
+            self.move(geo.x() + (geo.width() - STRIP_W) // 2, geo.y() + TOP_MARGIN)
+        self._reassert_panel_style()
+
+    def restore(self) -> None:
+        """Pop the panel back down from the notch handle to its full content."""
+        self._minimized = False
+        self._strip.setVisible(False)
+        self._topbar.setVisible(True)
+        self._stack.setVisible(True)
+        self._card.setStyleSheet(self._card_style)
+        eff = self._card.graphicsEffect()
+        if eff is not None:
+            eff.setEnabled(True)
+        self.setFixedWidth(WIDGET_W)
+        self._fit()
+        self._reanchor()
+        self._reassert_panel_style()
+
     def mousePressEvent(self, e) -> None:
-        # Tuck the panel back into the notch on: (a) a click on the top handle (any state), or
-        # (b) a click anywhere on a message state (finding/analyzing/error/done) — those have no
-        # controls to protect, so top OR bottom works. In the plan/listening states the buttons
-        # own their clicks and only the top handle dismisses. Child buttons (e.g. "Choose folder"
-        # on the error) accept their own clicks, so those still work.
+        # Minimized handle at the notch -> a click pops the panel back down.
+        if self._minimized:
+            self.restore()
+            e.accept()
+            return
+        # Message states (finding/analyzing/error/done) have no controls to keep, so a click
+        # anywhere fully closes them (tucks up into the notch and gone).
+        if self._state in ("thinking", "error", "done"):
+            self._on_dismiss()
+            e.accept()
+            return
+        # Plan / listening: a click on the top handle (the ✦ Organize bar, flush under the notch)
+        # MINIMIZES to the notch handle — kept + reopenable. Buttons/content handle their own
+        # clicks and never reach here.
         try:
             handle_bottom = self._topbar.mapTo(self, self._topbar.rect().bottomLeft()).y()
         except Exception:
             handle_bottom = 44
-        message_state = self._state in ("thinking", "error", "done")
-        if message_state or e.position().y() <= handle_bottom + 4:
-            self._on_dismiss()
+        if e.position().y() <= handle_bottom + 4:
+            self.minimize()
             e.accept()
             return
         super().mousePressEvent(e)
 
     # -- public: lifecycle -----------------------------------------------------
     def present(self) -> None:
-        """Slide the panel down from under the notch (fully expanded). Dismiss — the ✕, the top
-        handle, or Esc — slides it back up into the notch, fully hidden. See _configure_macos
-        for the accessory-app non-activating-panel (clickable) fix."""
+        """Slide the panel down from under the notch (fully expanded). The top handle MINIMIZES
+        it to a small handle at the notch (click that to pop it back down); the ✕/Cancel fully
+        close it. See _configure_macos for the accessory-app non-activating-panel (clickable) fix."""
         self._done_timer.stop()
+        # Always open expanded — clear any minimized state from a previous run.
+        if self._minimized:
+            self._minimized = False
+            self._strip.setVisible(False)
+            self._topbar.setVisible(True)
+            self._stack.setVisible(True)
+            self._card.setStyleSheet(self._card_style)
+            eff = self._card.graphicsEffect()
+            if eff is not None:
+                eff.setEnabled(True)
+            self.setFixedWidth(WIDGET_W)
+        # Default the initial size to the thinking page, not whatever page was last current
+        # (the listening page is tall — measuring it here made the panel flash oversized).
+        self._stack.setCurrentWidget(self._page_thinking)
         geo = self._screen_geo()
         self._fit()
         self.setWindowOpacity(1.0)
@@ -563,6 +675,11 @@ class OrganizeOverlay(QWidget):
             hl.addWidget(self._make_folder_group(name, list(files or [])))
         hl.addStretch(1)
         scroll.setWidget(host)
+        # A QScrollArea's sizeHint ignores its content, so give it a concrete height derived from
+        # the folder COUNT (reliable — no measuring a not-yet-realized layout), capped at 300 so
+        # long plans scroll. ~52px per collapsed folder row + the inter-row spacing.
+        n = max(1, len(folders))
+        scroll.setFixedHeight(min(n * 52 + (n - 1) * 8, 300))
         lay.addWidget(scroll)
 
         # Footer: refine-by-voice mic + label, then the primary Organize button.
@@ -617,6 +734,22 @@ class OrganizeOverlay(QWidget):
         btn_row.addWidget(self._organize_btn, 1)
         foot.addLayout(btn_row)
         lay.addLayout(foot)
+
+        # Deterministic plan height for _content_height()/_fit — computed from the folder COUNT,
+        # not by measuring a not-yet-realized layout (which raced and clipped the buttons). The
+        # only variable piece is the header (can wrap): head + row(34) + scroll + footer(84) +
+        # 3 inter-item gaps(36) + the big-plan warning row. Matches the measured 225/345/473.
+        head.setFixedWidth(CARD_W - 36)
+        head_h = max(head.heightForWidth(CARD_W - 36), head.sizeHint().height(), 19)
+        head.setMinimumWidth(0)
+        head.setMaximumWidth(16777215)
+        nfolders = max(1, len(folders))
+        scroll_h = min(nfolders * 52 + (nfolders - 1) * 8, 300)
+        warn_extra = 44 if self._plan_file_count > self._BIG_PLAN else 0
+        # Generous FLOOR estimate (footer budget 124 > the 84 measured offscreen — real fonts
+        # render taller). This never clips in the first frame; _refit_plan then corrects it to the
+        # EXACT realized height on the next tick.
+        self._plan_stack_h = head_h + 34 + scroll_h + 124 + 36 + warn_extra
 
     def _style_organize(self, btn, danger):
         bg = "#C0392B" if danger else ACCENT
@@ -730,33 +863,35 @@ class OrganizeOverlay(QWidget):
         self._fit()
         self._reanchor()
 
+    # Fixed content heights for the states that are the SAME every time (measured once, realized).
+    # Only the plan is dynamic — see _build_plan's self._plan_stack_h.
+    _STACK_H = {"thinking": 104, "applying": 104, "listening": 136, "done": 70, "error": 60}
+
+    def _content_height(self) -> int:
+        """Height of the current page's content, chosen deterministically (no runtime measuring,
+        which raced and clipped). Constant states use fixed values; the plan uses the value
+        computed from its folder count in _build_plan."""
+        st = self._state
+        if st == "plan":
+            return int(getattr(self, "_plan_stack_h", 225))
+        if st == "error":
+            btn = getattr(self, "_error_pick_btn", None)
+            return 102 if (btn is not None and btn.isVisible()) else 42
+        return self._STACK_H.get(st, 34)
+
     def _fit(self) -> None:
-        """Size the window to the CURRENT page only. A QStackedWidget otherwise reports the
-        tallest page's size forever, so once a plan is built every later message (error,
-        "nothing to move") inherited that height — the giant black box. Pin the stack to the
-        current page's real height so short states stay short and only a plan makes it tall."""
-        cur = self._stack.currentWidget()
-        if cur is None:
-            self.adjustSize()
-            return
-        for i in range(self._stack.count()):
-            w = self._stack.widget(i)
-            w.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        cur.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        inner_w = CARD_W - 36          # card width minus the col's left+right margins (18+18)
-        lay = cur.layout()
-        if lay is not None:
-            lay.activate()
-            h = lay.heightForWidth(inner_w) if lay.hasHeightForWidth() else lay.sizeHint().height()
-        else:
-            h = cur.sizeHint().height()
-        self._stack.setFixedHeight(max(1, int(h)))
-        # adjustSize() won't SHRINK a visible top-level frameless window (Qt quirk — verified:
-        # the window's sizeHint updates but its height stays at the previous, taller value), so
-        # resize the height explicitly to hug the content.
+        """Resize the window to the current page. The height is DETERMINISTIC (_content_height):
+        constant states are fixed, the plan grows with its folder count. We don't measure the
+        live layout — that raced (plan read at ~30px → clipped) and the card's drop-shadow effect
+        made its sizeHint report a stale height."""
+        col = self._card.layout()
+        cm = col.contentsMargins()
+        om = self.layout().contentsMargins()
+        topbar_h = 0 if self._minimized else TOPBAR_H
+        target = (om.top() + cm.top() + topbar_h + (col.spacing() if topbar_h else 0)
+                  + self._content_height() + cm.bottom() + om.bottom())
         self.setMinimumHeight(0)
-        self.updateGeometry()
-        self.resize(self.width(), max(1, self.sizeHint().height()))
+        self.resize(self.width(), max(60, int(target)))
         self._reassert_panel_style()   # resizing can drop the non-activating style -> restore it
 
     def _reanchor(self) -> None:
