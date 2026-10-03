@@ -424,10 +424,12 @@ def _register_fn_tap(on_pressed: Callable[[], None],
         kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
         kCGEventFlagsChanged, kCGEventTapDisabledByTimeout,
         kCGEventTapDisabledByUserInput, kCGKeyboardEventKeycode,
+        CGEventSourceFlagsState, kCGEventSourceStateCombinedSessionState,
     )
     FN_KEYCODE = 63                 # the Globe / fn key
     FN_FLAG = 0x800000              # kCGEventFlagMaskSecondaryFn
     SHIFT_FLAG = 0x20000            # kCGEventFlagMaskShift
+    OPTION_FLAG = 0x80000           # kCGEventFlagMaskAlternate (Option / ⌥)
     st = {'down': False, 'tap': None, 'runloop': None, 'thread': None}
 
     def _cb(proxy, etype, event, refcon):
@@ -439,16 +441,28 @@ def _register_fn_tap(on_pressed: Callable[[], None],
             if CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) != FN_KEYCODE:
                 return event                            # another modifier -> never touch it
             flags = CGEventGetFlags(event)
-            fn_now = bool(flags & FN_FLAG)
+            fn_now = bool(flags & FN_FLAG)   # from the event only (keeps release detection exact)
             if fn_now and not st['down']:
                 st['down'] = True
-                # Report whether Shift is held at Fn-down so the caller can pick a mode
-                # (Fn alone vs Fn+Shift). Older callers that take no arg still work.
-                shift_held = bool(flags & SHIFT_FLAG)
+                # For the OTHER modifiers, OR in the live hardware state: the Fn event's own
+                # flags can miss a modifier pressed a hair early/late, which made Fn+Option
+                # (organize) unreliable. The combined session state is authoritative.
+                mod = flags
                 try:
-                    on_pressed(shift_held)
-                except TypeError:
-                    on_pressed()
+                    mod |= CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState)
+                except Exception:
+                    pass
+                shift_held = bool(mod & SHIFT_FLAG)
+                option_held = bool(mod & OPTION_FLAG)
+                logger.info(f"Fn down: shift={shift_held} option={option_held}")
+                # Modifiers held at Fn-down pick the mode: Fn=dictate, Fn+Shift=search,
+                # Fn+Option=organize. Callers taking fewer args still work (richest first).
+                for _args in ((shift_held, option_held), (shift_held,), ()):
+                    try:
+                        on_pressed(*_args)
+                        break
+                    except TypeError:
+                        continue
             elif (not fn_now) and st['down']:
                 st['down'] = False
                 if on_released is not None:

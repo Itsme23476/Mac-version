@@ -49,6 +49,7 @@ hidden_imports = [
     'app.ui.voice_cards.language_card',
     'app.ui.voice_cards.cleanup_card',
     'app.ui.voice_cards.history_card',
+    'app.ui.voice_cards.mute_card',
     'app.ui.main_window',
     'app.ui.auth_dialog',
     'app.ui.theme_manager',
@@ -61,6 +62,8 @@ hidden_imports = [
     'app.ui.contextual_tips',
     'app.ui.dictation',
     'app.ui.dictation_overlay',
+    'app.ui.organize_overlay',
+    'app.ui.voice_organize_controller',
     'app.ui.mac_spaces',
     'app.version',
     

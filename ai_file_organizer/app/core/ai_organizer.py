@@ -55,7 +55,7 @@ STRICT RULES:
 2. folder-name: use EXACTLY what the user specifies, or lowercase kebab-case if organizing by type
 3. Use ONLY file_ids from the provided list - NEVER invent IDs
 4. By default, EVERY file_id must appear in exactly ONE folder — UNLESS the user asks to preserve specific folders (see below)
-5. Maximum 2 folder levels
+5. Create folders as SIBLINGS at the TOP level of the destination — do NOT nest one folder inside another (no subfolders inside subfolders) unless the user EXPLICITLY asks for nesting ("inside", "within", "a subfolder of"). Example: "put the images in a folder called images and everything else in other" = TWO top-level folders "images" and "other", NEVER "other/images". Maximum 2 folder levels. The destination folder is ALREADY selected and is the root for your folders — folder-name values are RELATIVE to it. When the user names the folder they're organizing (e.g. "organize the test folder, put images in images and the rest in other"), that named folder IS the destination: output folder-names "images" and "other", NOT "test/images" — never repeat the destination's own name as a wrapper.
 6. Do NOT rename files - only organize into folders
 7. NEVER return empty folders - every folder must have at least one file
 
@@ -357,6 +357,48 @@ Return the complete updated plan as JSON only."""
         return _request_ollama(user_message)
     else:
         logger.warning("No AI provider configured")
+        return None
+
+
+def resolve_folder_with_ai(instruction: str, candidate_paths: list) -> Optional[str]:
+    """Pick the folder the user wants to organize from a list of REAL folder paths, by
+    understanding the spoken instruction. Returns one of candidate_paths, or None if unclear.
+    Replaces brittle keyword matching: the LLM reads the sentence and matches by meaning,
+    tolerating small mis-hearings, and we only accept a path that's actually in the list."""
+    if not candidate_paths:
+        return None
+    try:
+        from .vision import _call_openai_proxy
+        listing = "\n".join(candidate_paths)
+        system = (
+            "You map a spoken file-organization request to the ONE folder the user wants to "
+            "organize. Choose strictly from the AVAILABLE FOLDERS list (real paths). The user "
+            "describes the folder loosely — e.g. 'the folder on my desktop called tasks', 'my "
+            "downloads'. Match by MEANING, allowing for small speech mis-hearings. Return ONLY "
+            "the exact path, copied verbatim from the list. If no folder clearly matches, return "
+            "exactly: NONE. Output the path or NONE and nothing else."
+        )
+        user = f"Request:\n{instruction}\n\nAVAILABLE FOLDERS:\n{listing}"
+        resp = _call_openai_proxy("chat",
+                                  [{"role": "system", "content": system},
+                                   {"role": "user", "content": user}],
+                                  max_tokens=120, temperature=0)
+        if not resp:
+            return None
+        out = (resp.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+        out = out.strip().strip('"').strip("'").strip("`").strip()
+        if not out or out.upper() == "NONE":
+            return None
+        cands = set(candidate_paths)
+        if out in cands:
+            return out
+        for c in candidate_paths:                      # tolerate a trailing-slash difference
+            if out.rstrip("/") == c.rstrip("/"):
+                return c
+        logger.warning(f"resolve_folder_with_ai: path not in candidates: {out!r}")
+        return None
+    except Exception as e:
+        logger.warning(f"resolve_folder_with_ai failed: {e}")
         return None
 
 
@@ -706,6 +748,23 @@ def validate_plan(
 # CONVERT PLAN TO MOVE OPERATIONS
 # ─────────────────────────────────────────────────────────────
 
+def _normalize_plan_folder(folder_name: str, root_name: str) -> str:
+    """Clean an AI-proposed folder path before it's joined onto the destination.
+
+    Two jobs, both deterministic safety rails on model output:
+    - Drop a leading segment that repeats the destination's OWN name. The model sometimes
+      echoes the target ("test") as a wrapper when the instruction says "inside the test
+      folder", producing destination/test/images instead of destination/images.
+    - Drop empty/"."/".." segments and any leading slash so the AI can never write outside
+      the destination root.
+    """
+    segments = [s.strip() for s in str(folder_name or "").replace("\\", "/").split("/")]
+    segments = [s for s in segments if s and s not in (".", "..")]
+    if segments and root_name and segments[0].casefold() == root_name.casefold():
+        segments = segments[1:]  # strip the redundant wrapper that mirrors the target
+    return "/".join(segments)
+
+
 def plan_to_moves(
     plan: Dict[str, Any],
     files_by_id: Dict[int, Dict[str, Any]],
@@ -713,7 +772,7 @@ def plan_to_moves(
 ) -> List[Dict[str, Any]]:
     """
     Convert validated plan to concrete move operations.
-    
+
     This is deterministic - no AI involved here.
     The app fully controls what actually happens.
     """
@@ -721,9 +780,13 @@ def plan_to_moves(
     skipped_not_found = 0
     skipped_no_info = 0
     skipped_already_in_dest = 0
-    
+
+    root_name = destination_root.name
     for folder_name, file_ids in plan.get("folders", {}).items():
-        dest_folder = destination_root / folder_name
+        clean_name = _normalize_plan_folder(folder_name, root_name)
+        dest_folder = destination_root / clean_name if clean_name else destination_root
+        if clean_name != folder_name:
+            logger.info(f"plan_to_moves: normalized folder {folder_name!r} -> {clean_name!r}")
         
         for fid in file_ids:
             # Normalize fid to int
@@ -773,7 +836,7 @@ def plan_to_moves(
                 "file_name": source_path.name,
                 "source_path": str(source_path),
                 "destination_path": str(dest_path),
-                "destination_folder": folder_name,
+                "destination_folder": clean_name or root_name,
                 "size": file_info.get('file_size', 0),
             })
     

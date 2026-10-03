@@ -45,6 +45,34 @@ def _get_unique_path(dest_path: Path) -> Path:
             raise ValueError(f"Could not find unique name for {dest_path.name} after 1000 attempts")
 
 
+def _clear_file_blocking_dir(dir_path: Path, move_log: Dict[str, Any]) -> int:
+    """
+    mkdir(parents=True) fails if any path that must become a directory already
+    exists as a FILE (e.g. a file literally named "images" blocks the "images/"
+    destination folder). Walk dir_path's ancestor chain and rename any such file
+    out of the way to a safe unique name ("images" -> "images (file)", then
+    "images (file) (1)", ...), so the directory can be created without data loss.
+
+    Returns the number of files renamed.
+    """
+    renamed = 0
+    # Shallowest ancestor first: once a blocker is renamed, deeper paths that
+    # were nested under it no longer exist as files.
+    for ancestor in reversed([dir_path, *dir_path.parents]):
+        if ancestor.is_file():
+            safe = _get_unique_path(ancestor.parent / f"{ancestor.name} (file)")
+            ancestor.rename(safe)
+            renamed += 1
+            move_log["renamed_files"].append({
+                "original_name": ancestor.name,
+                "new_name": safe.name,
+                "folder": str(ancestor.parent),
+                "reason": "file name collided with a destination folder"
+            })
+            logger.info(f"Renamed file blocking destination folder: {ancestor} → {safe.name}")
+    return renamed
+
+
 def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, int]:
     """
     Apply the move plan to actually move files.
@@ -87,7 +115,10 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, 
                         logger.error(error_msg)
                     continue
                 
-                # Create destination directory if needed
+                # Create destination directory if needed. A destination FOLDER
+                # can collide with an existing FILE of the same name; rename the
+                # blocking file out of the way first so mkdir can't fail.
+                renamed_count += _clear_file_blocking_dir(dest_path.parent, move_log)
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 
                 # Handle duplicate files - auto-rename if destination already exists

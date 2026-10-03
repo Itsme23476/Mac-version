@@ -386,7 +386,19 @@ class MainWindow(QMainWindow):
             self.voice_dictation.dictation_saved.connect(self._on_dictation_saved)
         except Exception as e:
             logger.warning(f"Voice dictation setup failed: {e}")
-        
+
+        # Voice organize (Fn+Option). setup_ui() already ran (line ~375) so organize_page
+        # exists, and voice_dictation exists (just above) — so wire the controller into the
+        # dictation hotkey router here. Isolated so a failure never blocks launch.
+        self.voice_organize = None
+        try:
+            from app.ui.voice_organize_controller import VoiceOrganizeController
+            self.voice_organize = VoiceOrganizeController(self)
+            if self.voice_dictation is not None:
+                self.voice_dictation.organize_controller = self.voice_organize
+        except Exception as e:
+            logger.warning(f"Voice organize setup failed: {e}")
+
         # Enable drag and drop
         self.setAcceptDrops(True)
         
@@ -789,6 +801,7 @@ class MainWindow(QMainWindow):
         from app.ui.voice_cards.language_card import VoiceLanguageCard
         from app.ui.voice_cards.cleanup_card import VoiceCleanupCard
         from app.ui.voice_cards.history_card import VoiceHistoryCard
+        from app.ui.voice_cards.mute_card import VoiceMuteCard
 
         c = get_theme_colors()
         scroll_area = QScrollArea()
@@ -817,6 +830,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(VoiceCustomWordsCard())
         layout.addWidget(VoiceLanguageCard())
         layout.addWidget(VoiceCleanupCard())
+        layout.addWidget(VoiceMuteCard())
         self.voice_history_card = VoiceHistoryCard()
         layout.addWidget(self.voice_history_card)
         layout.addStretch()

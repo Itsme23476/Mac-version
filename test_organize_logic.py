@@ -200,6 +200,19 @@ def run_tests():
         unique = _get_unique_path(existing)
         check("_get_unique_path finds non-conflicting name", unique != existing and "report" in unique.stem)
 
+        # --- Test 6: file-vs-folder name collision (dest folder blocked by a file) ---
+        coll = base / "collide"
+        make_file(coll / "images")          # a FILE literally named "images"
+        f_coll = coll / "pic.jpg"
+        make_file(f_coll)
+        plan_coll = [{"source_path": str(f_coll),
+                      "destination_path": str(coll / "images" / "pic.jpg")}]
+        ok_c, errors_c, _, renamed_c = apply_moves(plan_coll)
+        check("Folder-vs-file collision move succeeds (no exception/error)", ok_c and not errors_c)
+        check("Blocking file renamed and still exists", (coll / "images (file)").exists())
+        check("Moved file landed inside the new images/ folder",
+              (coll / "images").is_dir() and (coll / "images" / "pic.jpg").exists())
+
         # ===================================================================
         print("\n=== _collect_empty_folders() ===")
         # ===================================================================
@@ -417,9 +430,25 @@ def run_prompt_tests():
         print("  [SKIP] Windows repo not found for parity check")
 
 
+def run_normalize_tests():
+    """Guard rails on AI folder paths: strip a wrapper repeating the destination's own
+    name (the 'test/test/images' bug), and never let folder paths escape the destination."""
+    print("\n=== _normalize_plan_folder() ===")
+    from ai_file_organizer.app.core.ai_organizer import _normalize_plan_folder as n
+    check("wrapper repeating target is stripped", n("test/images", "test") == "images")
+    check("wrapper strip, spaced name", n("test/everything else", "test") == "everything else")
+    check("already-correct name untouched", n("images", "test") == "images")
+    check("bare wrapper -> destination root", n("test", "test") == "")
+    check("wrapper match is case-insensitive", n("Test/Images", "test") == "Images")
+    check("leading slash can't escape", n("/etc/passwd", "test") == "etc/passwd")
+    check("parent refs can't escape", n("../../secret", "test") == "secret")
+    check("only exact segment matches as wrapper", n("Downloads Backup", "downloads") == "Downloads Backup")
+
+
 if __name__ == "__main__":
     run_tests()
     run_prompt_tests()
+    run_normalize_tests()
 
     passed = sum(results)
     total = len(results)

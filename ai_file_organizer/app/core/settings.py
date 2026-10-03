@@ -42,6 +42,10 @@ class Settings:
         #   polished = light + smooth phrasing. (Replaced the old on/off dictation_ai_cleanup.)
         self.dictation_language: str = ''  # Voice > Language: '' = auto-detect; else a code
         #   (e.g. 'en', 'es') forcing Grok to transcribe in exactly that language.
+        self.organize_voice_target: str = ''  # Voice organize (Fn+Option): default folder to
+        #   organize when none is picked on the Organize page. '' = fall back to ~/Downloads.
+        self.dictation_mute_while_recording: bool = True  # Voice: mute system output while
+        #   recording so a background video/music doesn't bleed into the mic.
         # Theme: 'dark' or 'light'
         self.theme: str = 'dark'
         # Auto-index downloads folder (legacy - kept for compatibility)
@@ -280,6 +284,12 @@ class Settings:
         lg = data.get('dictation_language')
         if isinstance(lg, str):
             self.dictation_language = lg.strip()
+        ovt = data.get('organize_voice_target')
+        if isinstance(ovt, str):
+            self.organize_voice_target = ovt.strip()
+        mw = data.get('dictation_mute_while_recording')
+        if isinstance(mw, bool):
+            self.dictation_mute_while_recording = mw
         k = data.get('openai_api_key')
         if isinstance(k, str) and k.strip():
             self.openai_api_key = k.strip()
@@ -383,6 +393,8 @@ class Settings:
             'dictation_custom_terms': self.dictation_custom_terms,
             'dictation_polish_level': self.dictation_polish_level,
             'dictation_language': self.dictation_language,
+            'organize_voice_target': self.organize_voice_target,
+            'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
             'watch_common_folders': self.watch_common_folders,

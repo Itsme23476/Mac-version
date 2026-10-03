@@ -20,7 +20,7 @@ import math
 
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF
 from PySide6.QtGui import (
-    QGuiApplication, QColor, QPainter, QPainterPath, QLinearGradient, QPen, QBrush
+    QGuiApplication, QColor, QPainter, QPainterPath, QLinearGradient, QPen, QBrush, QFont
 )
 from PySide6.QtWidgets import QWidget
 
@@ -70,6 +70,7 @@ class DictationOverlay(QWidget):
         self.setWindowTitle("Filect Voice")  # lets _configure_macos find the NSWindow by title
 
         self._state = STATE_LISTENING
+        self._latched = False                    # hands-free latch (double-tap) vs push-to-talk
         self._mode = "dictate"                   # "dictate" | "search" — drives accent color
         self._phase = 0.0                       # advances every frame, drives motion
         self._level_target = 0.0                # set by set_level, clamped 0..1
@@ -86,8 +87,16 @@ class DictationOverlay(QWidget):
         self._done_timer.timeout.connect(self.hide)
 
     def set_mode(self, mode: str) -> None:
-        """Recolor the pill by mode: 'search' = teal, 'dictate' = purple."""
-        self._mode = "search" if mode == "search" else "dictate"
+        """Mark the pill's mode so it's visually distinguishable while you hold:
+        'search' = magnifying glass, 'organize' = folder, 'dictate' = plain."""
+        self._mode = mode if mode in ("search", "organize") else "dictate"
+
+    def set_latched(self, latched: bool) -> None:
+        """Toggle the hands-free 'latched' look while listening: a persistent
+        pulsing ring + an ∞ glyph so the user sees it's locked on and needn't
+        hold the key. False returns to the normal push-to-talk listening look."""
+        self._latched = bool(latched)
+        self.update()
 
     def _accent(self) -> QColor:
         return PURPLE          # both modes use brand purple (matches the results popup)
@@ -234,6 +243,8 @@ class DictationOverlay(QWidget):
         p.drawRoundedRect(pill.adjusted(0.5, 0.5, -0.5, -0.5), CORNER, CORNER)
 
         if self._state == STATE_LISTENING:
+            if self._latched:
+                self._paint_latch(p, pill)   # pulsing ring under the bars
             self._paint_bars(p, pill)
         elif self._state == STATE_TRANSCRIBING:
             self._paint_dots(p, pill)
@@ -242,8 +253,11 @@ class DictationOverlay(QWidget):
 
         # Search mode: a small magnifying glass so it's distinguishable from dictation
         # without changing the color (keeps the pill consistent with the results popup).
-        if self._mode == "search" and self._state != STATE_DONE:
-            self._paint_search_icon(p, pill)
+        if self._state != STATE_DONE:
+            if self._mode == "search":
+                self._paint_search_icon(p, pill)
+            elif self._mode == "organize":
+                self._paint_organize_icon(p, pill)
 
         p.end()
 
@@ -260,6 +274,23 @@ class DictationOverlay(QWidget):
         d = r * 0.72                      # handle from the lens's lower-right
         p.drawLine(QPointF(cx + d, cy + d), QPointF(cx + d + 5, cy + d + 5))
 
+    def _paint_organize_icon(self, p: QPainter, pill: QRectF) -> None:
+        """Small folder glyph on the left of the pill, marking organize mode."""
+        cx = pill.left() + 26
+        cy = pill.center().y()
+        pen = QPen(PURPLE_LIGHT, 2.2)
+        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        w, h = 16.0, 11.0
+        x = cx - w / 2.0
+        y = cy - h / 2.0
+        p.drawRoundedRect(QRectF(x, y + 2.0, w, h - 2.0), 1.6, 1.6)   # folder body
+        p.drawLine(QPointF(x + 1.5, y + 2.0), QPointF(x + 4.0, y))    # tab
+        p.drawLine(QPointF(x + 4.0, y), QPointF(x + 7.5, y))
+        p.drawLine(QPointF(x + 7.5, y), QPointF(x + 8.6, y + 2.0))
+
     def _paint_glow(self, p: QPainter, pill: QRectF) -> None:
         """Fake a soft outer glow with a few expanding low-alpha halos."""
         p.setPen(Qt.NoPen)
@@ -271,6 +302,32 @@ class DictationOverlay(QWidget):
             c.setAlpha(alpha)
             p.setBrush(c)
             p.drawRoundedRect(pill.adjusted(-i, -i, i, i), CORNER + i, CORNER + i)
+
+    def _paint_latch(self, p: QPainter, pill: QRectF) -> None:
+        """Hands-free latch indicator: a persistent pulsing purple ring breathing
+        just outside the pill, plus a small ∞ glyph — reads as 'locked on, no
+        need to hold'. Drawn in addition to (not instead of) the mic bars."""
+        pulse = 0.5 + 0.5 * math.sin(self._phase * 0.9)   # slow breathing, 0..1
+
+        # Breathing ring hugging the pill border (stays within GLOW_MARGIN).
+        grow = 3.0 + 4.0 * pulse
+        ring = QColor(self._accent_light())
+        ring.setAlpha(70 + int(120 * pulse))
+        p.setPen(QPen(ring, 2.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(pill.adjusted(-grow, -grow, grow, grow),
+                          CORNER + grow, CORNER + grow)
+
+        # ∞ glyph on the right, marking the locked-on hands-free mode.
+        glyph = QColor(self._accent_light())
+        glyph.setAlpha(180 + int(75 * pulse))
+        font = QFont()
+        font.setPointSizeF(15.0)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QPen(glyph))
+        p.drawText(QRectF(pill.right() - 36, pill.top(), 28, pill.height()),
+                   Qt.AlignCenter, "∞")
 
     def _paint_bars(self, p: QPainter, pill: QRectF) -> None:
         total_w = N_BARS * BAR_W + (N_BARS - 1) * BAR_GAP
@@ -338,12 +395,37 @@ class DictationOverlay(QWidget):
 
 # --- standalone live demo -----------------------------------------------------
 if __name__ == "__main__":
+    import os
     import sys
     from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
     overlay = DictationOverlay()
+
+    # --- headless self-check: every state + the latch look must render without throwing.
+    assert overlay._latched is False                 # default is not latched
     overlay.show_state(STATE_LISTENING)
+    overlay.set_level(0.6)
+    overlay._tick()
+    overlay.grab()                                   # forces a paintEvent (push-to-talk look)
+    overlay.set_latched(True)
+    assert overlay._latched is True
+    overlay._tick()
+    overlay.grab()                                   # latched look: bars + pulsing ring + ∞
+    overlay.set_latched(False)
+    assert overlay._latched is False
+    overlay.grab()                                   # back to the normal listening look
+    for st in (STATE_TRANSCRIBING, STATE_DONE):
+        overlay.show_state(st)
+        overlay._tick()
+        overlay.grab()
+    print("dictation_overlay self-check OK")
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        sys.exit(0)
+
+    overlay.show_state(STATE_LISTENING)
+    QTimer.singleShot(3000, lambda: overlay.set_latched(True))   # demo: latch after 3s
+    QTimer.singleShot(5000, lambda: overlay.set_latched(False))
 
     # Feed a synthetic amplitude so a human can watch the bars react live.
     t = {"v": 0.0}

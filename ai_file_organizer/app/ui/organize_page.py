@@ -4964,7 +4964,16 @@ class OrganizePage(QWidget):
     - AI decides what should happen (proposes plan)
     - App decides what actually happens (validates + executes)
     """
-    
+
+    # Voice-organize (Mode B2): headless hooks that drive the SAME plan/apply/history
+    # machinery as the UI buttons, but WITHOUT any dialogs, so the floating voice panel
+    # can preview a plan, refine it by voice, and apply only on an explicit click.
+    voice_plan_ready = Signal(dict)    # {summary, folders, target_folder, file_count, folder_count}
+    voice_plan_error = Signal(str)
+    voice_apply_done = Signal(str)     # short revert hint
+    voice_apply_error = Signal(str)
+    voice_status = Signal(str)         # transient status for the panel (e.g. "Indexing…")
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_plan = None
@@ -7920,7 +7929,282 @@ Caption: {file_info.get('caption', 'none')}
         self.plan_worker.finished.connect(lambda _: self.refine_button.setEnabled(True))
         self.plan_worker.error.connect(lambda _: self.refine_button.setEnabled(True))
         self.plan_worker.start()
-    
+
+    # ------------------------------------------------------------------ #
+    # Voice-organize (Mode B2) engine — dialog-free, signal-based. These reuse the exact
+    # loaders/workers/validators/apply as the UI flow above; they NEVER move files on
+    # their own (voice_apply only runs when the panel's Organize button calls it).
+    # ------------------------------------------------------------------ #
+    _VOICE_AUTO_INSTRUCTION = (
+        "[AUTO-ORGANIZE] Organize ALL of the provided files into a logical folder structure. "
+        "CRITICAL: EVERY single file must be placed in a folder - do NOT leave any file out. "
+        "Keep it simple - use only a few broad, clear folder names (e.g., screenshots, documents, images). "
+        "Avoid deep nesting (no subfolders inside subfolders). "
+        "Group similar files together based on their type, tags, and content. "
+        "If some files don't fit any clear category, put them in a 'misc' or 'other' folder. "
+        "EVERY file_id provided MUST appear in exactly one folder."
+    )
+
+    def has_plan(self) -> bool:
+        return bool(self.current_moves)
+
+    def _voice_load_files(self):
+        """Indexed files under destination_path, cheaply filtered. We deliberately SKIP
+        _verify_and_fix_paths here: on a big/deep folder (e.g. ~/Downloads) its os.walk
+        scans the ENTIRE tree (seen: 1M+ files) and hangs the UI. plan_to_moves already
+        skips files that moved/vanished, so a cheap per-file existence check is enough."""
+        out = []
+        for f in self._load_files_from_db():
+            try:
+                p = f.get("file_path")
+                if not p or settings.should_exclude(p) or not os.path.exists(p):
+                    continue
+            except Exception:
+                continue
+            out.append(f)
+        return out
+
+    def voice_generate(self, folder, instruction: str, _after_index: bool = False):
+        """Voice entry: build an organization plan for `folder` from a spoken instruction.
+        If the folder isn't indexed yet, index it first (no dialog) and retry — same as the
+        Organize Now flow."""
+        try:
+            self.destination_path = Path(folder)
+        except Exception:
+            self.voice_plan_error.emit("That folder path isn't valid.")
+            return
+        if not self.destination_path.exists():
+            self.voice_plan_error.emit("That folder doesn't exist.")
+            return
+        raw = (instruction or "").strip()
+        self._voice_raw_instruction = raw
+        resolved = raw or self._VOICE_AUTO_INSTRUCTION
+        self.original_instruction = resolved
+        files = self._voice_load_files()
+        if not files:
+            if _after_index:
+                self.voice_plan_error.emit("That folder has nothing I can organize.")
+                return
+            self._voice_autoindex_then_plan()   # index it, then retry
+            return
+        if len(files) > 300:
+            self.voice_plan_error.emit(
+                f"That folder has {len(files)} indexed files — too many for a quick voice "
+                "organize. Pick a smaller subfolder, or use the Organize page.")
+            return
+        self.files_by_id = {f["id"]: f for f in files}
+        for f in files:
+            try:
+                rel = Path(f["file_path"]).parent.relative_to(self.destination_path)
+                f["subfolder"] = str(rel) if str(rel) != "." else "."
+            except (ValueError, TypeError):
+                f["subfolder"] = "."
+        self._voice_worker = PlanWorker(resolved, files)
+        self._voice_worker.finished.connect(self._voice_on_plan)
+        self._voice_worker.error.connect(lambda _e: self.voice_plan_error.emit("Couldn't reach the AI to build a plan."))
+        self._voice_worker.start()
+
+    def _voice_autoindex_then_plan(self):
+        """No indexed files yet — index the target folder in the background (no dialog), then
+        retry the plan. Mirrors _index_folder_before_organize but headless + signal-based."""
+        folder = self.destination_path
+        # Count files RECURSIVELY but cheaply — stop early at the cap so a huge/deep tree can't
+        # blow up here. Counting nested files (not just loose ones) matches the manual Organize
+        # flow: a folder whose files live in subfolders still gets indexed + organized, instead
+        # of us wrongly calling it "empty".
+        AUTO_INDEX_LIMIT = 150
+        count = 0
+        capped = False
+        try:
+            for _root, _dirs, names in os.walk(str(folder)):
+                for n in names:
+                    if n == ".DS_Store":
+                        continue
+                    count += 1
+                    if count > AUTO_INDEX_LIMIT:
+                        capped = True
+                        break
+                if capped:
+                    break
+        except Exception:
+            count = 0
+        if count == 0:
+            self.voice_plan_error.emit("That folder is empty — nothing to organize.")
+            return
+        if capped:
+            self.voice_plan_error.emit(
+                "That folder has a lot of files — too many to index on the fly. "
+                "Say a specific subfolder (e.g. “organize my test folder”), or index "
+                "it from the Index page first.")
+            return
+        self.voice_status.emit("Indexing your files…")
+        self._voice_index_worker = IndexBeforeOrganizeWorker(folder)
+        self._voice_index_worker.finished.connect(self._voice_on_index_done)
+        self._voice_index_worker.error.connect(
+            lambda _e: self.voice_plan_error.emit("Couldn't index that folder."))
+        self._voice_index_worker.start()
+
+    def _voice_on_index_done(self, _stats):
+        self.voice_status.emit("Analyzing your files…")
+        self.voice_generate(str(self.destination_path), self._voice_raw_instruction, _after_index=True)
+
+    def voice_refine(self, feedback: str):
+        """Voice entry: refine the current plan from spoken feedback."""
+        feedback = (feedback or "").strip()
+        if not feedback:
+            return
+        if not self.current_plan or not self.original_instruction:
+            self.voice_plan_error.emit("Say an instruction first to create a plan.")
+            return
+        files = self._voice_load_files()
+        if not files:
+            self.voice_plan_error.emit("Those files are no longer available.")
+            return
+        self.files_by_id = {f["id"]: f for f in files}
+        self._voice_worker = RefineWorker(self.original_instruction, self.current_plan, feedback, files)
+        self._voice_worker.finished.connect(self._voice_on_plan)
+        self._voice_worker.error.connect(lambda _e: self.voice_plan_error.emit("Couldn't refine the plan."))
+        self._voice_worker.start()
+
+    def _voice_on_plan(self, plan):
+        """Plan/refine worker finished — validate (dialog-free) and emit a preview payload."""
+        if not plan:
+            self.voice_plan_error.emit("The AI couldn't make a plan. Try rephrasing.")
+            return
+        try:
+            plan = deduplicate_plan(plan)
+            valid_ids = set(self.files_by_id.keys())
+            if "folders" in plan:
+                cleaned = {}
+                for name, fids in plan["folders"].items():
+                    vlist = []
+                    for fid in fids:
+                        try:
+                            fi = int(fid)
+                        except (ValueError, TypeError):
+                            continue
+                        if fi in valid_ids:
+                            vlist.append(fi)
+                    if vlist:
+                        cleaned[name] = vlist
+                plan["folders"] = cleaned
+            if self.original_instruction and self.original_instruction.startswith("[AUTO-ORGANIZE]"):
+                plan = ensure_all_files_included(plan, valid_ids, list(self.files_by_id.values()))
+            ok, errors = validate_plan(plan, valid_ids)
+            if not ok:
+                logger.warning(f"voice plan invalid: {errors[:3]}")
+                self.voice_plan_error.emit("That plan didn't check out — try rephrasing.")
+                return
+            self.current_plan = plan
+            self.current_moves = plan_to_moves(plan, self.files_by_id, self.destination_path)
+            if not self.current_moves:
+                self.voice_plan_error.emit("Nothing needs moving — those files look sorted already.")
+                return
+            folders = {
+                name: [self.files_by_id.get(fid, {}).get("file_name", str(fid)) for fid in fids]
+                for name, fids in plan.get("folders", {}).items()
+            }
+            file_count = len(self.current_moves)
+            folder_count = len(plan.get("folders", {}))
+            summary = (f"Move {file_count} file{'s' if file_count != 1 else ''} into "
+                       f"{folder_count} folder{'s' if folder_count != 1 else ''}")
+            self.voice_plan_ready.emit({
+                "summary": summary,
+                "folders": folders,
+                "target_folder": str(self.destination_path),
+                "file_count": file_count,
+                "folder_count": folder_count,
+            })
+        except Exception as e:
+            logger.error(f"voice plan transform failed: {e}")
+            self.voice_plan_error.emit("Something went wrong building the plan.")
+
+    def voice_apply(self):
+        """Voice entry: physically apply the current plan (called only on the panel's Organize
+        click). Reuses apply_moves, which writes the move-log that powers History/undo."""
+        if not self.current_moves:
+            self.voice_apply_error.emit("There's no plan to apply.")
+            return
+        watcher_was_running = bool(self.auto_watcher and getattr(self.auto_watcher, "is_running", False))
+        if watcher_was_running:
+            try:
+                self.auto_watcher.stop()
+            except Exception:
+                pass
+
+        def _resume_watcher():
+            if watcher_was_running:
+                try:
+                    self.auto_watcher.start(organize_existing=False)
+                except Exception:
+                    pass
+
+        # Final safety re-verify (catches files moved/excluded since the plan was built).
+        filtered = []
+        for m in self.current_moves:
+            try:
+                if settings.should_exclude(m["source_path"]):
+                    continue
+            except Exception:
+                pass
+            if not Path(m["source_path"]).exists():
+                continue
+            filtered.append(m)
+        if not filtered:
+            _resume_watcher()
+            self.voice_apply_error.emit("Those files were already moved or are excluded.")
+            return
+
+        move_plan = [{
+            "source_path": m["source_path"],
+            "destination_path": m["destination_path"],
+            "file_name": m["file_name"],
+            "size": m["size"],
+            "category": m["destination_folder"],
+        } for m in filtered]
+
+        try:
+            from app.core.supabase_client import track
+            track("organize_started", source="voice", file_count=len(move_plan))
+        except Exception:
+            pass
+
+        # ponytail: apply_moves runs synchronously here, exactly like apply_organization.
+        # Fine for normal dictation-sized batches; move to a QThread if huge folders stutter.
+        try:
+            success, errors, _log_file, renamed_count = apply_moves(move_plan)
+        except Exception as e:
+            logger.error(f"voice_apply apply_moves failed: {e}")
+            _resume_watcher()
+            self.voice_apply_error.emit("Couldn't move the files.")
+            return
+
+        if success:
+            for m in self.current_moves:
+                try:
+                    file_index.update_file_path(m["file_id"], m["destination_path"])
+                except Exception:
+                    pass
+
+        try:
+            from app.core.supabase_client import track
+            track("organize_completed", source="voice", success=bool(success),
+                  files_moved=len(move_plan) - len(errors or []),
+                  files_failed=len(errors or []),
+                  files_renamed=int(renamed_count or 0))
+        except Exception:
+            pass
+
+        _resume_watcher()
+
+        moved = len(move_plan) - len(errors or [])
+        if success:
+            self.current_plan = None
+            self.current_moves = []
+            self.voice_apply_done.emit(f"Organized {moved} file{'s' if moved != 1 else ''}. Revert anytime in History.")
+        else:
+            self.voice_apply_error.emit(f"Moved {moved}, but {len(errors or [])} couldn't be moved.")
+
     def _show_history_dialog(self):
         """Show the organization history dialog."""
         dialog = HistoryDialog(self)

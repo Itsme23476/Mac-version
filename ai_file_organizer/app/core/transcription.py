@@ -15,6 +15,7 @@ import os
 import base64
 import logging
 import tempfile
+import subprocess
 from typing import Optional, Dict, Any
 
 import requests
@@ -209,6 +210,25 @@ def _rms_level(chunk_int16) -> float:
     return min(1.0, rms * 4.0)
 
 
+def _output_muted():
+    """Current macOS system-output muted state (True/False), or None if it can't be read."""
+    try:
+        r = subprocess.run(["osascript", "-e", "output muted of (get volume settings)"],
+                           capture_output=True, text=True, timeout=2)
+        return r.stdout.strip().lower() == "true"
+    except Exception:
+        return None
+
+
+def _set_output_muted(muted: bool):
+    try:
+        subprocess.run(["osascript", "-e",
+                        "set volume output muted " + ("true" if muted else "false")],
+                       capture_output=True, timeout=2)
+    except Exception:
+        pass
+
+
 class VoiceRecorder(QThread):
     """Records mic audio until stop_recording(), then transcribes via Grok."""
     finished = Signal(str)          # transcribed text
@@ -224,19 +244,51 @@ class VoiceRecorder(QThread):
         self.is_recording = False
         self._chunks = []
 
+    def start(self):
+        # Set the flag BEFORE the thread runs. Otherwise a very fast stop_recording()
+        # (rapid back-to-back dictations) could land before run()'s own assignment, which
+        # would then re-set it True — leaving the capture loop running forever and the pill
+        # stuck on "transcribing". See run().
+        self.is_recording = True
+        super().start()
+
     def stop_recording(self):
         self.is_recording = False
+
+    def _mute_output_if_enabled(self):
+        """Mute system output while recording (Voice setting, on by default) so a background
+        video/music doesn't bleed into the mic. Remembers the prior state to restore it."""
+        self._prior_muted = None
+        try:
+            from app.core.settings import settings as _s
+            if not getattr(_s, "dictation_mute_while_recording", True):
+                return
+            self._prior_muted = _output_muted()
+            if self._prior_muted is not None:
+                _set_output_muted(True)
+        except Exception:
+            self._prior_muted = None
+
+    def _restore_output(self):
+        try:
+            if getattr(self, "_prior_muted", None) is not None:
+                _set_output_muted(self._prior_muted)
+        except Exception:
+            pass
+        self._prior_muted = None
 
     def run(self):
         try:
             import sounddevice as sd
             import numpy as np
             from scipy.io import wavfile
+            import time
         except ImportError as e:
             self.error.emit(f"Missing audio library: {e}")
             return
 
-        self.is_recording = True
+        # NOTE: is_recording is set True in start() (before this thread runs) — do NOT set it
+        # here or we reintroduce the start/stop race.
         self._chunks = []
 
         def cb(indata, frames, time_info, status):
@@ -247,17 +299,25 @@ class VoiceRecorder(QThread):
                 except Exception:
                     pass
 
+        self._mute_output_if_enabled()   # mute system audio so a bg video doesn't bleed into the mic
         try:
             logger.info(f"Recording started (device={self.device if self.device is not None else 'default'})")
             with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                                 device=self.device, callback=cb):
+                _t0 = time.monotonic()
                 while self.is_recording:
                     sd.sleep(50)
+                    if time.monotonic() - _t0 > 300:   # 5-min hard cap so it can never hang
+                        logger.warning("recorder: hit max-duration cap; stopping")
+                        break
         except Exception as e:
             logger.error(f"Mic capture failed: {e}")
             self.error.emit("Could not access the microphone.")
             return
+        finally:
+            self._restore_output()       # unmute the instant recording stops (before transcription)
 
+        logger.info(f"recorder: capture loop ended ({len(self._chunks)} chunks)")
         self.recording_stopped.emit()
 
         if not self._chunks:
