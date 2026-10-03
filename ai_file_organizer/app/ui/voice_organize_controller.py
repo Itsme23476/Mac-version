@@ -378,8 +378,31 @@ class VoiceOrganizeController(QObject):
 
     # ------------------------------------------------------------- change folder
     def _on_change_folder(self):
-        chosen = QFileDialog.getExistingDirectory(self.overlay, "Choose folder to organize",
-                                                  self._folder or str(Path.home()))
+        # The native folder picker can't take keyboard/focus while we're a background,
+        # non-activating accessory app (macOS 26) — it plays the funk beep and freezes. Briefly
+        # become a Regular, active app (the same trick main.py uses for the login dialog) so the
+        # Open panel is usable, then restore the menu-bar accessory mode. Parent is None (not the
+        # non-activating overlay) so the panel isn't tied to a window that can't be key.
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        flipped = False
+        try:
+            if app is not None and hasattr(app, "set_normal_focus_mode"):
+                app.set_normal_focus_mode(True)
+                flipped = True
+            try:
+                from AppKit import NSApp
+                NSApp.activate()
+            except Exception:
+                pass
+            chosen = QFileDialog.getExistingDirectory(
+                None, "Choose folder to organize", self._folder or str(Path.home()))
+        finally:
+            if flipped:
+                try:
+                    app.set_normal_focus_mode(False)
+                except Exception:
+                    pass
         if chosen:
             self._folder = chosen
             if self._last_instruction:
