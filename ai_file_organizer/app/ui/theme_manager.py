@@ -48,36 +48,38 @@ _DARK_COLORS = {
 }
 
 _LIGHT_COLORS = {
-    "bg":               "#FAFBFC",
+    # Dark-violet-family LIGHT theme: lilac-grey page, white cards, soft lilac borders.
+    # Accent stays #7C4DFF (handled outside this dict); purple tints live in purple_light_*.
+    "bg":               "#F3F1FB",
     "surface":          "#FFFFFF",
     "card":             "#FFFFFF",
-    "border":           "#E8E8E8",
-    "border_strong":    "#D0D0D0",
-    "text":             "#1A1A1A",
-    "text_secondary":   "#666666",
-    "text_muted":       "#888888",
-    "text_disabled":    "#888888",
-    "input_bg":         "#FFFFFF",
-    "hover":            "#F5F5F5",
-    "pressed":          "#E8E8E8",
-    "tab_unchecked_bg": "#FFFFFF",
-    "tab_unchecked_border": "#E0E0E0",
-    "tab_unchecked_text": "#666666",
-    "tab_unchecked_hover": "#F5F5F5",
-    "danger_bg":        "#FFF0F0",
-    "danger_hover":     "#FFEBEE",
-    "danger_border":    "#FFCCCC",
-    "danger_text":      "#CC6666",
-    "purple_light_bg":  "#E8DFFF",
-    "purple_light_hover":"#EDE7FF",
-    "purple_pressed":   "#E8E0FF",
-    "scrollbar_bg":     "#F0F0F0",
-    "scrollbar_handle": "#AAAAAA",
-    "icon_bg":          "#F3EEFF",
-    "item_bg":          "#FAFAFA",
-    "divider":          "#EEEEEE",
+    "border":           "#E2DEF0",
+    "border_strong":    "#DCD7ED",
+    "text":             "#1B1730",
+    "text_secondary":   "#454156",
+    "text_muted":       "#6F6B83",
+    "text_disabled":    "#A6A2B6",
+    "input_bg":         "#F4F2FC",
+    "hover":            "#F1EEFA",
+    "pressed":          "#EBE8F7",
+    "tab_unchecked_bg": "#F4F2FC",
+    "tab_unchecked_border": "#E2DEF0",
+    "tab_unchecked_text": "#6F6B83",
+    "tab_unchecked_hover": "#EBE8F7",
+    "danger_bg":        "#FDEEF0",
+    "danger_hover":     "#FBE4E7",
+    "danger_border":    "#F3C7CD",
+    "danger_text":      "#D13A48",
+    "purple_light_bg":  "#EDE7FF",
+    "purple_light_hover":"#E4DAFF",
+    "purple_pressed":   "#DED0FF",
+    "scrollbar_bg":     "#ECE9F6",
+    "scrollbar_handle": "#C4BEDA",
+    "icon_bg":          "#F0EAFE",
+    "item_bg":          "#FFFFFF",
+    "divider":          "#ECE9F6",
     "dialog_bg":        "#FFFFFF",
-    "dialog_border":    "#E0E0E0",
+    "dialog_border":    "#E2DEF0",
 }
 
 
@@ -299,15 +301,15 @@ class ThemeManager(QObject):
     def _apply_light_palette(self, app: QApplication):
         """Apply light color palette with purple accent."""
         palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(250, 251, 252))     # #FAFBFC
-        palette.setColor(QPalette.WindowText, QColor(26, 26, 26))    # #1A1A1A
-        palette.setColor(QPalette.Base, QColor(255, 255, 255))       # #FFFFFF
-        palette.setColor(QPalette.AlternateBase, QColor(248, 248, 248))
+        palette.setColor(QPalette.Window, QColor(243, 241, 251))     # #F3F1FB lilac-grey page
+        palette.setColor(QPalette.WindowText, QColor(27, 23, 48))    # #1B1730
+        palette.setColor(QPalette.Base, QColor(255, 255, 255))       # #FFFFFF cards/fields
+        palette.setColor(QPalette.AlternateBase, QColor(239, 237, 248))  # #EFEDF8
         palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
-        palette.setColor(QPalette.ToolTipText, QColor(26, 26, 26))
-        palette.setColor(QPalette.Text, QColor(26, 26, 26))
+        palette.setColor(QPalette.ToolTipText, QColor(27, 23, 48))
+        palette.setColor(QPalette.Text, QColor(27, 23, 48))
         palette.setColor(QPalette.Button, QColor(255, 255, 255))
-        palette.setColor(QPalette.ButtonText, QColor(26, 26, 26))
+        palette.setColor(QPalette.ButtonText, QColor(27, 23, 48))
         palette.setColor(QPalette.BrightText, Qt.red)
         palette.setColor(QPalette.Link, QColor(124, 77, 255))        # #7C4DFF Purple accent
         palette.setColor(QPalette.Highlight, QColor(124, 77, 255))   # #7C4DFF
