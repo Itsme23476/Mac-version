@@ -5158,9 +5158,9 @@ class OrganizePage(QWidget):
         instruction_layout.setSpacing(12)
         
         # Section title
-        inst_title = QLabel("✨ Your Instruction")
-        inst_title.setStyleSheet("font-size: 16px; font-weight: 600; color: #7C4DFF; background: transparent;")
-        instruction_layout.addWidget(inst_title)
+        from app.ui.icons import icon_heading
+        _inst_hdr, inst_title = icon_heading("sparkle", "Your Instruction", "font-size: 16px; font-weight: 600; color: #7C4DFF; background: transparent;")
+        instruction_layout.addWidget(_inst_hdr)
         
         # Input row with text field and mic button
         input_row = QHBoxLayout()
@@ -5247,8 +5247,10 @@ class OrganizePage(QWidget):
         dest_layout.setContentsMargins(20, 16, 20, 16)
         dest_layout.setSpacing(16)
         
-        dest_icon = QLabel("📂")
-        dest_icon.setStyleSheet("font-size: 24px; background: transparent;")
+        from app.ui.icons import line_pixmap
+        dest_icon = QLabel()
+        dest_icon.setPixmap(line_pixmap("folder", 22, "#7C4DFF"))
+        dest_icon.setStyleSheet("background: transparent; border: none;")
         dest_layout.addWidget(dest_icon)
         
         dest_info = QVBoxLayout()
@@ -5494,15 +5496,14 @@ class OrganizePage(QWidget):
         plan_layout.setSpacing(12)
         
         # Simple title matching input card style
-        plan_title = QLabel("📁 Proposed Organization")
-        plan_title.setStyleSheet("""
+        _plan_hdr, plan_title = icon_heading("folder", "Proposed Organization", """
             font-family: "Segoe UI", sans-serif;
             font-weight: 600;
             font-size: 16px;
             color: #7C4DFF;
             background: transparent;
         """)
-        plan_layout.addWidget(plan_title)
+        plan_layout.addWidget(_plan_hdr)
         
         self.plan_tree = QTreeWidget()
         self.plan_tree.setHeaderHidden(True)
@@ -5661,8 +5662,10 @@ class OrganizePage(QWidget):
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
         
-        watch_icon = QLabel("🔄")
-        watch_icon.setStyleSheet("font-size: 28px; background: transparent;")
+        from app.ui.icons import line_pixmap
+        watch_icon = QLabel()
+        watch_icon.setPixmap(line_pixmap("refresh", 24, "#7C4DFF"))
+        watch_icon.setStyleSheet("background: transparent; border: none;")
         header_row.addWidget(watch_icon)
         
         header_info = QVBoxLayout()

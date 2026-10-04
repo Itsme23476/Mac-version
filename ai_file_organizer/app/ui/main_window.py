@@ -2306,9 +2306,9 @@ class MainWindow(QMainWindow):
         appearance_layout.setContentsMargins(20, 20, 20, 20)
         appearance_layout.setSpacing(12)
         
-        appearance_title = QLabel("🎨 Appearance")
-        appearance_title.setStyleSheet(settings_title_style)
-        appearance_layout.addWidget(appearance_title)
+        from app.ui.icons import icon_heading
+        _ap_hdr, appearance_title = icon_heading("appearance", "Appearance", settings_title_style)
+        appearance_layout.addWidget(_ap_hdr)
         
         theme_row = QHBoxLayout()
         theme_label = QLabel("Theme:")
@@ -2363,9 +2363,8 @@ class MainWindow(QMainWindow):
         help_layout.setContentsMargins(20, 20, 20, 20)
         help_layout.setSpacing(12)
         
-        help_title = QLabel("🎓 Help & Guidance")
-        help_title.setStyleSheet(settings_title_style)
-        help_layout.addWidget(help_title)
+        _help_hdr, help_title = icon_heading("book", "Help & Guidance", settings_title_style)
+        help_layout.addWidget(_help_hdr)
         
         help_desc = QLabel("New to the app? Take a quick tour to learn the basics.")
         help_desc.setStyleSheet(settings_hint_style)
@@ -2412,9 +2411,8 @@ class MainWindow(QMainWindow):
         support_layout.setContentsMargins(20, 20, 20, 20)
         support_layout.setSpacing(12)
 
-        support_title = QLabel("💬 Support")
-        support_title.setStyleSheet(settings_title_style)
-        support_layout.addWidget(support_title)
+        _sup_hdr, support_title = icon_heading("chat", "Support", settings_title_style)
+        support_layout.addWidget(_sup_hdr)
 
         support_desc = QLabel("Experiencing an issue? Email us directly:")
         support_desc.setStyleSheet(settings_hint_style)
@@ -2481,9 +2479,8 @@ class MainWindow(QMainWindow):
         qs_layout.setContentsMargins(20, 20, 20, 20)
         qs_layout.setSpacing(12)
         
-        qs_title = QLabel("🔍 Quick Search")
-        qs_title.setStyleSheet(settings_title_style)
-        qs_layout.addWidget(qs_title)
+        _qs_hdr, qs_title = icon_heading("search", "Quick Search", settings_title_style)
+        qs_layout.addWidget(_qs_hdr)
         
         toggle_btn_style = """
             QPushButton {
@@ -2606,9 +2603,8 @@ class MainWindow(QMainWindow):
         search_layout.setContentsMargins(20, 20, 20, 20)
         search_layout.setSpacing(12)
         
-        search_title = QLabel("✨ Search Enhancements")
-        search_title.setStyleSheet(settings_title_style)
-        search_layout.addWidget(search_title)
+        _se_hdr, search_title = icon_heading("sparkle", "Search Enhancements", settings_title_style)
+        search_layout.addWidget(_se_hdr)
         
         # Smart Rerank toggle
         gpt_row = QHBoxLayout()
@@ -2664,9 +2660,8 @@ class MainWindow(QMainWindow):
         account_layout.setContentsMargins(20, 20, 20, 20)
         account_layout.setSpacing(12)
         
-        account_title = QLabel("👤 Account")
-        account_title.setStyleSheet(settings_title_style)
-        account_layout.addWidget(account_title)
+        _acc_hdr, account_title = icon_heading("user", "Account", settings_title_style)
+        account_layout.addWidget(_acc_hdr)
         
         # Email display
         email_row = QHBoxLayout()

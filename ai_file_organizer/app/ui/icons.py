@@ -157,6 +157,30 @@ def line_pixmap(name: str, size: int = 16, color: str = ACCENT) -> QPixmap:
     return pm
 
 
+def icon_heading(icon_name: str, text: str, label_style: str = "",
+                 color: str = ACCENT, size: int = 16, spacing: int = 9):
+    """Return (row_widget, text_label) — a [line-icon][text] heading row.
+    `label_style` is applied to the text QLabel (keep the site's existing style).
+    The row widget is transparent; add it where the old QLabel was added."""
+    from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel
+    from PySide6.QtCore import Qt
+    row = QWidget()
+    row.setStyleSheet("background: transparent; border: none;")
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(spacing)
+    ic = QLabel()
+    ic.setPixmap(line_pixmap(icon_name, size, color))
+    ic.setStyleSheet("background: transparent; border: none;")
+    lay.addWidget(ic, 0, Qt.AlignVCenter)
+    lbl = QLabel(text)
+    if label_style:
+        lbl.setStyleSheet(label_style)
+    lay.addWidget(lbl, 0, Qt.AlignVCenter)
+    lay.addStretch(1)
+    return row, lbl
+
+
 def line_icon(name: str, size: int = 18, on_color: str = ACCENT,
               off_color: str = None) -> QIcon:
     """QIcon for a (possibly checkable) button. off_color is used for the
