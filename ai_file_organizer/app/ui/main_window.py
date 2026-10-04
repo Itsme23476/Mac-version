@@ -695,19 +695,24 @@ class MainWindow(QMainWindow):
         self.nav_button_group = QButtonGroup(self)
         self.nav_button_group.setExclusive(True)
         
+        # Line-icons (drawn, theme-agnostic) replace the old emoji glyphs.
+        from app.ui.icons import line_icon
+        from PySide6.QtCore import QSize as _QSize
         nav_items = [
-            ("🔍", "Search", 0),
-            ("🗂️", "Organize", 1),
-            ("📁", "Analyze Files", 2),
-            ("🎙️", "Voice", 4),
-            ("⚙️", "Settings", 3),
+            ("search", "Search", 0),
+            ("folder", "Organize", 1),
+            ("layers", "Analyze Files", 2),
+            ("mic", "Voice", 4),
+            ("gear", "Settings", 3),
         ]
-        
-        for icon, text, idx in nav_items:
-            btn = QPushButton(f"  {icon}  {text}")
+
+        for icon_name, text, idx in nav_items:
+            btn = QPushButton(f"  {text}")
             btn.setObjectName("navButton")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
+            btn.setIcon(line_icon(icon_name, 18, on_color="#7C4DFF", off_color="#8C8AA0"))
+            btn.setIconSize(_QSize(18, 18))
             btn.clicked.connect(lambda checked, i=idx: self._on_nav_clicked(i))
             nav_layout.addWidget(btn)
             self.nav_buttons.append(btn)
