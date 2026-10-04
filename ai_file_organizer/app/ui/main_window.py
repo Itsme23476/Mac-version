@@ -1385,10 +1385,12 @@ class MainWindow(QMainWindow):
         drop_layout.setSpacing(16)
         
         # Large icon
-        self.drop_icon = QLabel("📁")
+        self.drop_icon = QLabel()
         self.drop_icon.setObjectName("dropIconLarge")
         self.drop_icon.setAlignment(Qt.AlignCenter)
-        self.drop_icon.setStyleSheet("font-size: 64px; background: transparent;")
+        from app.ui.icons import line_pixmap as _line_pixmap
+        self.drop_icon.setPixmap(_line_pixmap("folder", 46, "#7C4DFF"))
+        self.drop_icon.setStyleSheet("background: transparent; border: none;")
         drop_layout.addWidget(self.drop_icon, 0, Qt.AlignCenter)
         
         # Main text
@@ -2770,7 +2772,11 @@ class MainWindow(QMainWindow):
         exclusions_container_layout.setSpacing(0)
         
         # Collapsible header button
-        self.exclusions_toggle_btn = QPushButton("▶ 🛡️ Exclusions (Advanced)")
+        self.exclusions_toggle_btn = QPushButton("▶  Exclusions (Advanced)")
+        from app.ui.icons import line_icon as _excl_line_icon
+        from PySide6.QtCore import QSize as _ExclQSize
+        self.exclusions_toggle_btn.setIcon(_excl_line_icon("shield", 16, on_color="#7C4DFF", off_color="#7C4DFF"))
+        self.exclusions_toggle_btn.setIconSize(_ExclQSize(16, 16))
         self.exclusions_toggle_btn.setCheckable(True)
         self.exclusions_toggle_btn.setChecked(False)
         self.exclusions_toggle_btn.setMinimumHeight(50)
@@ -3340,9 +3346,9 @@ class MainWindow(QMainWindow):
         is_expanded = self.exclusions_toggle_btn.isChecked()
         self.exclusions_content.setVisible(is_expanded)
         if is_expanded:
-            self.exclusions_toggle_btn.setText("▼ 🛡️ Exclusions (Advanced)")
+            self.exclusions_toggle_btn.setText("▼  Exclusions (Advanced)")
         else:
-            self.exclusions_toggle_btn.setText("▶ 🛡️ Exclusions (Advanced)")
+            self.exclusions_toggle_btn.setText("▶  Exclusions (Advanced)")
     
     def _sign_out(self):
         """Confirm, then sign out — via an INLINE two-click confirm on the button
