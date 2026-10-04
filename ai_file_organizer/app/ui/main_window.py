@@ -953,6 +953,49 @@ class MainWindow(QMainWindow):
         # Add organize tab
         self.tab_widget.addTab(organize_widget, "Organize Files")
     
+    def _build_voice_hint_row(self):
+        """Landing-only strip showing the voice hotkeys (waveform + Fn chips).
+        Visual + discoverability; theme-agnostic translucent styling."""
+        from app.ui.icons import line_pixmap
+        frame = QWidget()
+        frame.setObjectName("voiceHintRow")
+        frame.setStyleSheet(
+            "#voiceHintRow { background: rgba(124,77,255,0.06);"
+            " border: 1px solid rgba(124,77,255,0.22); border-radius: 13px; }"
+            "#voiceHintRow QLabel { background: transparent; border: none; }"
+        )
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(18, 12, 18, 12)
+        lay.setSpacing(16)
+
+        wave = QLabel()
+        wave.setPixmap(line_pixmap("waveform", 22, "#7C4DFF"))
+        lay.addWidget(wave, 0, Qt.AlignVCenter)
+
+        kbd_style = ("QLabel { background: rgba(124,77,255,0.10);"
+                     " border: 1px solid rgba(124,77,255,0.28); border-radius: 6px;"
+                     " color: #7C4DFF; font-size: 11px; font-weight: 600; padding: 2px 7px; }")
+
+        def chip(keys, text):
+            w = QWidget()
+            w.setStyleSheet("background: transparent;")
+            cl = QHBoxLayout(w)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(6)
+            for k in keys:
+                kb = QLabel(k)
+                kb.setStyleSheet(kbd_style)
+                cl.addWidget(kb, 0, Qt.AlignVCenter)
+            t = QLabel(text)
+            t.setStyleSheet("color: #8C8AA0; font-size: 12px; background: transparent;")
+            cl.addWidget(t, 0, Qt.AlignVCenter)
+            return w
+
+        lay.addWidget(chip(["Fn"], "dictate"), 0, Qt.AlignVCenter)
+        lay.addWidget(chip(["Fn", "⇧"], "voice search"), 0, Qt.AlignVCenter)
+        lay.addWidget(chip(["Fn", "⌥"], "voice organize"), 0, Qt.AlignVCenter)
+        return frame
+
     def setup_search_page(self):
         """Setup the clean Search page with hero heading and modern search bar."""
         search_page = QWidget()
@@ -974,8 +1017,9 @@ class MainWindow(QMainWindow):
         hero_layout.setSpacing(12)
         
         # Hero heading
-        self.hero_heading = QLabel("What are you looking for?")
+        self.hero_heading = QLabel("What are you <span style='color:#7C4DFF;'>looking</span> for?")
         self.hero_heading.setObjectName("heroHeading")
+        self.hero_heading.setTextFormat(Qt.RichText)
         self.hero_heading.setAlignment(Qt.AlignCenter)
         hero_layout.addWidget(self.hero_heading)
         
@@ -1017,9 +1061,13 @@ class MainWindow(QMainWindow):
         self.ai_label.setObjectName("aiIndicatorLarge")
         search_bar_layout.addWidget(self.ai_label)
         
-        # Round search button - larger
-        self.search_button = QPushButton("→")
+        # Search button - rounded square with a crisp line-icon arrow
+        self.search_button = QPushButton()
         self.search_button.setObjectName("searchSubmitBtnLarge")
+        from app.ui.icons import line_icon as _arrow_icon
+        from PySide6.QtCore import QSize as _ArrowQSize
+        self.search_button.setIcon(_arrow_icon("arrow", 22, on_color="#FFFFFF", off_color="#FFFFFF"))
+        self.search_button.setIconSize(_ArrowQSize(22, 22))
         self.search_button.setFixedSize(50, 50)
         self.search_button.setCursor(Qt.PointingHandCursor)
         search_bar_layout.addWidget(self.search_button)
@@ -1030,9 +1078,18 @@ class MainWindow(QMainWindow):
         search_row.addWidget(self.search_container)
         search_row.addStretch()
         page_layout.addLayout(search_row)
-        
+
+        # Voice-hotkey hint row (landing only) — waveform + Fn / Fn+Shift / Fn+Opt
+        self.voice_hint_row = self._build_voice_hint_row()
+        vhint_row = QHBoxLayout()
+        vhint_row.addStretch()
+        vhint_row.addWidget(self.voice_hint_row)
+        vhint_row.addStretch()
+        page_layout.addSpacing(14)
+        page_layout.addLayout(vhint_row)
+
         page_layout.addSpacing(40)
-        
+
         # Bottom spacer for landing mode (hidden after search)
         self.hero_bottom_spacer = QWidget()
         self.hero_bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -7576,7 +7633,11 @@ Move Plan Summary:
             bottom_anim.setEasingCurve(QEasingCurve.OutCubic)
             bottom_anim.finished.connect(lambda: self.hero_bottom_spacer.setVisible(False))
             self._transition_group.addAnimation(bottom_anim)
-        
+
+        # Hide the voice-hotkey hint strip in results mode
+        if hasattr(self, 'voice_hint_row'):
+            self.voice_hint_row.setVisible(False)
+
         # Animate search bar shrink
         if hasattr(self, 'search_container'):
             search_anim = QPropertyAnimation(self.search_container, b"maximumHeight")
@@ -7616,7 +7677,9 @@ Move Plan Summary:
         if hasattr(self, 'hero_bottom_spacer'):
             self.hero_bottom_spacer.setVisible(True)
             self.hero_bottom_spacer.setMaximumHeight(0)
-        
+        if hasattr(self, 'voice_hint_row'):
+            self.voice_hint_row.setVisible(True)
+
         # Hide the compact top spacer
         if hasattr(self, 'search_top_spacer'):
             self.search_top_spacer.setVisible(False)

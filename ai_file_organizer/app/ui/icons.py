@@ -117,12 +117,25 @@ def _type(p):
     p.drawLine(QLineF(12, 6.5, 12, 18))
     p.drawLine(QLineF(9.5, 18, 14.5, 18))
 
+def _arrow(p):
+    p.drawLine(QLineF(4.5, 12, 18.5, 12))
+    head = QPainterPath()
+    head.moveTo(12.5, 6); head.lineTo(18.8, 12); head.lineTo(12.5, 18)
+    p.drawPath(head)
+
+def _waveform(p):
+    # five rounded vertical bars of varying height (voice motif)
+    for x, h in ((5, 9), (8.5, 15), (12, 20), (15.5, 13), (19, 7)):
+        top = 12 - h / 2.0
+        p.drawLine(QLineF(x, top, x, top + h))
+
 
 _DRAW = {
     "search": _search, "folder": _folder, "layers": _layers, "mic": _mic,
     "gear": _gear, "appearance": _appearance, "book": _book, "chat": _chat,
     "sparkle": _sparkle, "user": _user, "shield": _shield, "globe": _globe,
     "mute": _mute, "clock": _clock, "refresh": _refresh, "type": _type,
+    "arrow": _arrow, "waveform": _waveform,
 }
 
 _cache = {}

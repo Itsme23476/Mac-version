@@ -78,9 +78,15 @@ QMainWindow, QDialog {
 }
 
 #logoIcon {
-    font-size: 24px;
-    color: #7C4DFF;
-    background: transparent;
+    font-size: 15px;
+    color: #FFFFFF;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #9575FF, stop:1 #6A3DE8);
+    border-radius: 9px;
+    min-width: 30px;
+    max-width: 30px;
+    min-height: 30px;
+    max-height: 30px;
+    qproperty-alignment: 'AlignCenter';
 }
 
 #logoText {
@@ -223,7 +229,7 @@ QMainWindow, QDialog {
 
 #searchSubmitBtnLarge {
     background: #7C4DFF;
-    border-radius: 25px;
+    border-radius: 16px;
     border: none;
     color: white;
     font-size: 22px;
