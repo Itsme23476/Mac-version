@@ -96,14 +96,6 @@ class VoiceCustomWordsCard(QFrame):
         self._c = c
 
         self.setObjectName("customWordsCard")
-        self.setStyleSheet(f"""
-            QFrame#customWordsCard {{
-                background-color: {c['card']};
-                border: 1px solid {c['border']};
-                border-radius: 16px;
-            }}
-            QFrame#customWordsCard > QLabel {{ border: none; background: transparent; }}
-        """)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
@@ -123,16 +115,12 @@ class VoiceCustomWordsCard(QFrame):
         _trow.addStretch(1)
         root.addLayout(_trow)
 
-        hint = QLabel(
+        self._hint = QLabel(
             "Add names, jargon, or brand terms you say often so they're spelled "
             "right — e.g. Filect, PySide6, a client's name."
         )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(
-            f"color: {c['text_secondary']}; font-size: 11px; "
-            "background: transparent; border: none;"
-        )
-        root.addWidget(hint)
+        self._hint.setWordWrap(True)
+        root.addWidget(self._hint)
 
         # Input row: field + Add button (Enter in the field also adds).
         row = QHBoxLayout()
@@ -140,17 +128,6 @@ class VoiceCustomWordsCard(QFrame):
         self.input = QLineEdit()
         self.input.setPlaceholderText("Add a word or phrase…")
         self.input.setMinimumHeight(34)
-        self.input.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {c['input_bg']};
-                border: 1px solid {c['border']};
-                border-radius: 10px;
-                padding: 0 12px;
-                color: {c['text']};
-                font-size: 13px;
-            }}
-            QLineEdit:focus {{ border-color: {ACCENT}; }}
-        """)
         self.input.returnPressed.connect(self._on_add_clicked)
         row.addWidget(self.input, 1)
 
@@ -181,13 +158,49 @@ class VoiceCustomWordsCard(QFrame):
         root.addWidget(self._chips_host)
 
         self._empty_label = QLabel("No custom words yet.")
+        root.addWidget(self._empty_label)
+
+        self._apply_theme_styles()
+        self._refresh_chips()
+
+    # --- theme ----------------------------------------------------------------
+
+    def apply_theme(self, theme=None):
+        """Re-read theme colours and re-apply every themed stylesheet (chips included)."""
+        self._c = get_theme_colors(theme)
+        self._apply_theme_styles()
+        self._refresh_chips()
+
+    def _apply_theme_styles(self):
+        """(Re)apply all theme-colour-dependent inline styles from ``self._c``."""
+        c = self._c
+        self.setStyleSheet(f"""
+            QFrame#customWordsCard {{
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
+                border-radius: 16px;
+            }}
+            QFrame#customWordsCard > QLabel {{ border: none; background: transparent; }}
+        """)
+        self._hint.setStyleSheet(
+            f"color: {c['text_secondary']}; font-size: 11px; "
+            "background: transparent; border: none;"
+        )
+        self.input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {c['input_bg']};
+                border: 1px solid {c['border']};
+                border-radius: 10px;
+                padding: 0 12px;
+                color: {c['text']};
+                font-size: 13px;
+            }}
+            QLineEdit:focus {{ border-color: {ACCENT}; }}
+        """)
         self._empty_label.setStyleSheet(
             f"color: {c['text_muted']}; font-size: 12px; "
             "background: transparent; border: none;"
         )
-        root.addWidget(self._empty_label)
-
-        self._refresh_chips()
 
     # --- logic (tests call these directly) ------------------------------------
 

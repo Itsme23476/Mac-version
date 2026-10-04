@@ -32,18 +32,9 @@ class VoiceLanguageCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._c = get_theme_colors()
-        c = self._c
         self._label_for = {code: label for label, code in LANGUAGES}
 
         self.setObjectName("settingsCard")
-        self.setStyleSheet(f"""
-            QFrame#settingsCard {{
-                background-color: {c['surface']};
-                border: 1px solid {c['border']};
-                border-radius: 16px;
-            }}
-            QFrame#settingsCard > QLabel {{ border: none; background: transparent; }}
-        """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -60,17 +51,60 @@ class VoiceLanguageCard(QFrame):
         _trow.addStretch(1)
         layout.addLayout(_trow)
 
-        hint = QLabel("Auto-detect works for most speech. Pick a specific language to force "
-                      "transcription into only that one — helps for non-English or mixed speech.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {c['text_secondary']}; font-size: 13px; "
-                           "background: transparent; border: none;")
-        layout.addWidget(hint)
+        self._hint = QLabel("Auto-detect works for most speech. Pick a specific language to force "
+                            "transcription into only that one — helps for non-English or mixed speech.")
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
 
         # Click-to-expand header showing the current selection.
         self._header = QPushButton()
         self._header.setCursor(Qt.PointingHandCursor)
         self._header.setMinimumHeight(38)
+        self._header.clicked.connect(self._toggle)
+        layout.addWidget(self._header)
+
+        # Inline options grid, hidden until the header is clicked.
+        self._options = QWidget()
+        grid = QGridLayout(self._options)
+        grid.setSpacing(8)
+        grid.setContentsMargins(0, 6, 0, 0)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        current = getattr(settings, 'dictation_language', '') or ''
+        for i, (label, code) in enumerate(LANGUAGES):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMinimumHeight(32)
+            btn.setChecked(code == current)
+            btn.clicked.connect(lambda _checked, cd=code: self._select(cd))
+            self._group.addButton(btn)
+            grid.addWidget(btn, i // _COLS, i % _COLS)
+        self._options.setVisible(False)
+        layout.addWidget(self._options)
+
+        self._expanded = False
+        self._apply_theme_styles()
+        self._sync_header(current)
+
+    def apply_theme(self, theme=None):
+        """Re-read theme colours and re-apply the card frame, header and language pills."""
+        self._c = get_theme_colors(theme)
+        self._apply_theme_styles()
+
+    def _apply_theme_styles(self):
+        """(Re)apply all theme-colour-dependent inline styles from ``self._c``."""
+        c = self._c
+        self.setStyleSheet(f"""
+            QFrame#settingsCard {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 16px;
+            }}
+            QFrame#settingsCard > QLabel {{ border: none; background: transparent; }}
+        """)
+        self._hint.setStyleSheet(f"color: {c['text_secondary']}; font-size: 13px; "
+                                 "background: transparent; border: none;")
         self._header.setStyleSheet(f"""
             QPushButton {{
                 background-color: {c['input_bg']};
@@ -83,16 +117,6 @@ class VoiceLanguageCard(QFrame):
             }}
             QPushButton:hover {{ border-color: {ACCENT}; }}
         """)
-        self._header.clicked.connect(self._toggle)
-        layout.addWidget(self._header)
-
-        # Inline options grid, hidden until the header is clicked.
-        self._options = QWidget()
-        grid = QGridLayout(self._options)
-        grid.setSpacing(8)
-        grid.setContentsMargins(0, 6, 0, 0)
-        self._group = QButtonGroup(self)
-        self._group.setExclusive(True)
         pill_style = f"""
             QPushButton {{
                 background-color: {c['input_bg']};
@@ -105,22 +129,8 @@ class VoiceLanguageCard(QFrame):
             QPushButton:hover {{ border-color: {ACCENT}; }}
             QPushButton:checked {{ background-color: {ACCENT}; color: white; border-color: {ACCENT}; }}
         """
-        current = getattr(settings, 'dictation_language', '') or ''
-        for i, (label, code) in enumerate(LANGUAGES):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumHeight(32)
+        for btn in self._group.buttons():
             btn.setStyleSheet(pill_style)
-            btn.setChecked(code == current)
-            btn.clicked.connect(lambda _checked, cd=code: self._select(cd))
-            self._group.addButton(btn)
-            grid.addWidget(btn, i // _COLS, i % _COLS)
-        self._options.setVisible(False)
-        layout.addWidget(self._options)
-
-        self._expanded = False
-        self._sync_header(current)
 
     def _toggle(self):
         self._expanded = not self._expanded

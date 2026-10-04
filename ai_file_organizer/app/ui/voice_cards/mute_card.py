@@ -18,16 +18,8 @@ class VoiceMuteCard(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        c = get_theme_colors()
+        self._c = get_theme_colors()
         self.setObjectName("settingsCard")
-        self.setStyleSheet(f"""
-            QFrame#settingsCard {{
-                background-color: {c.get('surface', '#111119')};
-                border: 1px solid {c.get('border', '#1C1C28')};
-                border-radius: 16px;
-            }}
-            QFrame#settingsCard > QLabel {{ border: none; background: transparent; }}
-        """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
@@ -54,13 +46,32 @@ class VoiceMuteCard(QFrame):
         row.addWidget(self._toggle, 0, Qt.AlignVCenter)
         layout.addLayout(row)
 
-        hint = QLabel("Mutes your Mac's sound while you hold the dictation key, so a video or "
-                      "music playing in the background doesn't bleed into the mic — and restores "
-                      "it the moment you let go.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {c.get('text_secondary', '#B0B0C0')}; font-size: 13px; "
-                           "background: transparent; border: none;")
-        layout.addWidget(hint)
+        self._hint = QLabel("Mutes your Mac's sound while you hold the dictation key, so a video or "
+                            "music playing in the background doesn't bleed into the mic — and restores "
+                            "it the moment you let go.")
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
+
+        self._apply_theme_styles()
+
+    def apply_theme(self, theme=None):
+        """Re-read theme colours and re-apply the card frame and hint text."""
+        self._c = get_theme_colors(theme)
+        self._apply_theme_styles()
+
+    def _apply_theme_styles(self):
+        """(Re)apply all theme-colour-dependent inline styles from ``self._c``."""
+        c = self._c
+        self.setStyleSheet(f"""
+            QFrame#settingsCard {{
+                background-color: {c.get('surface', '#111119')};
+                border: 1px solid {c.get('border', '#1C1C28')};
+                border-radius: 16px;
+            }}
+            QFrame#settingsCard > QLabel {{ border: none; background: transparent; }}
+        """)
+        self._hint.setStyleSheet(f"color: {c.get('text_secondary', '#B0B0C0')}; font-size: 13px; "
+                                 "background: transparent; border: none;")
 
     def _style_toggle(self):
         on = self._toggle.isChecked()

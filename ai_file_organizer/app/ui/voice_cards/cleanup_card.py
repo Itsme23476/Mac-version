@@ -39,11 +39,11 @@ class VoiceCleanupCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._c = get_theme_colors()
-        c = self._c
         self._options = {}  # level -> (frame, name_label)
+        self._themed_fns = []  # (widget, build(c)->css) re-applied on theme change
 
         self.setObjectName("settingsCard")
-        self.setStyleSheet(f"""
+        self._themed(self, lambda c: f"""
             QFrame#settingsCard {{
                 background-color: {c['surface']};
                 border: 1px solid {c['border']};
@@ -69,8 +69,8 @@ class VoiceCleanupCard(QFrame):
         layout.addLayout(_trow)
 
         subtitle = QLabel("Choose how much Filect cleans up your dictation.")
-        subtitle.setStyleSheet(f"color: {c['text_secondary']}; font-size: 13px; "
-                               "background: transparent; border: none;")
+        self._themed(subtitle, lambda c: f"color: {c['text_secondary']}; font-size: 13px; "
+                                         "background: transparent; border: none;")
         layout.addWidget(subtitle)
 
         row = QHBoxLayout()
@@ -82,8 +82,19 @@ class VoiceCleanupCard(QFrame):
 
         self._select(getattr(settings, 'dictation_polish_level', 'none'), persist=False)
 
+    def _themed(self, widget, build):
+        """Register a widget whose stylesheet depends on theme colours, and apply it now."""
+        self._themed_fns.append((widget, build))
+        widget.setStyleSheet(build(self._c))
+
+    def apply_theme(self, theme=None):
+        """Re-read theme colours and re-apply the card, static labels and selection styling."""
+        self._c = get_theme_colors(theme)
+        for widget, build in self._themed_fns:
+            widget.setStyleSheet(build(self._c))
+        self._select(getattr(settings, 'dictation_polish_level', 'none'), persist=False)
+
     def _build_option(self, level, name, badge, bullets, example):
-        c = self._c
         frame = QFrame()
         frame.setObjectName("polishOption")
         frame.setCursor(Qt.PointingHandCursor)
@@ -97,24 +108,24 @@ class VoiceCleanupCard(QFrame):
         head.addWidget(name_lbl)
         head.addStretch()
         badge_lbl = QLabel(badge)
-        badge_lbl.setStyleSheet(f"color: {c['text_muted']}; font-size: 11px; font-weight: 600; "
-                                f"background: {c['input_bg']}; border: 1px solid {c['border']}; "
-                                "border-radius: 8px; padding: 2px 8px;")
+        self._themed(badge_lbl, lambda c: f"color: {c['text_muted']}; font-size: 11px; font-weight: 600; "
+                                          f"background: {c['input_bg']}; border: 1px solid {c['border']}; "
+                                          "border-radius: 8px; padding: 2px 8px;")
         head.addWidget(badge_lbl)
         v.addLayout(head)
 
         for b in bullets:
             bl = QLabel("·  " + b)
             bl.setWordWrap(True)
-            bl.setStyleSheet(f"color: {c['text_muted']}; font-size: 11px; "
-                             "background: transparent; border: none;")
+            self._themed(bl, lambda c: f"color: {c['text_muted']}; font-size: 11px; "
+                                       "background: transparent; border: none;")
             v.addWidget(bl)
 
         ex = QLabel(example)
         ex.setWordWrap(True)
-        ex.setStyleSheet(f"color: {c['text_secondary']}; font-size: 12px; "
-                         f"background: {c['input_bg']}; border: 1px solid {c['border']}; "
-                         "border-radius: 10px; padding: 10px;")
+        self._themed(ex, lambda c: f"color: {c['text_secondary']}; font-size: 12px; "
+                                   f"background: {c['input_bg']}; border: 1px solid {c['border']}; "
+                                   "border-radius: 10px; padding: 10px;")
         v.addWidget(ex)
         v.addStretch()
 

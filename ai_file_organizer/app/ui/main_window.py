@@ -695,8 +695,27 @@ class MainWindow(QMainWindow):
         logo_layout = QHBoxLayout(logo_container)
         logo_layout.setContentsMargins(20, 20, 20, 16)
         
-        logo_icon = QLabel("✦")
+        logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
+        # Use the real app logo (resources/logo.png) rather than a drawn glyph; the PNG
+        # already has its own rounded-square badge, so clear the #logoIcon background.
+        _logo_set = False
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+            from PySide6.QtGui import QPixmap as _QPixmap
+            _base = _Path(_sys._MEIPASS) if hasattr(_sys, "_MEIPASS") else _Path(__file__).resolve().parents[2]
+            _lp = _base / "resources" / "logo.png"
+            if _lp.exists():
+                _pm = _QPixmap(str(_lp))
+                if not _pm.isNull():
+                    logo_icon.setPixmap(_pm.scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    logo_icon.setStyleSheet("background: transparent; border: none; padding: 0;")
+                    _logo_set = True
+        except Exception:
+            pass
+        if not _logo_set:
+            logo_icon.setText("✦")   # fallback if the asset is missing
         logo_layout.addWidget(logo_icon)
         
         logo_text = QLabel("Filect")
@@ -735,6 +754,10 @@ class MainWindow(QMainWindow):
             btn.setCursor(Qt.PointingHandCursor)
             btn.setIcon(line_icon(icon_name, 18, on_color="#7C4DFF", off_color="#8C8AA0"))
             btn.setIconSize(_QSize(18, 18))
+            # The sidebar order (Voice before Settings) differs from the page_stack
+            # indices (Voice=4, Settings=3), so store the page index for lookups that
+            # must map a page index back to its button (e.g. onboarding navigation).
+            btn.setProperty("nav_index", idx)
             btn.clicked.connect(lambda checked, i=idx: self._on_nav_clicked(i))
             nav_layout.addWidget(btn)
             self.nav_buttons.append(btn)
@@ -824,6 +847,7 @@ class MainWindow(QMainWindow):
         icon badges (matches the mockup; also the in-app voice instructions)."""
         from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout
         from app.ui.icons import line_pixmap
+        self._voice_shortcut_rows = []  # (name_label, desc_label) re-themed on toggle
         card = QFrame()
         card.setObjectName("settingsCard")
         card.setStyleSheet(
@@ -852,6 +876,7 @@ class MainWindow(QMainWindow):
         ]
         for icon_name, name, desc, keys in rows:
             v.addWidget(self._voice_shortcut_row(icon_name, name, desc, keys, c))
+        self.voice_shortcuts_card = card   # referenced by onboarding's Voice-step spotlight
         return card
 
     def _voice_shortcut_row(self, icon_name, name, desc, keys, c):
@@ -874,6 +899,8 @@ class MainWindow(QMainWindow):
         ds = QLabel(desc)
         ds.setStyleSheet(f"font-size: 12px; color: {c.get('text_muted', '#7A7A90')}; "
                          "background: transparent; border: none;")
+        if hasattr(self, '_voice_shortcut_rows'):
+            self._voice_shortcut_rows.append((nm, ds))
         col.addWidget(nm); col.addWidget(ds)
         h.addLayout(col, 1)
 
@@ -929,10 +956,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle)
 
         layout.addWidget(self._build_voice_shortcuts_card(c))
-        layout.addWidget(VoiceCustomWordsCard())
-        layout.addWidget(VoiceLanguageCard())
-        layout.addWidget(VoiceCleanupCard())
-        layout.addWidget(VoiceMuteCard())
+        self.voice_custom_words_card = VoiceCustomWordsCard()
+        layout.addWidget(self.voice_custom_words_card)
+        self.voice_language_card = VoiceLanguageCard()
+        layout.addWidget(self.voice_language_card)
+        self.voice_cleanup_card = VoiceCleanupCard()
+        layout.addWidget(self.voice_cleanup_card)
+        self.voice_mute_card = VoiceMuteCard()
+        layout.addWidget(self.voice_mute_card)
         self.voice_history_card = VoiceHistoryCard()
         layout.addWidget(self.voice_history_card)
         layout.addStretch()
@@ -2437,17 +2468,18 @@ class MainWindow(QMainWindow):
 
         # ======= APPEARANCE CARD =======
         appearance_card = QFrame()
-        appearance_card.setObjectName("settingsCard")
-        appearance_card.setStyleSheet("""
-            QFrame#settingsCard {
-                background-color: #111119;
-                border: 1px solid #1C1C28;
+        appearance_card.setObjectName("settingsCardAppearance")
+        _ap_c = theme_manager.get_colors()
+        appearance_card.setStyleSheet(f"""
+            QFrame#settingsCardAppearance {{
+                background-color: {_ap_c['surface']};
+                border: 1px solid {_ap_c['border']};
                 border-radius: 16px;
-            }
-            QFrame#settingsCard QLabel {
+            }}
+            QFrame#settingsCardAppearance QLabel {{
                 border: none;
                 background: transparent;
-            }
+            }}
         """)
         appearance_layout = QVBoxLayout(appearance_card)
         appearance_layout.setContentsMargins(20, 20, 20, 20)
@@ -3107,7 +3139,39 @@ class MainWindow(QMainWindow):
         self._apply_settings_theme_styles(new_theme)
         if hasattr(self, 'organize_page') and hasattr(self.organize_page, '_apply_theme_styles'):
             self.organize_page._apply_theme_styles(new_theme)
+        self._apply_voice_theme_styles(new_theme)
         self.status_bar.showMessage(f"Switched to {new_theme} mode", 3000)
+
+    def _apply_voice_theme_styles(self, theme=None):
+        """Re-apply theme colours to every Voice-page card after a runtime toggle.
+
+        The self-contained cards each re-theme themselves via ``apply_theme``; the
+        Shortcuts card is built inline here, so it is re-styled inline too."""
+        from app.ui.theme_manager import get_theme_colors
+        for attr in ('voice_custom_words_card', 'voice_language_card',
+                     'voice_cleanup_card', 'voice_mute_card', 'voice_history_card'):
+            card = getattr(self, attr, None)
+            if card is not None and hasattr(card, 'apply_theme'):
+                try:
+                    card.apply_theme(theme)
+                except Exception:
+                    pass
+        if hasattr(self, 'voice_shortcuts_card'):
+            try:
+                c = get_theme_colors(theme)
+                self.voice_shortcuts_card.setStyleSheet(
+                    f"QFrame#settingsCard {{ background-color: {c.get('surface', '#111119')}; "
+                    f"border: 1px solid {c.get('border', '#1C1C28')}; border-radius: 16px; }}"
+                    "QFrame#settingsCard > QLabel { border: none; background: transparent; }"
+                )
+                for nm, ds in getattr(self, '_voice_shortcut_rows', []):
+                    nm.setStyleSheet(f"font-weight: 600; font-size: 13.5px; "
+                                     f"color: {c.get('text', '#E8E8F0')}; "
+                                     "background: transparent; border: none;")
+                    ds.setStyleSheet(f"font-size: 12px; color: {c.get('text_muted', '#7A7A90')}; "
+                                     "background: transparent; border: none;")
+            except Exception:
+                pass
     
     def _apply_settings_theme_styles(self, theme=None):
         """Re-apply all theme-dependent inline styles on the settings page."""
@@ -3120,7 +3184,7 @@ class MainWindow(QMainWindow):
 
         # ---- Card backgrounds (find by object name) ----
         from PySide6.QtWidgets import QFrame
-        card_names = ['settingsCard', 'settingsCardHelp', 'settingsCardQS',
+        card_names = ['settingsCardAppearance', 'settingsCardHelp', 'settingsCardQS',
                       'settingsCardSearch', 'settingsCardAccount', 'settingsCardExclusions',
                       'settingsCardSupport']
         for name in card_names:

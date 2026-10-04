@@ -40,6 +40,7 @@ class VoiceHistoryCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("voiceHistoryCard")
+        self._theme = None  # overridden by apply_theme(); None = follow settings
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
@@ -97,9 +98,14 @@ class VoiceHistoryCard(QFrame):
 
         self.refresh()
 
+    def apply_theme(self, theme=None):
+        """Re-read theme colours (honouring an explicit theme) and rebuild the list."""
+        self._theme = theme
+        self.refresh()
+
     def refresh(self) -> None:
         """Rebuild the list from the store and restyle for the current theme."""
-        c = get_theme_colors()
+        c = get_theme_colors(self._theme)
         self._apply_styles(c)
 
         while self._list_layout.count():
