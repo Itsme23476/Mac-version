@@ -281,9 +281,11 @@ class VoiceOrganizeController(QObject):
     # ------------------------------------------------------------- recorder i/o
     def _start_recorder(self, on_text):
         from app.core.settings import settings
-        from app.core.transcription import VoiceRecorder
-        rec = VoiceRecorder(terms=settings.dictation_custom_terms,
-                            language=(settings.dictation_language or None))
+        # Streams audio live (final text ready instantly on stop); falls back to the
+        # batch path on any streaming problem, so this voice flow can't break.
+        from app.core.transcription import StreamingTranscriber
+        rec = StreamingTranscriber(terms=settings.dictation_custom_terms,
+                                   language=(settings.dictation_language or None))
         self._recorder = rec
         rec.level.connect(self.overlay.set_level, Qt.QueuedConnection)
         rec.finished.connect(lambda text, r=rec: self._recorder_done(r, on_text, text),

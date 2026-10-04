@@ -122,13 +122,18 @@ class DictationOverlay(QWidget):
             self._done_timer.start(600)          # fade the check, then hide()
 
         self._reposition()
-        if not self.isVisible():
+        first_show = not self.isVisible()
+        if first_show:
             self.show()
         # macOS: float over ANY app / fullscreen regardless of which app is focused.
         # Qt.Tool windows otherwise auto-hide when the app deactivates; Qt also resets
         # these props during show(), so re-apply on short delays (like quick-search).
+        # ONLY on first show — re-running this on a state change (listening->transcribing)
+        # does heavy CGS space/level work on the UI thread and visibly stutters the pill
+        # right at key-release. Once shown, the panel is already configured on the right
+        # Space, so state changes just repaint.
         import sys
-        if sys.platform == "darwin":
+        if sys.platform == "darwin" and first_show:
             self._configure_macos()
             QTimer.singleShot(10, self._configure_macos)
             QTimer.singleShot(60, self._configure_macos)
@@ -179,6 +184,13 @@ class DictationOverlay(QWidget):
                 return
             ns_window.setCollectionBehavior_((1 << 0) | (1 << 8))  # AllSpaces | FullScreenAuxiliary
             ns_window.setLevel_(1000)                               # NSScreenSaverWindowLevel
+            # Instant show/hide — macOS otherwise fades a panel out over ~100ms, which
+            # read as a dead "empty pill" frame between the dots and the text landing.
+            if hasattr(ns_window, "setAnimationBehavior_"):
+                try:
+                    ns_window.setAnimationBehavior_(2)             # NSWindowAnimationBehaviorNone
+                except Exception:
+                    pass
             if hasattr(ns_window, "setHidesOnDeactivate_"):
                 ns_window.setHidesOnDeactivate_(False)             # CRITICAL: don't hide on deactivate
             try:

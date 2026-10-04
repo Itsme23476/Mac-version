@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout
 from PySide6.QtGui import QGuiApplication
 
 from app.core.settings import settings
-from app.core.transcription import VoiceRecorder
+from app.core.transcription import StreamingTranscriber
 
 logger = logging.getLogger(__name__)
 
@@ -329,11 +329,16 @@ class VoiceDictationController(QObject):
             self._prev_pid = get_foreground_hwnd() if _HOTKEY_OK else None
         except Exception:
             self._prev_pid = None
-        self._recorder = VoiceRecorder(terms=settings.dictation_custom_terms,
-                                       language=(settings.dictation_language or None))
+        # StreamingTranscriber streams audio live so the final text is ready the
+        # instant the key is released; it falls back to the batch path (VoiceRecorder's
+        # behaviour) on any streaming problem, so nothing about dictation can break.
+        self._recorder = StreamingTranscriber(terms=settings.dictation_custom_terms,
+                                              language=(settings.dictation_language or None))
         self._recorder.finished.connect(self._on_text)
         self._recorder.error.connect(self._on_error)
         self._recorder.level.connect(self._indicator.set_level)
+        if hasattr(self._recorder, "capped"):
+            self._recorder.capped.connect(self._on_capped)
         self._state = "recording"
         self._recorder.start()
         # Poll modifiers for the whole hold so mode selection is independent of press
@@ -433,7 +438,9 @@ class VoiceDictationController(QObject):
                 self._status("Voice organize unavailable.")
             return
         if self._mode == "search":
-            self._indicator.hide()
+            # Keep the pill up (transcribing dots) through the distill round-trip;
+            # _open_search hides it the instant the results popup opens, so there's
+            # never a blank moment between releasing and the popup appearing.
             self._do_search(text)
             return
         # Optional Polishing (Voice > Polishing: none/light/polished): polish the
@@ -460,28 +467,48 @@ class VoiceDictationController(QObject):
                 self._final_ready.emit(cleaned or text)
             threading.Thread(target=_clean, daemon=True).start()
             return
-        self._indicator.hide()
+        # Keep the pill in its "transcribing" dots state (set in _stop) right up until
+        # _on_final has actually pasted — then it shows a "done" check. No empty gap.
         self._final_ready.emit(text)
 
     def _on_final(self, text: str):
-        """Final dictation text (raw, or AI-polished). Hide the pill, save to History,
-        notify the UI, then paste. Do NOT touch focus: the overlay is a non-activating
-        panel, so the app the user was typing in is still frontmost and we paste straight
-        into it. The 40ms lets the overlay hide() flush."""
-        self._indicator.hide()
+        """Final dictation text (raw, or AI-polished). The dots keep animating (kept from
+        release) with NOTHING blocking the UI thread, then the pill is cut the instant we
+        paste. History save + the Voice-page refresh run AFTER the paste on a background
+        thread — that synchronous file I/O, run mid-animation, was what froze the dots.
+        Do NOT touch focus: the overlay is a non-activating panel, so the user's app stays
+        frontmost and we paste straight into it."""
         text = (text or "").strip()
         if not text:
+            self._indicator.hide()
             return
-        try:
-            from app.core import dictation_history
-            dictation_history.add(text)
-        except Exception as e:
-            logger.warning(f"history save failed: {e}")
-        try:
-            self.dictation_saved.emit()  # live-refresh the Voice page History card
-        except Exception:
-            pass
-        QTimer.singleShot(40, lambda: self._insert_text(text))
+
+        def _do_insert():
+            # Cut the animation the INSTANT we paste (hide is instant — no window fade),
+            # then paste. Nothing heavy ran on the UI thread while the dots were showing,
+            # so there's no freeze — the pill just vanishes cleanly as the text lands.
+            try:
+                self._indicator.hide()
+            except Exception:
+                pass
+            self._insert_text(text)
+            # History + Voice-page refresh AFTER the paste, OFF the UI thread (this file
+            # I/O froze the dots when it ran mid-animation). emit() is queued to the UI
+            # thread; it runs after add() so the Voice card sees the new entry.
+            def _persist():
+                try:
+                    from app.core import dictation_history
+                    dictation_history.add(text)
+                except Exception as e:
+                    logger.warning(f"history save failed: {e}")
+                try:
+                    self.dictation_saved.emit()
+                except Exception:
+                    pass
+            import threading
+            threading.Thread(target=_persist, daemon=True, name="dictation-history").start()
+
+        QTimer.singleShot(40, _do_insert)
 
     def _on_error(self, msg: str):
         self._stop_watchdog()
@@ -492,6 +519,27 @@ class VoiceDictationController(QObject):
         self._ignore_next_release = False
         self._got_second_tap = False
         self._status(msg or "Dictation failed.")
+
+    def _on_capped(self):
+        """The 10-min safety cap stopped a very long dictation. Everything spoken so far
+        is still pasted + saved (the normal finalize path runs via finished/_on_text) —
+        this just tells the user why recording stopped and that nothing was lost. Shown as
+        a macOS banner because the user is typically dictating into another app."""
+        logger.info("[voice] max-duration cap reached; notifying user (text is still saved)")
+        self._status("10-minute voice limit reached — your text was saved.")
+
+        def _notify():
+            try:
+                import subprocess
+                subprocess.run(
+                    ["osascript", "-e",
+                     'display notification "Reached the 10-minute limit. Your text was '
+                     'pasted and saved — press Fn to keep dictating." with title "Filect Voice"'],
+                    capture_output=True, timeout=3)
+            except Exception:
+                pass
+        import threading
+        threading.Thread(target=_notify, daemon=True, name="voice-cap-notify").start()
 
     def _do_search(self, raw_query: str):
         """Voice search (Fn+Shift): distill the spoken sentence into keywords via the LLM
@@ -518,8 +566,10 @@ class VoiceDictationController(QObject):
             qo = getattr(self._mw, "quick_overlay", None)
             if qo is None:
                 logger.warning("Voice search: quick_overlay not available")
+                self._indicator.hide()
                 self._status("Search isn't available.")
                 return
+            self._indicator.hide()          # hand off from the pill to the results popup
             qo.show_centered_bottom()
             qo.run_voice_query(spoken_text, search_query)   # display spoken, search distilled
             logger.info(f"Voice search: said {spoken_text!r} -> searched {search_query!r}")
@@ -572,7 +622,7 @@ class VoiceDictationController(QObject):
                 self._status("Dictation inserted.")
                 if prev_clip is not None:
                     QTimer.singleShot(400, lambda: self._set_clipboard(prev_clip))
-                return
+                return True
             logger.warning("Clipboard paste returned False; trying pynput type")
         except Exception as e:
             logger.warning(f"Clipboard paste failed ({e}); trying pynput type")
@@ -582,9 +632,11 @@ class VoiceDictationController(QObject):
             Controller().type(text)
             logger.info(f"Inserted {len(text)} chars via pynput")
             self._status("Dictation inserted.")
+            return True
         except Exception as e:
             logger.error(f"Text insertion failed via all paths: {e}")
             self._status("Could not insert text.")
+            return False
 
     @staticmethod
     def _get_clipboard():
