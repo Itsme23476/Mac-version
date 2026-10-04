@@ -819,6 +819,72 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'tips_manager'):
             QTimer.singleShot(150, self.tips_manager.show_tips_for_visible_widgets)
 
+    def _build_voice_shortcuts_card(self, c):
+        """Shortcuts card for the Voice page: the three voice hotkeys with gradient
+        icon badges (matches the mockup; also the in-app voice instructions)."""
+        from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout
+        from app.ui.icons import line_pixmap
+        card = QFrame()
+        card.setObjectName("settingsCard")
+        card.setStyleSheet(
+            f"QFrame#settingsCard {{ background-color: {c.get('surface', '#111119')}; "
+            f"border: 1px solid {c.get('border', '#1C1C28')}; border-radius: 16px; }}"
+            "QFrame#settingsCard > QLabel { border: none; background: transparent; }"
+        )
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(12)
+
+        trow = QHBoxLayout(); trow.setSpacing(9)
+        tic = QLabel(); tic.setPixmap(line_pixmap("keyboard", 16, "#7C4DFF"))
+        tic.setStyleSheet("background: transparent; border: none;")
+        trow.addWidget(tic, 0, Qt.AlignVCenter)
+        tt = QLabel("Shortcuts")
+        tt.setStyleSheet("font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 15px; "
+                         "font-weight: 600; color: #7C4DFF; background: transparent; border: none;")
+        trow.addWidget(tt, 0, Qt.AlignVCenter); trow.addStretch(1)
+        v.addLayout(trow)
+
+        rows = [
+            ("mic", "Dictation", "Hold to talk · double-tap for hands-free", ["Fn"]),
+            ("search", "Voice search", "Ask out loud, jump to the file", ["Fn", "⇧"]),
+            ("folder", "Voice organize", "Describe a cleanup, review the plan", ["Fn", "⌥"]),
+        ]
+        for icon_name, name, desc, keys in rows:
+            v.addWidget(self._voice_shortcut_row(icon_name, name, desc, keys, c))
+        return card
+
+    def _voice_shortcut_row(self, icon_name, name, desc, keys, c):
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+        from app.ui.icons import line_pixmap
+        row = QWidget(); row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(13)
+
+        badge = QLabel(); badge.setFixedSize(38, 38)
+        badge.setPixmap(line_pixmap(icon_name, 18, "#FFFFFF"))
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setStyleSheet("QLabel { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+                            "stop:0 #B28BFF, stop:1 #6D28D9); border-radius: 10px; }")
+        h.addWidget(badge, 0, Qt.AlignVCenter)
+
+        col = QVBoxLayout(); col.setContentsMargins(0, 0, 0, 0); col.setSpacing(1)
+        nm = QLabel(name)
+        nm.setStyleSheet(f"font-weight: 600; font-size: 13.5px; color: {c.get('text', '#E8E8F0')}; "
+                         "background: transparent; border: none;")
+        ds = QLabel(desc)
+        ds.setStyleSheet(f"font-size: 12px; color: {c.get('text_muted', '#7A7A90')}; "
+                         "background: transparent; border: none;")
+        col.addWidget(nm); col.addWidget(ds)
+        h.addLayout(col, 1)
+
+        kbd_style = ("QLabel { background: rgba(124,77,255,0.10); "
+                     "border: 1px solid rgba(124,77,255,0.28); border-radius: 6px; "
+                     "color: #7C4DFF; font-size: 11px; font-weight: 600; padding: 2px 7px; }")
+        for k in keys:
+            kl = QLabel(k); kl.setStyleSheet(kbd_style)
+            h.addWidget(kl, 0, Qt.AlignVCenter)
+        return row
+
     def setup_voice_page(self):
         """Voice page (index 4) — dictation sub-features as self-contained cards
         (Custom Words, AI Cleanup, History), mirroring the Settings page layout."""
@@ -850,7 +916,7 @@ class MainWindow(QMainWindow):
         _ic.setStyleSheet("background: transparent; border: none;")
         _trow.addWidget(_ic, 0, Qt.AlignVCenter)
         title = QLabel("Voice")
-        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #7C4DFF; "
+        title.setStyleSheet("font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 22px; font-weight: 700; color: #7C4DFF; "
                             "background: transparent; border: none;")
         _trow.addWidget(title, 0, Qt.AlignVCenter)
         _trow.addStretch(1)
@@ -862,6 +928,7 @@ class MainWindow(QMainWindow):
                                "background: transparent; border: none;")
         layout.addWidget(subtitle)
 
+        layout.addWidget(self._build_voice_shortcuts_card(c))
         layout.addWidget(VoiceCustomWordsCard())
         layout.addWidget(VoiceLanguageCard())
         layout.addWidget(VoiceCleanupCard())
@@ -1467,7 +1534,7 @@ class MainWindow(QMainWindow):
         self.drop_icon.setObjectName("dropIconLarge")
         self.drop_icon.setAlignment(Qt.AlignCenter)
         from app.ui.icons import line_pixmap as _line_pixmap
-        self.drop_icon.setPixmap(_line_pixmap("folder", 46, "#7C4DFF"))
+        self.drop_icon.setPixmap(_line_pixmap("folder_up", 46, "#7C4DFF"))
         self.drop_icon.setStyleSheet("background: transparent; border: none;")
         drop_layout.addWidget(self.drop_icon, 0, Qt.AlignCenter)
         

@@ -116,7 +116,7 @@ class VoiceCustomWordsCard(QFrame):
         _trow.addWidget(_ic, 0, Qt.AlignVCenter)
         title = QLabel("Custom Words")
         title.setStyleSheet(
-            f"font-size: 15px; font-weight: 600; color: {ACCENT}; "
+            f"font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 15px; font-weight: 600; color: {ACCENT}; "
             "background: transparent; border: none;"
         )
         _trow.addWidget(title, 0, Qt.AlignVCenter)

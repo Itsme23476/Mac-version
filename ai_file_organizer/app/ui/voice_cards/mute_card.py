@@ -40,7 +40,7 @@ class VoiceMuteCard(QFrame):
         _ic.setStyleSheet("background: transparent; border: none;")
         row.addWidget(_ic, 0, Qt.AlignVCenter)
         title = QLabel("Mute while recording")
-        title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {ACCENT}; "
+        title.setStyleSheet(f"font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 15px; font-weight: 600; color: {ACCENT}; "
                             "background: transparent; border: none;")
         row.addWidget(title, 0, Qt.AlignVCenter)
         row.addStretch(1)

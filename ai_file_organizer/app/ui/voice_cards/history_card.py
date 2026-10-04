@@ -204,7 +204,7 @@ class VoiceHistoryCard(QFrame):
             f"border: 1px solid {c['border']}; border-radius: 16px; }}"
         )
         self._title.setStyleSheet(
-            f"font-size: 15px; font-weight: 600; color: {_ACCENT}; "
+            f"font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 15px; font-weight: 600; color: {_ACCENT}; "
             "background: transparent; border: none;"
         )
         self._privacy.setStyleSheet(

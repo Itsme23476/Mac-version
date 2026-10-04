@@ -5257,7 +5257,7 @@ class OrganizePage(QWidget):
         dest_info.setSpacing(4)
         
         dest_title = QLabel("Folder to Organize")
-        dest_title.setStyleSheet("font-size: 16px; font-weight: 600; color: #7C4DFF; background: transparent;")
+        dest_title.setStyleSheet("font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 16px; font-weight: 600; color: #7C4DFF; background: transparent;")
         dest_info.addWidget(dest_title)
         
         self.dest_label = QLabel("Pick a folder — its files get sorted into subfolders within it (in place)")
@@ -5672,7 +5672,7 @@ class OrganizePage(QWidget):
         header_info.setSpacing(2)
         
         watch_title = QLabel("Auto-Organize")
-        watch_title.setStyleSheet("font-size: 18px; font-weight: 600; color: #7C4DFF; background: transparent;")
+        watch_title.setStyleSheet("font-family: 'Sora', 'SF Pro Display', sans-serif; font-size: 18px; font-weight: 600; color: #7C4DFF; background: transparent;")
         header_info.addWidget(watch_title)
         
         self._watch_desc = QLabel("Monitor folders and organize new files automatically")

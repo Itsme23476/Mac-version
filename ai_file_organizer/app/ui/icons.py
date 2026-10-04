@@ -33,6 +33,13 @@ def _layers(p):
     p.drawLine(QLineF(7.5, 12, 16.5, 12))
     p.drawLine(QLineF(7.5, 16, 13, 16))
 
+def _folder_up(p):
+    _folder(p)
+    p.drawLine(QLineF(12, 17.5, 12, 11.3))
+    head = QPainterPath()
+    head.moveTo(9.4, 13.7); head.lineTo(12, 11.1); head.lineTo(14.6, 13.7)
+    p.drawPath(head)
+
 def _mic(p):
     p.drawRoundedRect(QRectF(9, 3, 6, 11), 3, 3)
     p.drawArc(QRectF(5, 4, 14, 14), 180 * 16, 180 * 16)   # bottom cradle
@@ -118,6 +125,12 @@ def _type(p):
     p.drawLine(QLineF(12, 6.5, 12, 18))
     p.drawLine(QLineF(9.5, 18, 14.5, 18))
 
+def _keyboard(p):
+    p.drawRoundedRect(QRectF(2.5, 6, 19, 12), 2.5, 2.5)
+    for x in (6.5, 10, 13.5, 17):
+        p.drawLine(QLineF(x, 10, x + 0.1, 10))   # key dots (round cap)
+    p.drawLine(QLineF(8, 14, 16, 14))            # spacebar
+
 def _arrow(p):
     p.drawLine(QLineF(4.5, 12, 18.5, 12))
     head = QPainterPath()
@@ -136,7 +149,8 @@ _DRAW = {
     "gear": _gear, "appearance": _appearance, "book": _book, "chat": _chat,
     "sparkle": _sparkle, "user": _user, "shield": _shield, "globe": _globe,
     "mute": _mute, "clock": _clock, "refresh": _refresh, "type": _type,
-    "arrow": _arrow, "waveform": _waveform,
+    "arrow": _arrow, "waveform": _waveform, "folder_up": _folder_up,
+    "keyboard": _keyboard,
 }
 
 _cache = {}
@@ -188,8 +202,8 @@ def icon_heading(icon_name: str, text: str, label_style: str = "",
     ic.setStyleSheet("background: transparent; border: none;")
     lay.addWidget(ic, 0, Qt.AlignVCenter)
     lbl = QLabel(text)
-    if label_style:
-        lbl.setStyleSheet(label_style)
+    _sora = "font-family: 'Sora', 'SF Pro Display', sans-serif;"
+    lbl.setStyleSheet(((label_style.rstrip().rstrip(';') + '; ') if label_style else '') + _sora)
     lay.addWidget(lbl, 0, Qt.AlignVCenter)
     lay.addStretch(1)
     return row, lbl
