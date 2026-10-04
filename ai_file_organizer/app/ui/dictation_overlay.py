@@ -69,6 +69,10 @@ class DictationOverlay(QWidget):
         self.setFixedSize(WIDGET_W, WIDGET_H)
         self.setWindowTitle("Filect Voice")  # lets _configure_macos find the NSWindow by title
 
+        # Keep this HUD on the system font (its fixed size is tuned to it). Style-only.
+        self.setStyleSheet("QWidget { font-family: '-apple-system', 'SF Pro Display', "
+                           "'Helvetica Neue', 'Segoe UI', sans-serif; }")
+
         self._state = STATE_LISTENING
         self._latched = False                    # hands-free latch (double-tap) vs push-to-talk
         self._mode = "dictate"                   # "dictate" | "search" — drives accent color

@@ -220,6 +220,12 @@ class OrganizeOverlay(QWidget):
         self.setWindowTitle(_WIN_TITLE)  # lets _configure_macos find the NSWindow
         self.setFixedWidth(WIDGET_W)
 
+        # Keep this panel on the system font regardless of the app-wide Inter font:
+        # its heights are hand-tuned to the system metrics, so a different font must
+        # not shift them. Style-only — does NOT touch window flags or sizing.
+        self.setStyleSheet("QWidget { font-family: '-apple-system', 'SF Pro Display', "
+                           "'Helvetica Neue', 'Segoe UI', sans-serif; }")
+
         self._state = "idle"       # idle|listening|thinking|plan|applying|done|error
         self._anim = None          # keep a ref so the slide animation isn't GC'd
 

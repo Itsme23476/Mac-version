@@ -432,7 +432,25 @@ def main():
         icon_path = source_root / 'resources' / 'icon.png'
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
-    
+
+    # Load bundled brand fonts (Inter + Sora). Byte-based because macOS/CoreText
+    # rejects some path-based addApplicationFont calls. Visual only.
+    try:
+        from PySide6.QtGui import QFontDatabase
+        from PySide6.QtCore import QByteArray
+        import os as _os
+        import app.ui as _appui
+        _fonts_dir = _os.path.join(_os.path.dirname(_appui.__file__), 'fonts')
+        for _fn in ('Inter-Regular.ttf', 'Inter-Medium.ttf', 'Inter-SemiBold.ttf',
+                    'Sora-SemiBold.ttf', 'Sora-Bold.ttf'):
+            try:
+                with open(_os.path.join(_fonts_dir, _fn), 'rb') as _fh:
+                    QFontDatabase.addApplicationFontFromData(QByteArray(_fh.read()))
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Font load failed: {e}")
+
     # Apply saved theme (dark/light)
     try:
         from app.ui.theme_manager import theme_manager

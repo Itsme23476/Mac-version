@@ -18,7 +18,7 @@
 * {
     background-color: #0A0A12;
     color: #E8E8F0;
-    font-family: "Segoe UI", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+    font-family: "Inter", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
     font-size: 14px;
     selection-background-color: #7C4DFF;
     selection-color: #FFFFFF;
@@ -90,6 +90,7 @@ QMainWindow, QDialog {
 }
 
 #logoText {
+    font-family: "Sora", "SF Pro Display", sans-serif;
     font-size: 20px;
     font-weight: 700;
     color: #E8E8F0;
@@ -156,7 +157,8 @@ QMainWindow, QDialog {
 
 /* ==================== Search Page - Hero Section ==================== */
 #heroHeading {
-    font-size: 36px;
+    font-family: "Sora", "SF Pro Display", sans-serif;
+    font-size: 34px;
     font-weight: 700;
     color: #FFFFFF;
     background: transparent;
