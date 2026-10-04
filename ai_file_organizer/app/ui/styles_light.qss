@@ -89,11 +89,10 @@ QMainWindow, QDialog {
 
 #navButton {
     background: transparent;
-    border: none;
-    border-left: 3px solid transparent;
-    border-radius: 0px;
+    border: 1px solid transparent;
+    border-radius: 10px;
     text-align: left;
-    padding: 14px 16px;
+    padding: 11px 14px;
     color: #6F6B83;
     font-size: 14px;
     font-weight: 500;
@@ -105,8 +104,8 @@ QMainWindow, QDialog {
 }
 
 #navButton:checked {
-    background-color: rgba(124, 77, 255, 0.08);
-    border-left: 3px solid #7C4DFF;
+    background-color: rgba(124, 77, 255, 0.10);
+    border: 1px solid rgba(124, 77, 255, 0.35);
     color: #7C4DFF;
     font-weight: 600;
 }
