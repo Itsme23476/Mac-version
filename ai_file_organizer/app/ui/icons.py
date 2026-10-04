@@ -7,8 +7,9 @@ Usage:
     button.setIcon(line_icon("search", on_color="#7C4DFF", off_color="#8C8AA0"))
 """
 import math
-from PySide6.QtCore import Qt, QRectF, QLineF
+from PySide6.QtCore import Qt, QRectF, QLineF, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath, QIcon
+from PySide6.QtWidgets import QWidget
 
 ACCENT = "#7C4DFF"
 
@@ -192,6 +193,53 @@ def icon_heading(icon_name: str, text: str, label_style: str = "",
     lay.addWidget(lbl, 0, Qt.AlignVCenter)
     lay.addStretch(1)
     return row, lbl
+
+
+class AnimatedWaveform(QWidget):
+    """Gently pulsing voice waveform (the motif from the mockup).
+    Low-CPU: a QTimer that only runs while the widget is visible."""
+
+    def __init__(self, parent=None, color: str = ACCENT, bars: int = 5,
+                 width: int = 28, height: int = 24, interval: int = 70):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._n = max(2, bars)
+        self._phase = 0.0
+        self._interval = interval
+        self.setFixedSize(width, height)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background: transparent; border: none;")
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def _tick(self):
+        self._phase += 0.33
+        self.update()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._timer.isActive():
+            self._timer.start(self._interval)
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._timer.stop()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(self._color)
+        pen.setWidthF(2.6)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        w, h = self.width(), self.height()
+        gap = w / (self._n + 1)
+        for i in range(self._n):
+            x = gap * (i + 1)
+            amp = 0.5 + 0.5 * math.sin(self._phase + i * 0.85)
+            bh = 5 + amp * (h - 9)
+            top = (h - bh) / 2.0
+            p.drawLine(QLineF(x, top, x, top + bh))
 
 
 def line_icon(name: str, size: int = 18, on_color: str = ACCENT,

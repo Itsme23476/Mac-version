@@ -956,7 +956,7 @@ class MainWindow(QMainWindow):
     def _build_voice_hint_row(self):
         """Landing-only strip showing the voice hotkeys (waveform + Fn chips).
         Visual + discoverability; theme-agnostic translucent styling."""
-        from app.ui.icons import line_pixmap
+        from app.ui.icons import AnimatedWaveform
         frame = QWidget()
         frame.setObjectName("voiceHintRow")
         frame.setStyleSheet(
@@ -968,8 +968,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(18, 12, 18, 12)
         lay.setSpacing(16)
 
-        wave = QLabel()
-        wave.setPixmap(line_pixmap("waveform", 22, "#7C4DFF"))
+        wave = AnimatedWaveform(color="#7C4DFF", width=28, height=24)
         lay.addWidget(wave, 0, Qt.AlignVCenter)
 
         kbd_style = ("QLabel { background: rgba(124,77,255,0.10);"
