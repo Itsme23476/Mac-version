@@ -821,10 +821,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(16)
 
-        title = QLabel("🎙️  Voice")
+        from app.ui.icons import line_pixmap
+        from PySide6.QtWidgets import QHBoxLayout as _QHBox
+        _trow = _QHBox(); _trow.setSpacing(10)
+        _ic = QLabel(); _ic.setPixmap(line_pixmap("mic", 22, "#7C4DFF"))
+        _ic.setStyleSheet("background: transparent; border: none;")
+        _trow.addWidget(_ic, 0, Qt.AlignVCenter)
+        title = QLabel("Voice")
         title.setStyleSheet("font-size: 22px; font-weight: 700; color: #7C4DFF; "
                             "background: transparent; border: none;")
-        layout.addWidget(title)
+        _trow.addWidget(title, 0, Qt.AlignVCenter)
+        _trow.addStretch(1)
+        layout.addLayout(_trow)
         subtitle = QLabel("Dictate with Fn (hold to talk, double-tap for hands-free); "
                           "Fn+Shift searches your files by voice.")
         subtitle.setWordWrap(True)

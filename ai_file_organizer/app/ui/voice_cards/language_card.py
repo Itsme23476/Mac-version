@@ -48,10 +48,17 @@ class VoiceLanguageCard(QFrame):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title = QLabel("🌐 Language")
+        from app.ui.icons import line_pixmap
+        _trow = QHBoxLayout(); _trow.setSpacing(9)
+        _ic = QLabel(); _ic.setPixmap(line_pixmap("globe", 16, ACCENT))
+        _ic.setStyleSheet("background: transparent; border: none;")
+        _trow.addWidget(_ic, 0, Qt.AlignVCenter)
+        title = QLabel("Language")
         title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {ACCENT}; "
                             "background: transparent; border: none;")
-        layout.addWidget(title)
+        _trow.addWidget(title, 0, Qt.AlignVCenter)
+        _trow.addStretch(1)
+        layout.addLayout(_trow)
 
         hint = QLabel("Auto-detect works for most speech. Pick a specific language to force "
                       "transcription into only that one — helps for non-English or mixed speech.")

@@ -45,8 +45,15 @@ class VoiceHistoryCard(QFrame):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(12)
 
-        self._title = QLabel("\U0001F558 History")
-        root.addWidget(self._title)
+        from app.ui.icons import line_pixmap
+        _trow = QHBoxLayout(); _trow.setSpacing(9)
+        _ic = QLabel(); _ic.setPixmap(line_pixmap("clock", 16, _ACCENT))
+        _ic.setStyleSheet("background: transparent; border: none;")
+        _trow.addWidget(_ic, 0, Qt.AlignVCenter)
+        self._title = QLabel("History")
+        _trow.addWidget(self._title, 0, Qt.AlignVCenter)
+        _trow.addStretch(1)
+        root.addLayout(_trow)
 
         # Privacy banner — subtle rounded strip with a lock glyph.
         self._privacy = QFrame()

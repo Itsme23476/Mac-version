@@ -109,12 +109,19 @@ class VoiceCustomWordsCard(QFrame):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(12)
 
-        title = QLabel("🔤 Custom Words")
+        from app.ui.icons import line_pixmap
+        _trow = QHBoxLayout(); _trow.setSpacing(9)
+        _ic = QLabel(); _ic.setPixmap(line_pixmap("type", 16, ACCENT))
+        _ic.setStyleSheet("background: transparent; border: none;")
+        _trow.addWidget(_ic, 0, Qt.AlignVCenter)
+        title = QLabel("Custom Words")
         title.setStyleSheet(
             f"font-size: 15px; font-weight: 600; color: {ACCENT}; "
             "background: transparent; border: none;"
         )
-        root.addWidget(title)
+        _trow.addWidget(title, 0, Qt.AlignVCenter)
+        _trow.addStretch(1)
+        root.addLayout(_trow)
 
         hint = QLabel(
             "Add names, jargon, or brand terms you say often so they're spelled "

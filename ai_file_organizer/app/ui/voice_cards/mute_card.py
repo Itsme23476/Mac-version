@@ -33,7 +33,13 @@ class VoiceMuteCard(QFrame):
         layout.setSpacing(10)
 
         row = QHBoxLayout()
-        title = QLabel("🔇 Mute while recording")
+        row.setSpacing(9)
+        from app.ui.icons import line_pixmap
+        _ic = QLabel()
+        _ic.setPixmap(line_pixmap("mute", 16, ACCENT))
+        _ic.setStyleSheet("background: transparent; border: none;")
+        row.addWidget(_ic, 0, Qt.AlignVCenter)
+        title = QLabel("Mute while recording")
         title.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {ACCENT}; "
                             "background: transparent; border: none;")
         row.addWidget(title, 0, Qt.AlignVCenter)
