@@ -615,6 +615,25 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to initialize contextual tips: {e}")
     
+    def _apply_card_shadows(self):
+        """Subtle drop-shadow on page cards so they lift off the background
+        (mainly for light mode). Visual only; the floating organize overlay is a
+        separate top-level window and is NOT affected. Cheap and revertible."""
+        try:
+            from PySide6.QtWidgets import QGraphicsDropShadowEffect, QFrame as _QFrame
+            from PySide6.QtGui import QColor as _QColor
+            for frame in self.findChildren(_QFrame):
+                name = frame.objectName() or ""
+                if "Card" in name and frame.graphicsEffect() is None:
+                    eff = QGraphicsDropShadowEffect(frame)
+                    eff.setBlurRadius(26)
+                    eff.setXOffset(0)
+                    eff.setYOffset(7)
+                    eff.setColor(_QColor(60, 40, 120, 42))
+                    frame.setGraphicsEffect(eff)
+        except Exception:
+            pass
+
     def setup_ui(self):
         """Setup the user interface with modern sidebar navigation."""
         self.setWindowTitle("Filect - File Search Assistant")
@@ -647,6 +666,9 @@ class MainWindow(QMainWindow):
         self.setup_index_page()       # Index 2
         self.setup_settings_page()    # Index 3
         self.setup_voice_page()       # Index 4
+
+        # Subtle drop-shadows to lift cards off the background (light mode especially).
+        self._apply_card_shadows()
 
         # Set default page to Search
         self.page_stack.setCurrentIndex(0)
