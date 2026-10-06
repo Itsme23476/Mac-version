@@ -105,6 +105,7 @@ hidden_imports = [
 datas = [
     # Resources
     (os.path.join(APP_DIR, 'resources', 'icon.icns'), 'resources'),
+    (os.path.join(APP_DIR, 'resources', 'logo.png'), 'resources'),
     (os.path.join(APP_DIR, 'resources', 'category_defaults.json'), 'resources'),
     
     # App modules (ensure they're found)
@@ -189,8 +190,8 @@ app = BUNDLE(
         'CFBundleName': 'Filect',
         'CFBundleDisplayName': 'Filect',
         'CFBundleIdentifier': 'com.filect.filesearch',
-        'CFBundleVersion': '14.4.0',
-        'CFBundleShortVersionString': '14.4.0',
+        'CFBundleVersion': '14.5.0',
+        'CFBundleShortVersionString': '14.5.0',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleExecutable': 'Filect',

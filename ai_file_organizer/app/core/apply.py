@@ -73,15 +73,18 @@ def _clear_file_blocking_dir(dir_path: Path, move_log: Dict[str, Any]) -> int:
     return renamed
 
 
-def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, int]:
+def apply_moves(move_plan: List[Dict[str, Any]], progress_cb=None) -> Tuple[bool, List[str], str, int]:
     """
     Apply the move plan to actually move files.
-    
+
     Handles duplicate files by auto-renaming (e.g., file.pdf → file (1).pdf).
-    
+
     Args:
         move_plan: List of move plan dictionaries
-        
+        progress_cb: optional callable(done:int, total:int) invoked after each file —
+            used to drive a progress bar when this runs on a worker thread. It must be
+            cheap and thread-safe (e.g. emit a Qt signal); exceptions from it are ignored.
+
     Returns:
         Tuple of (success, list_of_errors, log_file_path, renamed_count)
     """
@@ -108,7 +111,7 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, 
                     if dest_path.exists():
                         # File already reached its destination — treat as success
                         successful_moves.append(move)
-                        logger.info(f"Already at destination, counting as success: {source_path.name}")
+                        logger.debug(f"Already at destination, counting as success: {source_path.name}")
                     else:
                         error_msg = f"Source file no longer exists: {source_path}"
                         errors.append(error_msg)
@@ -145,14 +148,20 @@ def apply_moves(move_plan: List[Dict[str, Any]]) -> Tuple[bool, List[str], str, 
                 }
                 move_log["moves"].append(move_entry)
                 successful_moves.append(move)
-                
-                logger.info(f"Moved {source_path.name} to {dest_path}")
-                
+
+                logger.debug(f"Moved {source_path.name} to {dest_path}")
+
             except Exception as e:
                 error_msg = f"Error moving {move.get('file_name', 'unknown')}: {e}"
                 errors.append(error_msg)
                 logger.error(error_msg)
                 continue
+            finally:
+                if progress_cb is not None:
+                    try:
+                        progress_cb(i + 1, len(move_plan))
+                    except Exception:
+                        pass
         
         # Save move log
         log_file_path = _save_move_log(move_log)

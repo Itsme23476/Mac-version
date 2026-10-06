@@ -171,22 +171,93 @@ def build_file_summary(files: List[Dict[str, Any]], max_files: int = 300) -> str
 # LLM REQUEST
 # ─────────────────────────────────────────────────────────────
 
+# Big folders can't be planned in a single LLM request: the file summary is capped and
+# the response is token-limited, so asking for thousands of file_ids back truncates the
+# JSON → failed/incomplete plans. request_organization_plan() splits them into chunks of
+# this many files, plans each, and merges by folder name (passing already-created folder
+# names to later chunks so the structure stays consistent).
+_PLAN_CHUNK_SIZE = 250
+# Retry a chunk this many times before treating the whole plan as failed. A chunk can
+# come back empty on a transient AI/network hiccup; retrying usually clears it.
+_PLAN_CHUNK_RETRIES = 2
+# Plan this many chunks at once. These are small text-only requests, so a handful in flight
+# just shortens big-folder planning; kept modest to stay well under rate limits.
+_PLAN_MAX_PARALLEL = 6
+
+
 def request_organization_plan(
+    user_instruction: str,
+    files: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Plan an organization for `files`, chunking big folders so the LLM never has to
+    return thousands of file_ids in one (truncatable) response. Returns a merged plan
+    dict ({"folders": {name: [file_id,...]}}) or None on failure."""
+    if not files:
+        logger.warning("No files provided for organization")
+        return None
+    if len(files) <= _PLAN_CHUNK_SIZE:
+        return _request_plan_single(user_instruction, files)
+
+    # Plan the chunks IN PARALLEL. They're small text-only requests on this (background) worker
+    # thread, so a few in flight let a big folder finish planning in roughly the time of one
+    # request instead of N in a row — the UI is unaffected either way. (The old sequential
+    # version fed each chunk the folder names created so far for naming consistency; that
+    # ordering dependency is dropped here. Merge-by-name still consolidates identical folders,
+    # and the callers' deduplicate_plan + ensure_all_files_included keep the result conserved
+    # and duplicate-free, so this is a speed/consistency trade, never a correctness one.)
+    chunks = [files[ci:ci + _PLAN_CHUNK_SIZE] for ci in range(0, len(files), _PLAN_CHUNK_SIZE)]
+    n_chunks = len(chunks)
+    logger.info(f"Chunking organization plan: {len(files)} files → {n_chunks} chunks of "
+                f"{_PLAN_CHUNK_SIZE} (planned in parallel, up to {_PLAN_MAX_PARALLEL} at once)")
+
+    def _plan_one(idx: int, chunk: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        # Retry a flaky chunk before giving up (same contract as the sequential version).
+        for attempt in range(1, _PLAN_CHUNK_RETRIES + 1):
+            part = _request_plan_single(user_instruction, chunk)
+            if part and "folders" in part:
+                return part
+            logger.warning(f"Plan chunk {idx + 1}/{n_chunks} returned no plan "
+                           f"(attempt {attempt}/{_PLAN_CHUNK_RETRIES})")
+        logger.error(f"Plan chunk {idx + 1}/{n_chunks} failed after {_PLAN_CHUNK_RETRIES} attempts")
+        return None
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    parts: List[Optional[Dict[str, Any]]] = [None] * n_chunks
+    with ThreadPoolExecutor(max_workers=min(n_chunks, _PLAN_MAX_PARALLEL)) as ex:
+        futs = {ex.submit(_plan_one, i, c): i for i, c in enumerate(chunks)}
+        for fut in as_completed(futs):
+            parts[futs[fut]] = fut.result()
+
+    # If any chunk permanently failed, abort the whole plan (return None) rather than silently
+    # skipping its files — all callers treat None as "Plan Failed".
+    if any(p is None for p in parts):
+        logger.error("A plan chunk failed after retries — aborting plan so no files are silently skipped")
+        return None
+
+    # Merge in chunk order (deterministic) by folder name.
+    merged: Dict[str, Any] = {"folders": {}}
+    for part in parts:
+        for name, ids in part["folders"].items():
+            merged["folders"].setdefault(name, []).extend(ids)
+    return merged if merged["folders"] else None
+
+
+def _request_plan_single(
     user_instruction: str,
     files: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     """
     Send user instruction + file metadata to LLM.
     Returns the proposed plan as a dict, or None on failure.
-    
+
     The LLM acts only as a planner - it never executes anything.
     """
     from .settings import settings
-    
+
     if not files:
         logger.warning("No files provided for organization")
         return None
-    
+
     file_summary = build_file_summary(files)
     
     # Detect auto-organize mode vs specific instruction mode

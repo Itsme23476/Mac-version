@@ -86,6 +86,96 @@ class RefineWorker(QThread):
             self.error.emit(str(e))
 
 
+class ApplyMovesWorker(QThread):
+    """Applies a move plan OFF the UI thread so organizing a big folder never freezes the
+    app (the synchronous version read as a 'lag/crash' on large folders). Does the three
+    heavy steps — file moves, batched DB path updates, and empty-folder cleanup — and
+    reports progress. All of this is filesystem/SQLite work with no Qt-widget access, so
+    it's safe on a worker thread.
+
+    `applied` (not `finished`, to avoid shadowing QThread's own finished signal) carries a
+    result dict: {success, errors, log_file, renamed_count, paths_updated, deleted_empty, total}.
+    """
+    progress = Signal(int, int)       # (done, total)
+    applied = Signal(object)          # result dict
+
+    def __init__(self, page, moves_to_apply, moves_for_db=None):
+        super().__init__()
+        self.page = page
+        self.moves = moves_to_apply                 # files actually being moved (filtered)
+        self.moves_for_db = moves_for_db if moves_for_db is not None else moves_to_apply
+
+    def run(self):
+        from app.core.apply import apply_moves
+        from app.core.database import file_index
+        from pathlib import Path
+        result = {"success": False, "errors": [], "log_file": "", "renamed_count": 0,
+                  "paths_updated": 0, "deleted_empty": 0, "total": len(self.moves)}
+        try:
+            move_plan = [{
+                "source_path": m["source_path"],
+                "destination_path": m["destination_path"],
+                "file_name": m["file_name"],
+                "size": m["size"],
+                "category": m["destination_folder"],
+            } for m in self.moves]
+
+            step = max(1, len(move_plan) // 100)
+
+            def _cb(done, total):
+                # Throttle: emit only at ~1% boundaries, but ALWAYS emit the final update so the
+                # bar lands exactly at 100%. Avoids flooding the Qt event loop on big moves.
+                if done != total and done % step != 0:
+                    return
+                try:
+                    self.progress.emit(done, total)
+                except Exception:
+                    pass
+
+            success, errors, log_file, renamed_count = apply_moves(move_plan, progress_cb=_cb)
+            result.update(success=success, errors=errors or [], log_file=log_file,
+                          renamed_count=renamed_count or 0)
+
+            # Batched DB path updates (one transaction) — only for files now at destination.
+            db_updates = []
+            for m in self.moves_for_db:
+                try:
+                    if Path(m["destination_path"]).exists():
+                        db_updates.append((m["file_id"], m["destination_path"]))
+                except Exception:
+                    pass
+            if db_updates:
+                try:
+                    result["paths_updated"] = file_index.update_file_paths_batch(db_updates)
+                except Exception as e:
+                    logger.warning(f"ApplyMovesWorker batch DB update failed: {e}")
+
+            # Empty-folder cleanup (filesystem only — safe off the UI thread).
+            try:
+                source_folders = {Path(m["source_path"]).parent for m in self.moves}
+                # Scoped scan only: clean folders THIS organize emptied (source parents + their
+                # now-empty ancestors, which _delete_folders removes via its upward walk). Dropped
+                # the full-tree _scan_all_empty_folders() — it re-walked the ENTIRE destination on
+                # every apply and also deleted pre-existing empty folders unrelated to this move.
+                empty = list(self.page._collect_empty_folders(source_folders))
+                empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
+                deleted = 0
+                if empty:
+                    deleted = self.page._delete_folders(empty)
+                    parents = {str(Path(p).parent) for p in empty
+                               if len(Path(p).parent.parts) > 2} - set(empty)
+                    if parents:
+                        deleted += self.page._delete_folders(list(parents))
+                result["deleted_empty"] = deleted
+            except Exception as e:
+                logger.warning(f"ApplyMovesWorker empty-folder cleanup failed: {e}")
+        except Exception as e:
+            logger.error(f"ApplyMovesWorker failed: {e}")
+            if not result["errors"]:
+                result["errors"] = [str(e)]
+        self.applied.emit(result)
+
+
 class VoiceRecordWorker(QThread):
     """Background worker for voice recording and transcription."""
     finished = Signal(str)  # transcribed text
@@ -7751,96 +7841,74 @@ Caption: {file_info.get('caption', 'none')}
             )
             return
         
-        move_plan = []
-        for m in filtered_moves:
-            move_plan.append({
-                "source_path": m["source_path"],
-                "destination_path": m["destination_path"],
-                "file_name": m["file_name"],
-                "size": m["size"],
-                "category": m["destination_folder"],
-            })
-        
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(move_plan))
+        self.progress_bar.setRange(0, len(filtered_moves))
+        self.progress_bar.setValue(0)
         self.apply_button.setEnabled(False)
         self.generate_button.setEnabled(False)
         self.status_label.setText("Moving files...")
 
         import time as _time
-        _t0 = _time.time()
+        self._apply_t0 = _time.time()
+        self._apply_watcher_resume = bool(watcher_was_running)
+        self._apply_total = len(filtered_moves)
         try:
             from app.core.supabase_client import track
-            track("organize_started", source="manual_page", file_count=len(move_plan))
+            track("organize_started", source="manual_page", file_count=len(filtered_moves))
         except Exception:
             pass
 
-        success, errors, log_file, renamed_count = apply_moves(move_plan)
+        # Apply OFF the UI thread (moves + batched DB updates + empty-folder cleanup) so a
+        # big folder can't freeze the app. moves_for_db=current_moves so already-at-dest
+        # files (e.g. watcher-moved during review) still get their DB path corrected.
+        self._apply_worker = ApplyMovesWorker(self, filtered_moves, moves_for_db=self.current_moves)
+        self._apply_worker.progress.connect(self._on_apply_progress)
+        self._apply_worker.applied.connect(self._on_manual_apply_finished)
+        self._apply_worker.start()
 
+    def _on_apply_progress(self, done: int, total: int):
         try:
-            from app.core.supabase_client import track
-            track(
-                "organize_completed",
-                source="manual_page",
-                success=bool(success),
-                files_moved=len(move_plan) - len(errors or []),
-                files_failed=len(errors or []),
-                files_renamed=int(renamed_count or 0),
-                duration_ms=int((_time.time() - _t0) * 1000),
-            )
+            self.progress_bar.setValue(done)
+            self.status_label.setText(f"Moving files… {done}/{total}")
         except Exception:
             pass
 
-        # Resume watcher now that moves are complete
-        if watcher_was_running:
-            self.auto_watcher.start(organize_existing=False)
-            logger.info("Auto-watcher resumed after manual organize apply")
+    def _on_manual_apply_finished(self, result: dict):
+        """UI-thread handler after ApplyMovesWorker finishes the manual-page apply."""
+        import time as _time
+        success = result.get("success", False)
+        errors = result.get("errors", []) or []
+        log_file = result.get("log_file", "")
+        renamed_count = result.get("renamed_count", 0)
+        paths_updated = result.get("paths_updated", 0)
+        deleted_empty = result.get("deleted_empty", 0)
+        total = result.get("total", 0)
+
+        try:
+            from app.core.supabase_client import track
+            track("organize_completed", source="manual_page", success=bool(success),
+                  files_moved=total - len(errors), files_failed=len(errors),
+                  files_renamed=int(renamed_count or 0),
+                  duration_ms=int((_time.time() - getattr(self, "_apply_t0", _time.time())) * 1000))
+        except Exception:
+            pass
+
+        if getattr(self, "_apply_watcher_resume", False):
+            try:
+                self.auto_watcher.start(organize_existing=False)
+                logger.info("Auto-watcher resumed after manual organize apply")
+            except Exception:
+                pass
 
         self.progress_bar.setVisible(False)
         self.generate_button.setEnabled(True)
-        
+
         if success:
-            paths_updated = 0
-            for m in self.current_moves:
-                if file_index.update_file_path(m["file_id"], m["destination_path"]):
-                    paths_updated += 1
-            
-            logger.info(f"Updated {paths_updated}/{len(self.current_moves)} file paths in database")
-            
-            # Collect source folders (where files came from) and scan destination too
-            source_folders = {Path(m["source_path"]).parent for m in self.current_moves}
-            empty_from_sources = self._collect_empty_folders(source_folders)
-            empty_from_dest = self._scan_all_empty_folders()
-            # Merge, deduplicate, deepest first
-            all_empty = list({*empty_from_sources, *empty_from_dest})
-            all_empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
-
-            cleanup_msg = ""
-            if all_empty:
-                removed_count = self._delete_folders(all_empty)
-
-                # Second pass: parents that became empty after their children were deleted
-                parent_candidates = {
-                    str(Path(p).parent) for p in all_empty
-                    if len(Path(p).parent.parts) > 2
-                }
-                parent_candidates -= set(all_empty)
-                if parent_candidates:
-                    removed_count += self._delete_folders(list(parent_candidates))
-
-                if removed_count > 0:
-                    cleanup_msg = f"\n\nDeleted {removed_count} empty folder(s)."
-            
-            # Build details list for success dialog
-            details = [
-                f"Organized {len(move_plan)} file(s)",
-                "File paths updated in database"
-            ]
+            details = [f"Organized {total} file(s)", "File paths updated in database"]
             if renamed_count > 0:
                 details.append(f"{renamed_count} file(s) renamed to avoid duplicates")
-            if cleanup_msg:
-                details.append(cleanup_msg.strip())
-            
+            if deleted_empty > 0:
+                details.append(f"Deleted {deleted_empty} empty folder(s).")
             ModernInfoDialog.show_info(
                 self,
                 title="Organization Complete",
@@ -7853,20 +7921,9 @@ Caption: {file_info.get('caption', 'none')}
             self.clear_plan()
             self._update_file_count()
         else:
-            paths_updated = 0
-            for m in self.current_moves:
-                dest_path = Path(m["destination_path"])
-                if dest_path.exists():
-                    if file_index.update_file_path(m["file_id"], m["destination_path"]):
-                        paths_updated += 1
-            
-            logger.info(f"Partial success: Updated {paths_updated} file paths in database")
-            
-            # Build error details (first 5 errors)
             error_details = errors[:5]
             if len(errors) > 5:
                 error_details.append(f"... and {len(errors) - 5} more errors")
-            
             ModernInfoDialog.show_warning(
                 self,
                 title="Partial Failure",
@@ -8158,65 +8215,42 @@ Caption: {file_info.get('caption', 'none')}
             self.voice_apply_error.emit("Those files were already moved or are excluded.")
             return
 
-        move_plan = [{
-            "source_path": m["source_path"],
-            "destination_path": m["destination_path"],
-            "file_name": m["file_name"],
-            "size": m["size"],
-            "category": m["destination_folder"],
-        } for m in filtered]
-
         try:
             from app.core.supabase_client import track
-            track("organize_started", source="voice", file_count=len(move_plan))
+            track("organize_started", source="voice", file_count=len(filtered))
         except Exception:
             pass
 
-        # ponytail: apply_moves runs synchronously here, exactly like apply_organization.
-        # Fine for normal dictation-sized batches; move to a QThread if huge folders stutter.
-        try:
-            success, errors, _log_file, renamed_count = apply_moves(move_plan)
-        except Exception as e:
-            logger.error(f"voice_apply apply_moves failed: {e}")
-            _resume_watcher()
-            self.voice_apply_error.emit("Couldn't move the files.")
-            return
+        # Apply OFF the UI thread (same ApplyMovesWorker as the manual flow) so a big
+        # folder can't freeze/‘crash’ the app. Watcher resumes in the finished handler.
+        self._voice_apply_resume = bool(watcher_was_running)
+        self._voice_apply_worker = ApplyMovesWorker(self, filtered, moves_for_db=self.current_moves)
+        self._voice_apply_worker.applied.connect(self._on_voice_apply_finished)
+        self._voice_apply_worker.start()
 
-        deleted_empty = 0
-        if success:
-            for m in self.current_moves:
-                try:
-                    file_index.update_file_path(m["file_id"], m["destination_path"])
-                except Exception:
-                    pass
-            # Clean up folders left empty by the move — same as the manual Organize flow:
-            # folders the files came out of, plus any other empty folders in the destination.
-            try:
-                source_folders = {Path(m["source_path"]).parent for m in filtered}
-                all_empty = list({*self._collect_empty_folders(source_folders),
-                                  *self._scan_all_empty_folders()})
-                all_empty.sort(key=lambda p: len(Path(p).parts), reverse=True)
-                if all_empty:
-                    deleted_empty = self._delete_folders(all_empty)
-                    parents = {str(Path(p).parent) for p in all_empty
-                               if len(Path(p).parent.parts) > 2} - set(all_empty)
-                    if parents:
-                        deleted_empty += self._delete_folders(list(parents))
-            except Exception as e:
-                logger.warning(f"voice_apply empty-folder cleanup failed: {e}")
+    def _on_voice_apply_finished(self, result: dict):
+        """UI-thread handler after ApplyMovesWorker finishes a voice-triggered apply."""
+        success = result.get("success", False)
+        errors = result.get("errors", []) or []
+        renamed_count = result.get("renamed_count", 0)
+        deleted_empty = result.get("deleted_empty", 0)
+        total = result.get("total", 0)
 
         try:
             from app.core.supabase_client import track
             track("organize_completed", source="voice", success=bool(success),
-                  files_moved=len(move_plan) - len(errors or []),
-                  files_failed=len(errors or []),
+                  files_moved=total - len(errors), files_failed=len(errors),
                   files_renamed=int(renamed_count or 0))
         except Exception:
             pass
 
-        _resume_watcher()
+        if getattr(self, "_voice_apply_resume", False):
+            try:
+                self.auto_watcher.start(organize_existing=False)
+            except Exception:
+                pass
 
-        moved = len(move_plan) - len(errors or [])
+        moved = total - len(errors)
         if success:
             self.current_plan = None
             self.current_moves = []
@@ -8226,7 +8260,7 @@ Caption: {file_info.get('caption', 'none')}
             msg += " Revert anytime in History."
             self.voice_apply_done.emit(msg)
         else:
-            self.voice_apply_error.emit(f"Moved {moved}, but {len(errors or [])} couldn't be moved.")
+            self.voice_apply_error.emit(f"Moved {moved}, but {len(errors)} couldn't be moved.")
 
     def _show_history_dialog(self):
         """Show the organization history dialog."""
@@ -8299,7 +8333,7 @@ Caption: {file_info.get('caption', 'none')}
                 real_contents = [p for p in folder.iterdir() if p.name not in _META]
                 if not real_contents:
                     empty_folders.append(str(folder))
-                    logger.info(f"Found empty source folder: {folder}")
+                    logger.debug(f"Found empty source folder: {folder}")
 
                     # Recursively check parent
                     check_folder_and_parents(folder.parent, min_depth)
@@ -8354,7 +8388,7 @@ Caption: {file_info.get('caption', 'none')}
                     ]
                     if not real_contents:
                         empty_folders.append(str(folder))
-                        logger.info(f"Found empty folder: {folder}")
+                        logger.debug(f"Found empty folder: {folder}")
                 except OSError as e:
                     logger.debug(f"Could not check folder {folder}: {e}")
                 except Exception as e:
@@ -8424,7 +8458,7 @@ Caption: {file_info.get('caption', 'none')}
                 if real_contents:
                     return False
                 folder.rmdir()
-                logger.info(f"Deleted empty folder: {folder}")
+                logger.debug(f"Deleted empty folder: {folder}")
                 return True
             except OSError as e:
                 logger.warning(f"Could not delete folder {folder}: {e}")

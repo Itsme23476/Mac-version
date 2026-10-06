@@ -166,7 +166,8 @@ class AutoWatcherWorker(QThread):
                 except Exception as e:
                     return (fp, {'error': str(e)})
             
-            with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as executor:
+            from app.core.search import effective_index_workers
+            with ThreadPoolExecutor(max_workers=effective_index_workers(MAX_PARALLEL)) as executor:
                 futures = {executor.submit(index_one_file, fp): fp for fp in files_to_index}
                 
                 for future in as_completed(futures):

@@ -15,7 +15,6 @@ from .vision import analyze_image, analyze_text, gpt_vision_fallback, describe_i
 from .settings import settings
 from .text_extract import extract_file_text, get_supported_text_formats
 import os
-from .embeddings import embed_text
 import hashlib
 from datetime import datetime
 
@@ -23,6 +22,24 @@ logger = logging.getLogger(__name__)
 
 # Parallel processing settings
 MAX_CONCURRENT_AI_REQUESTS = 50  # Tier 2: 5,000 RPM allows 50-80 safely
+
+
+def effective_index_workers(cap: int) -> int:
+    """Clamp parallel indexing workers to what the machine's RAM can safely decode at once.
+
+    Each worker can hold a full-resolution image in memory while indexing, so running the full
+    `cap` concurrently on a low-RAM machine (e.g. 8 GB) spikes RAM and can crash — the reported
+    "lags/crashes on big folders" symptom. Dependency-free RAM probe (no psutil); on platforms
+    without sysconf (Windows) it falls back to a safe default.
+    """
+    try:
+        gb = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        gb = 0  # unknown (e.g. Windows) -> conservative default below
+    if not gb:
+        return max(4, min(cap, 8))
+    # ponytail: ~1 worker per GB total RAM, floor 4, ceil = cap (8GB->8, 16GB->16, 32GB+->cap).
+    return max(4, min(cap, int(gb)))
 
 # Media file extensions that count against the index limit
 MEDIA_EXTENSIONS = {
@@ -344,25 +361,6 @@ class SearchService:
             
             # Add to index
             if self.index.add_file(result):
-                # Create embedding
-                try:
-                    rec = self.index.get_file_by_path(str(file_path))
-                    if rec:
-                        text_parts = [rec.get('file_name') or '']
-                        if rec.get('label'):
-                            text_parts.append(rec['label'])
-                        if rec.get('tags'):
-                            text_parts.append(' '.join(rec['tags']))
-                        if rec.get('caption'):
-                            text_parts.append(rec['caption'])
-                        if rec.get('ocr_text'):
-                            text_parts.append(rec['ocr_text'])
-                        text_blob = ' '.join([t for t in text_parts if t])[:5000]
-                        if text_blob and rec.get('id'):
-                            self.index.store_embedding(rec['id'], text_blob)
-                except Exception as emb_err:
-                    logger.warning(f"Embedding error for {file_path}: {emb_err}")
-                
                 # Update index usage for media files (images, videos, audio)
                 if file_is_media:
                     self._update_index_usage(1)
@@ -441,9 +439,10 @@ class SearchService:
             completed = 0
             cancelled = False
             
-            logger.info(f"Processing {total} files with {MAX_CONCURRENT_AI_REQUESTS} concurrent workers")
-            
-            with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_AI_REQUESTS) as executor:
+            workers = effective_index_workers(MAX_CONCURRENT_AI_REQUESTS)
+            logger.info(f"Processing {total} files with {workers} concurrent workers (cap {MAX_CONCURRENT_AI_REQUESTS})")
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
                 # Submit all tasks with user_instructions
                 future_to_idx = {
                     executor.submit(self._process_single_file, file_data, directory_path, False, user_instructions): idx
@@ -501,27 +500,7 @@ class SearchService:
                             indexed_count += 1
                             if result.get('has_ocr', False):
                                 ocr_count += 1
-                            
-                            # Create embedding (quick operation)
-                            try:
-                                rec = self.index.get_file_by_path(str(file_path))
-                                if rec:
-                                    text_parts = [rec.get('file_name') or '']
-                                    if rec.get('label'):
-                                        text_parts.append(rec['label'])
-                                    if rec.get('tags'):
-                                        text_parts.append(' '.join(rec['tags']))
-                                    if rec.get('caption'):
-                                        text_parts.append(rec['caption'])
-                                    if rec.get('ocr_text'):
-                                        text_parts.append(rec['ocr_text'])
-                                    text_blob = ' '.join([t for t in text_parts if t])[:5000]
-                                    vec = embed_text(text_blob)
-                                    if vec:
-                                        self.index.upsert_embedding(rec['id'], 'ollama:nomic-embed-text', vec)
-                            except Exception:
-                                pass
-                        
+
                         completed += 1
                         
                         # Progress callback
@@ -615,42 +594,13 @@ class SearchService:
                 fetch_limit = limit * 3 if (type_filter or date_start or extensions) else limit
             results = self.index.search_files_advanced(fts_terms, filters, fetch_limit)
 
-            # Semantic search (local) or GPT rerank - skip for date-only searches
+            # Optional GPT rerank (embedding-based semantic search removed) — skip for date-only.
+            # When GPT rerank is off, results stay pure-keyword (FTS), which is the behaviour the
+            # app already had in practice since embeddings were never populated.
             sem_results: List[Dict[str, Any]] = []
-            if not is_date_only:
+            if not is_date_only and settings.use_openai_search_rerank and settings.openai_api_key:
                 try:
-                    if settings.use_openai_search_rerank and settings.openai_api_key:
-                        sem_results = self._gpt_rerank_results(query, results[: min(20, len(results))])
-                    else:
-                        # Build a semantic query that includes name/label/tags/caption terms
-                        qtext = query
-                        if filters.get('label'):
-                            qtext += f" {filters['label']}"
-                        if filters.get('tags'):
-                            qtext += " " + " ".join(filters['tags'])
-                        qvec = embed_text(qtext)
-                        if qvec:
-                            # simple in-Python cosine over all embeddings
-                            import math
-                            embs = self.index.get_all_embeddings()
-                            scored: List[tuple[float, int]] = []
-                            qnorm = math.sqrt(sum(x*x for x in qvec)) or 1.0
-                            for e in embs:
-                                vec = e.get('vector') or []
-                                if not vec or len(vec) != len(qvec):
-                                    continue
-                                dot = sum(a*b for a,b in zip(qvec, vec))
-                                vnorm = math.sqrt(sum(x*x for x in vec)) or 1.0
-                                cos = dot/(qnorm*vnorm)
-                                scored.append((cos, e['file_id']))
-                            scored.sort(reverse=True)
-                            top_ids = [fid for _, fid in scored[:limit]]
-                            sem_results = self.index.get_files_by_ids(top_ids)
-                            # attach semantic score as rank
-                            for (cos, fid) in scored[:limit]:
-                                for r in sem_results:
-                                    if r['id'] == fid:
-                                        r['rank'] = cos*10
+                    sem_results = self._gpt_rerank_results(query, results[: min(20, len(results))])
                 except Exception:
                     pass
 

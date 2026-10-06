@@ -116,7 +116,8 @@ class ThemeManager(QObject):
         else:
             # Running from source
             self._ui_dir = Path(__file__).parent
-    
+        self._qss_cache = {}  # theme -> combined stylesheet string (read from disk once)
+
     @property
     def current_theme(self) -> str:
         """Get current theme from settings."""
@@ -142,58 +143,67 @@ class ThemeManager(QObject):
         if not app:
             return
         
-        # Load appropriate stylesheet
-        if theme == 'dark':
-            style_path = self._ui_dir / 'styles.qss'
-            self._apply_dark_palette(app)
-        else:
-            style_path = self._ui_dir / 'styles_light.qss'
-            self._apply_light_palette(app)
-        
-        # Load and apply stylesheet
+        # Batch every repaint into one. The global stylesheet swap AND each theme_changed
+        # listener's restyle run with updates disabled, so the window repaints ONCE at the end
+        # instead of flickering through every widget's restyle — that cascade of intermediate
+        # repaints is what made the toggle feel like a freeze. (Qt styling must run on the UI
+        # thread, so we can't move it off-thread; we only stop it from painting N times.)
+        tops = [w for w in app.topLevelWidgets() if w.isVisible()]
+        for w in tops:
+            w.setUpdatesEnabled(False)
+        try:
+            if theme == 'dark':
+                self._apply_dark_palette(app)
+            else:
+                self._apply_light_palette(app)
+
+            # The .qss file + tooltip block are read from disk and combined once per theme and
+            # cached, instead of re-reading ~26 KB off disk on every toggle.
+            app.setStyleSheet(self._stylesheet_for(theme))
+
+            # Apply dark/light title bar on Windows
+            self._apply_windows_titlebar(theme)
+
+            # Save setting
+            if settings.theme != theme:
+                settings.set_theme(theme)
+
+            # Emit signal for any listeners (they restyle themselves here, still inside the
+            # updates-disabled window, so their repaints are batched in too).
+            self.theme_changed.emit(theme)
+        finally:
+            for w in tops:
+                w.setUpdatesEnabled(True)
+                w.update()
+
+    _TOOLTIP_QSS = {
+        'dark': (
+            "QToolTip { background-color: #1E1E2E; color: #E8E8F0; "
+            "border: 1px solid #7C4DFF; border-radius: 6px; padding: 8px 12px; font-size: 12px; }"
+        ),
+        'light': (
+            "QToolTip { background-color: #FFFFFF; color: #1A1A1A; "
+            "border: 1px solid #7C4DFF; border-radius: 6px; padding: 8px 12px; font-size: 12px; }"
+        ),
+    }
+
+    def _stylesheet_for(self, theme: str) -> str:
+        """Combined .qss + tooltip stylesheet for a theme — read from disk once, then cached."""
+        cached = self._qss_cache.get(theme)
+        if cached is not None:
+            return cached
+        style_path = self._ui_dir / ('styles.qss' if theme == 'dark' else 'styles_light.qss')
+        base_style = ""
         if style_path.exists():
-            with open(style_path, 'r', encoding='utf-8') as f:
-                base_style = f.read()
-        else:
-            base_style = ""
-        
-        # Add explicit tooltip styling to ensure it's applied globally
-        if theme == 'dark':
-            tooltip_style = """
-                QToolTip {
-                    background-color: #1E1E2E;
-                    color: #E8E8F0;
-                    border: 1px solid #7C4DFF;
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    font-size: 12px;
-                }
-            """
-        else:
-            tooltip_style = """
-                QToolTip {
-                    background-color: #FFFFFF;
-                    color: #1A1A1A;
-                    border: 1px solid #7C4DFF;
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    font-size: 12px;
-                }
-            """
-        
-        # Combine and apply
-        app.setStyleSheet(base_style + tooltip_style)
-        
-        # Apply dark/light title bar on Windows
-        self._apply_windows_titlebar(theme)
-        
-        # Save setting
-        if settings.theme != theme:
-            settings.set_theme(theme)
-        
-        # Emit signal for any listeners
-        self.theme_changed.emit(theme)
-    
+            try:
+                with open(style_path, 'r', encoding='utf-8') as f:
+                    base_style = f.read()
+            except Exception:
+                base_style = ""
+        full = base_style + self._TOOLTIP_QSS.get(theme, "")
+        self._qss_cache[theme] = full
+        return full
+
     def _apply_windows_titlebar(self, theme: str):
         """Set Windows title bar to dark or light using DwmSetWindowAttribute.
         

@@ -310,6 +310,13 @@ def _file_to_b64(file_path: Path) -> Optional[str]:
         else:
             # load via PIL to optionally downscale
             with Image.open(file_path) as img:
+                # draft() asks the JPEG decoder to load at a reduced scale, so the full-resolution
+                # bitmap is never materialized — this is what actually caps PEAK decode RAM (the
+                # thumbnail() below only shrinks AFTER a full decode). No-op for non-JPEG; defensive.
+                try:
+                    img.draft("RGB", (1024, 1024))
+                except Exception:
+                    pass
                 img = img.convert("RGB")
                 img.thumbnail((1024, 1024))
                 return _pil_image_to_b64(img)

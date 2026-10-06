@@ -7,7 +7,7 @@ import sqlite3
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from .settings import settings
 
@@ -57,7 +57,13 @@ class FileIndex:
         """Initialize database tables."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            
+            # Concurrency/throughput: WAL lets readers (search) run while a writer (bulk path
+            # updates / indexing) commits, and it persists on the DB file, so this one call is
+            # enough forever. synchronous=NORMAL is per-connection (safe under WAL) — set it here
+            # and on the hot bulk-write path (update_file_paths_batch).
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+
             # Create files table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS files (
@@ -276,7 +282,66 @@ class FileIndex:
         except Exception as e:
             logger.error(f"Error updating file path for {file_id}: {e}")
             return False
-    
+
+    def update_file_paths_batch(self, updates: List[Tuple[int, str]]) -> int:
+        """Update many file paths in a SINGLE connection/transaction (one commit).
+
+        Same per-row logic as update_file_path (stale-path cleanup + main-table update +
+        FTS delete/re-insert), but opening one connection for the whole batch instead of
+        one per file — the per-file version in a loop was a major source of lag when
+        organizing big folders. Returns the number of rows actually updated.
+
+        `updates` is a list of (file_id, new_path). Safe to call off the UI thread.
+        """
+        if not updates:
+            return 0
+        updated = 0
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA synchronous=NORMAL")  # faster bulk commit under WAL
+                for file_id, new_path in updates:
+                    try:
+                        # Remove any stale row occupying the destination path (avoids the
+                        # UNIQUE(file_path) constraint when a file lands where another used to be).
+                        cursor.execute(
+                            "DELETE FROM files WHERE file_path = ? AND id != ?",
+                            (new_path, file_id),
+                        )
+                        cursor.execute(
+                            "UPDATE files SET file_path = ? WHERE id = ?",
+                            (new_path, file_id),
+                        )
+                        if cursor.rowcount > 0:
+                            updated += 1
+                        # External-content FTS5: delete the old entry and re-insert from main.
+                        try:
+                            cursor.execute("DELETE FROM files_fts WHERE rowid = ?", (file_id,))
+                            cursor.execute(
+                                """
+                                INSERT INTO files_fts(rowid, file_name, file_path, category, ocr_text, caption, tags)
+                                SELECT id, file_name, file_path, category, ocr_text, caption, tags
+                                FROM files WHERE id = ?
+                                """,
+                                (file_id,),
+                            )
+                        except Exception as fts_err:
+                            es = str(fts_err).lower()
+                            if "malformed" in es or "corrupt" in es:
+                                logger.warning("FTS index corrupted during batch update; will auto-rebuild")
+                                conn.commit()
+                                self._auto_rebuild_fts()
+                            # else: non-fatal — keep going, the main table is already correct
+                    except Exception as row_err:
+                        logger.warning(f"Batch path update failed for id {file_id}: {row_err}")
+                        continue
+                conn.commit()
+            logger.info(f"Batch-updated {updated}/{len(updates)} file paths in the database")
+            return updated
+        except Exception as e:
+            logger.error(f"Error in update_file_paths_batch: {e}")
+            return updated
+
     def update_file_path_by_old_path(self, old_path: str, new_path: str) -> bool:
         """
         Update a file's path by looking it up using its current (old) path.
