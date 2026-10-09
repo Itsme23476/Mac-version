@@ -899,24 +899,26 @@ class AuthDialog(QDialog):
         card_layout.setContentsMargins(24, 24, 24, 24)
         card_layout.setSpacing(16)
         
-        # Plan badge
-        plan_badge = QLabel("CHOOSE YOUR PLAN")
-        plan_badge.setObjectName("planBadge")
-        plan_badge.setAlignment(Qt.AlignCenter)
-        card_layout.addWidget(plan_badge)
+        # Plan badge (text set per-state in _show_subscribe_page / _open_trial_blocked —
+        # no hardcoded price, so it's safe while prices are A/B-tested on the web).
+        self.plan_badge = QLabel("10-DAY FREE TRIAL")
+        self.plan_badge.setObjectName("planBadge")
+        self.plan_badge.setAlignment(Qt.AlignCenter)
+        card_layout.addWidget(self.plan_badge)
 
-        # Price
+        # Headline — lead with the free trial, not a price (the real price is shown on
+        # the web pricing page, where the A/B bucket is applied).
         price_layout = QHBoxLayout()
         price_layout.setAlignment(Qt.AlignCenter)
         price_layout.setSpacing(4)
 
-        price_amount = QLabel("from $15")
-        price_amount.setObjectName("priceAmount")
-        price_period = QLabel("/ mo")
-        price_period.setObjectName("pricePeriod")
-        
-        price_layout.addWidget(price_amount)
-        price_layout.addWidget(price_period)
+        self.price_amount = QLabel("Free")
+        self.price_amount.setObjectName("priceAmount")
+        self.price_period = QLabel("for 10 days")
+        self.price_period.setObjectName("pricePeriod")
+
+        price_layout.addWidget(self.price_amount)
+        price_layout.addWidget(self.price_period)
         card_layout.addLayout(price_layout)
         
         # Features - just 2 to fit the space
@@ -943,7 +945,7 @@ class AuthDialog(QDialog):
         layout.addSpacing(16)
         
         # Subscribe button
-        self.subscribe_button = QPushButton("View plans & subscribe")
+        self.subscribe_button = QPushButton("Start free trial")
         self.subscribe_button.setObjectName("primaryButton")
         self.subscribe_button.setMinimumHeight(52)
         self.subscribe_button.setCursor(Qt.PointingHandCursor)
@@ -1216,12 +1218,33 @@ class AuthDialog(QDialog):
             self.signup_error.setText(error)
     
     def _show_subscribe_page(self):
-        """Show the subscription page."""
+        """Show the subscription page, with copy tailored to trial eligibility.
+
+        A user who has NEVER had a subscription can start the 10-day free trial;
+        anyone with a prior subscription (lapsed) picks a paid plan instead. Neither
+        state shows a hardcoded price, so both are safe while prices are A/B-tested
+        on the web. (The card-fingerprint 'trial already used' case is handled
+        after checkout in _open_trial_blocked.)"""
         email = supabase_auth.user_email or settings.auth_user_email
         short_email = email.split('@')[0] if email else "there"
         self.welcome_label.setText(f"Hey {short_email}! 👋")
         self.title_label.setText("Unlock Filect")
-        self.subtitle_label.setText("Choose a plan to access all features")
+
+        # _subscription is cached from the last check_subscription; None => this account
+        # has never had a subscription row => eligible for the 10-day free trial.
+        trial_eligible = getattr(supabase_auth, "_subscription", None) is None
+        if trial_eligible:
+            self.subtitle_label.setText("All features · cancel anytime")
+            self.plan_badge.setText("10-DAY FREE TRIAL")
+            self.price_amount.setText("Free")
+            self.price_period.setText("for 10 days")
+            self.subscribe_button.setText("Start free trial")
+        else:
+            self.subtitle_label.setText("Choose a plan to continue · cancel anytime")
+            self.plan_badge.setText("CHOOSE YOUR PLAN")
+            self.price_amount.setText("Full")
+            self.price_period.setText("access")
+            self.subscribe_button.setText("View plans")
         self.stack.setCurrentIndex(2)
     
     def _open_checkout(self):
@@ -1543,6 +1566,13 @@ class AuthDialog(QDialog):
                 self.title_label.setText("Free trial already used")
             if hasattr(self, 'subtitle_label'):
                 self.subtitle_label.setText("This card was already used for a previous trial.")
+            # Drop the free-trial framing — this user isn't getting a new trial.
+            if hasattr(self, 'plan_badge'):
+                self.plan_badge.setText("CHOOSE YOUR PLAN")
+            if hasattr(self, 'price_amount'):
+                self.price_amount.setText("Full")
+            if hasattr(self, 'price_period'):
+                self.price_period.setText("access")
             self.subscribe_button.setText("Subscribe to unlock")
             self.sub_status.setText(
                 "A new free trial isn't available on this card. To use Filect, subscribe "

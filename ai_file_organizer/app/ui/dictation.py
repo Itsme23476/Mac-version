@@ -483,6 +483,15 @@ class VoiceDictationController(QObject):
             self._indicator.hide()
             return
 
+        # Format spoken numbers/currency/percent into written form ("ten thousand
+        # dollars" -> "$10,000", "fifty percent" -> "50%"). Lossless on everything else;
+        # runs for both raw and AI-polished dictation, so the pasted AND saved text match.
+        try:
+            from app.core.dictation_format import format_spoken
+            text = format_spoken(text)
+        except Exception as e:
+            logger.warning(f"number formatting skipped: {e}")
+
         def _do_insert():
             # Cut the animation the INSTANT we paste (hide is instant — no window fade),
             # then paste. Nothing heavy ran on the UI thread while the dots were showing,

@@ -113,8 +113,10 @@ class OnboardingAnimation(QWidget):
         elif self._step == 5:
             self._draw_voice(painter)
         elif self._step == 6:
-            self._draw_settings(painter)
+            self._draw_voice(painter)   # AI Cleanup step — voice-themed, reuse the voice anim
         elif self._step == 7:
+            self._draw_settings(painter)
+        elif self._step == 8:
             self._draw_ready(painter)
 
         painter.end()
@@ -799,6 +801,14 @@ class OnboardingOverlay(QDialog):
                 "highlight": "voice_shortcuts_card"
             },
             {
+                "title": "✨ AI Cleanup (optional)",
+                "description": "• Off by default — your dictation stays instant\n• Turn it on to auto-format dates & emails and strip filler\n• Adds ~1s per dictation — flip it on here anytime",
+                "nav_index": 4,
+                "button_text": "Next",
+                "show_try_it": False,
+                "highlight": "voice_cleanup_card"
+            },
+            {
                 "title": "⚙️ Settings",
                 "description": "• Protect files from being moved\n• Add exclusion patterns (.json, .py)\n• Configure app behavior",
                 "nav_index": 3,
@@ -1062,7 +1072,7 @@ class OnboardingOverlay(QDialog):
     # Stable slugs so analytics aren't broken by future title rewordings.
     _STEP_SLUGS = [
         "welcome", "smart_search", "organize_files",
-        "auto_organize", "index_files", "voice", "settings", "ready",
+        "auto_organize", "index_files", "voice", "ai_cleanup", "settings", "ready",
     ]
 
     def _update_step(self):

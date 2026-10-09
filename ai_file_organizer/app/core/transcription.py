@@ -549,12 +549,28 @@ class StreamingTranscriber(QThread):
         except ImportError as e:
             logger.warning(f"[STREAM] websockets missing ({e}); batch fallback")
             websockets = None
+        # wss:// uses Python's stdlib ssl, which in a PyInstaller/frozen bundle has NO
+        # default CA bundle — so without an explicit one the TLS handshake fails with
+        # CERTIFICATE_VERIFY_FAILED and streaming silently falls back to batch on EVERY
+        # dictation (the batch path only works because requests carries its own certifi).
+        # Hand the WebSocket that same certifi bundle so streaming's TLS verifies too.
+        ssl_ctx = None
+        try:
+            import ssl as _ssl, certifi
+            ssl_ctx = _ssl.create_default_context(cafile=certifi.where())
+        except Exception as e:
+            logger.warning(f"[STREAM] certifi ssl context unavailable ({e}); "
+                           f"falling back to stdlib default (may fail in a frozen build)")
         if token and websockets is not None:
+            connect_kwargs = {
+                "additional_headers": {"Authorization": f"Bearer {token}"},
+                "max_size": None,
+            }
+            if ssl_ctx is not None:
+                connect_kwargs["ssl"] = ssl_ctx
             try:
                 ws = await asyncio.wait_for(
-                    websockets.connect(self._build_url(),
-                                       additional_headers={"Authorization": f"Bearer {token}"},
-                                       max_size=None),
+                    websockets.connect(self._build_url(), **connect_kwargs),
                     timeout=8)
                 logger.info(f"[STREAM] connected in {asyncio.get_event_loop().time()-t_conn0:.2f}s "
                             f"({len(self._outbox)} chunks buffered while connecting)")

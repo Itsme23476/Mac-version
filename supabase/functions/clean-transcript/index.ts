@@ -22,7 +22,7 @@ const supabase = createClient(
 );
 
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-const MODEL = "gpt-4o-mini";
+const MODEL = "gpt-5-nano";   // cheaper than gpt-4o-mini for text too ($0.05/$0.40 vs $0.15/$0.60 per 1M)
 
 // Two polish levels (the "none" level never reaches the server — the client skips the
 // call). LIGHT is conservative; POLISHED additionally smooths phrasing.
@@ -39,7 +39,24 @@ const POLISHED_PROMPT =
   "rephrasing where needed. Keep the original meaning and ALL the information — do NOT " +
   "add new ideas, do NOT drop any point, and do NOT make it more formal than the " +
   "speaker. Return ONLY the polished text — no preamble, quotes or explanation.";
-const PROMPTS: Record<string, string> = { light: LIGHT_PROMPT, polished: POLISHED_PROMPT };
+// Spoken-number/symbol formatting (inverse text normalization), layered on top of either
+// level — Grok returns everything spelled out, so this is the "type it the way a human
+// would" pass, like Whispr Flow. Applied conservatively so normal prose is never mangled.
+const FORMAT_INSTRUCTION =
+  " Also convert spoken numbers and symbols to how they'd be written, but ONLY when the " +
+  "intent is unambiguous (otherwise leave the words as spoken): numbers to digits with " +
+  "thousands separators (ten thousand -> 10,000), currency (twenty five dollars and ninety " +
+  "nine cents -> $25.99), percentages ALWAYS with the % symbol, including after a decimal " +
+  "(fifty percent -> 50%, ninety nine point nine percent -> 99.9%), dates and times (March " +
+  "fifteenth -> March 15; three thirty PM -> 3:30 PM), phone numbers, email addresses and " +
+  "URLs (support at filect dot io -> support@filect.io), and common math/symbols when " +
+  "clearly intended (five plus three equals eight -> 5 + 3 = 8; thirty degrees -> 30°). " +
+  "Never change the meaning or add information.";
+
+const PROMPTS: Record<string, string> = {
+  light: LIGHT_PROMPT + FORMAT_INSTRUCTION,
+  polished: POLISHED_PROMPT + FORMAT_INSTRUCTION,
+};
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -102,7 +119,11 @@ serve(async (req) => {
       headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: MODEL,
-        temperature: 0.2,
+        // gpt-5-nano is a reasoning model: use max_completion_tokens (reasoning tokens
+        // count toward it, so leave headroom), reasoning_effort "minimal" to stay fast,
+        // and NO temperature (nano only accepts the default). Plain-text output.
+        max_completion_tokens: 4000,
+        reasoning_effort: "minimal",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: rawText },
