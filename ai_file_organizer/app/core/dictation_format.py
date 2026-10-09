@@ -63,6 +63,26 @@ def _is_multiword(phrase: str) -> bool:
     return bool(re.search(r"[\s-]", phrase.strip()))
 
 
+def _num_value(phrase: str):
+    """Int value if `phrase` is a WELL-FORMED cardinal; None if it's an ambiguous run that
+    must NOT be summed — a spoken digit sequence ("five five five one two three four", a
+    phone number / code) or a year said in groups ("nineteen eighty four"). Summing those
+    was corrupting dictations ("five five five..." -> 25), so we leave them as words."""
+    words = [w for w in re.split(r"[\s-]+", phrase.lower()) if w and w != "and"]
+    if not words:
+        return None
+    if len(words) == 1:                        # a single number word
+        return _parse_cardinal(words[0])
+    if any(w in _SCALES for w in words):       # has hundred/thousand/... -> structured cardinal
+        return _parse_cardinal(phrase)
+    if words[0] in _TENS and len(words) == 2 and words[1] in _ONES:  # "twenty five"
+        return _parse_cardinal(phrase)
+    return None                                # digit sequence / ambiguous -> leave as words
+
+
+_ONEW = r"(?:%s)" % "|".join(sorted(_ONES, key=len, reverse=True))
+
+
 def format_spoken(text: str) -> str:
     """Format spelled-out numbers/currency/percent in a dictation transcript.
     Returns text unchanged on any internal error (formatting must never eat a dictation)."""
@@ -70,24 +90,37 @@ def format_spoken(text: str) -> str:
         return text
     try:
         s = text
+        # 0) Decimals: "<n> point <d> <d> ..." -> "<n>.<dd>"  (three point five -> 3.5)
+        def _dec(m):
+            whole = _num_value(m.group(1))
+            if whole is None:
+                return m.group(0)
+            digits = "".join(str(_ONES[w]) for w in re.split(r"[\s-]+", m.group(2).lower()) if w in _ONES)
+            return f"{whole:,}.{digits}" if digits else m.group(0)
+        s = re.sub(r"\b(%s)\s+point\s+((?:%s)(?:[\s-]+(?:%s))*)" % (_SEQ, _ONEW, _ONEW),
+                   _dec, s, flags=re.IGNORECASE)
         # 1) Currency with cents: "<n> dollars and <m> cents" -> "$n.mm"
-        s = re.sub(
-            r"\b(%s)\s+dollars\s+and\s+(%s)\s+cents\b" % (_SEQ, _SEQ),
-            lambda m: "$%s.%02d" % (f"{_parse_cardinal(m.group(1)):,}", _parse_cardinal(m.group(2))),
-            s, flags=re.IGNORECASE)
+        def _cc(m):
+            d, c = _num_value(m.group(1)), _num_value(m.group(2))
+            return "$%s.%02d" % (f"{d:,}", c) if (d is not None and c is not None) else m.group(0)
+        s = re.sub(r"\b(%s)\s+dollars\s+and\s+(%s)\s+cents\b" % (_SEQ, _SEQ), _cc, s, flags=re.IGNORECASE)
         # 2) Whole-dollar: "<n> dollars" -> "$n"
         s = re.sub(r"\b(%s)\s+dollars\b" % _SEQ,
-                   lambda m: "$%s" % f"{_parse_cardinal(m.group(1)):,}",
+                   lambda m: ("$%s" % f"{_num_value(m.group(1)):,}") if _num_value(m.group(1)) is not None else m.group(0),
                    s, flags=re.IGNORECASE)
         # 3) Percent: "<n> percent" -> "n%"
         s = re.sub(r"\b(%s)\s+percent\b" % _SEQ,
-                   lambda m: "%s%%" % f"{_parse_cardinal(m.group(1)):,}",
+                   lambda m: ("%s%%" % f"{_num_value(m.group(1)):,}") if _num_value(m.group(1)) is not None else m.group(0),
                    s, flags=re.IGNORECASE)
-        # 4) Bare numbers — only MULTI-word spans (real quantities), so lone "one"/"two"
-        #    in prose are left untouched.
+        # 4) Bare numbers — only MULTI-word, WELL-FORMED cardinals, so lone "one"/"two" in
+        #    prose AND digit sequences ("five five five") are left untouched.
         s = re.sub(r"\b(%s)\b" % _SEQ,
-                   lambda m: f"{_parse_cardinal(m.group(1)):,}" if _is_multiword(m.group(1)) else m.group(0),
+                   lambda m: f"{_num_value(m.group(1)):,}" if (_is_multiword(m.group(1)) and _num_value(m.group(1)) is not None) else m.group(0),
                    s, flags=re.IGNORECASE)
+        # 5) Catch DIGIT-form currency/percent an upstream LLM cleanup may have left
+        #    half-done ("10,000 dollars" -> "$10,000", "50 percent" -> "50%").
+        s = re.sub(r"\$?(\d[\d,]*(?:\.\d+)?)\s+dollars\b", r"$\1", s, flags=re.IGNORECASE)
+        s = re.sub(r"(\d[\d,]*(?:\.\d+)?)\s+percent\b", r"\1%", s, flags=re.IGNORECASE)
         return s
     except Exception:
         return text

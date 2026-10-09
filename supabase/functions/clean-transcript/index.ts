@@ -45,8 +45,9 @@ const POLISHED_PROMPT =
 const FORMAT_INSTRUCTION =
   " Also convert spoken numbers and symbols to how they'd be written, but ONLY when the " +
   "intent is unambiguous (otherwise leave the words as spoken): numbers to digits with " +
-  "thousands separators (ten thousand -> 10,000), currency (twenty five dollars and ninety " +
-  "nine cents -> $25.99), percentages ALWAYS with the % symbol, including after a decimal " +
+  "thousands separators (ten thousand -> 10,000), currency ALWAYS with the $ symbol and NEVER " +
+  "the word 'dollars' after the amount (ten thousand dollars -> $10,000; twenty five dollars " +
+  "and ninety nine cents -> $25.99), percentages ALWAYS with the % symbol, including after a decimal " +
   "(fifty percent -> 50%, ninety nine point nine percent -> 99.9%), dates and times (March " +
   "fifteenth -> March 15; three thirty PM -> 3:30 PM), phone numbers, email addresses and " +
   "URLs (support at filect dot io -> support@filect.io), and common math/symbols when " +
