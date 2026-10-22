@@ -41,6 +41,7 @@ hidden_imports = [
     'app.core.text_extract',
     'app.core.update_checker',
     'app.core.vision',
+    'app.core.video_analysis',
     'app.core.transcription',
     'app.core.dictation_format',
     'app.core.dictation_history',
@@ -83,6 +84,8 @@ hidden_imports = [
     'AppKit',
     'Foundation',
     'Quartz',
+    'AVFoundation',   # video keyframe + audio extraction (video_analysis)
+    'CoreMedia',      # CMTime helpers for the above
     'objc',
     
     # Other dependencies
@@ -217,8 +220,8 @@ app = BUNDLE(
         'CFBundleName': _DISPLAY_NAME,
         'CFBundleDisplayName': _DISPLAY_NAME,
         'CFBundleIdentifier': _BUNDLE_ID,
-        'CFBundleVersion': '14.6.0',
-        'CFBundleShortVersionString': '14.6.0',
+        'CFBundleVersion': '14.7.0',
+        'CFBundleShortVersionString': '14.7.0',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleExecutable': 'Filect',

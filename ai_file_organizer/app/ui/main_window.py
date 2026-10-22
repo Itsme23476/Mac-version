@@ -1570,13 +1570,13 @@ class MainWindow(QMainWindow):
         drop_layout.addWidget(self.drop_icon, 0, Qt.AlignCenter)
         
         # Main text
-        self.drop_title = QLabel("Add folder to index")
+        self.drop_title = QLabel("Add files or folder to index")
         self.drop_title.setObjectName("dropTitleLarge")
         self.drop_title.setAlignment(Qt.AlignCenter)
         drop_layout.addWidget(self.drop_title)
-        
+
         # Subtitle
-        self.drop_subtitle = QLabel("Drag and drop folders here, or click to browse")
+        self.drop_subtitle = QLabel("Drag files or folders here, or click to browse")
         self.drop_subtitle.setObjectName("dropSubtitleLarge")
         self.drop_subtitle.setAlignment(Qt.AlignCenter)
         drop_layout.addWidget(self.drop_subtitle)
@@ -2430,14 +2430,11 @@ class MainWindow(QMainWindow):
     def _update_view_files_button_count(self):
         """Update the View Files button with the current file count."""
         try:
-            from app.core.indexer import FileIndexer
-            indexer = FileIndexer()
-            files = indexer.get_all_indexed_files()
-            count = len(files)
+            from app.core.search import search_service
+            count = search_service.get_index_statistics().get('total_files', 0)
             self.view_files_btn.setText(f"View Analyzed Files ({count})")
         except Exception as e:
             logger.error(f"Error updating file count: {e}")
-            self.view_files_btn.setText("View Analyzed Files (0)")
 
     def setup_organize_page(self):
         """Setup the AI-powered file organization page."""
@@ -8073,14 +8070,32 @@ Move Plan Summary:
             self.drop_subtitle.setText(subtitle)
     
     def _on_drop_zone_clicked(self, event):
-        """Handle click on drop zone to open folder dialog."""
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Folder to Index",
-            str(Path.home())
-        )
-        if folder:
-            self._handle_dropped_paths([folder])
+        """Handle click on drop zone: pick individual FILES or a FOLDER (both, multi-select)."""
+        paths = self._pick_files_or_folder()
+        if paths:
+            self._handle_dropped_paths(paths)
+
+    def _pick_files_or_folder(self):
+        """Native open panel that lets the user choose files AND/OR folders (multi-select) in
+        one dialog — Qt's QFileDialog can only do one or the other. Returns a list of paths
+        (empty if cancelled). Falls back to the folder-only Qt dialog if the native panel is
+        unavailable, so picking never breaks."""
+        try:
+            from AppKit import NSOpenPanel
+            panel = NSOpenPanel.openPanel()
+            panel.setCanChooseFiles_(True)
+            panel.setCanChooseDirectories_(True)
+            panel.setAllowsMultipleSelection_(True)
+            panel.setResolvesAliases_(True)
+            panel.setTitle_("Select files or a folder to index")
+            panel.setPrompt_("Index")
+            if panel.runModal() == 1:  # NSModalResponseOK
+                return [str(u.path()) for u in panel.URLs() if u.path()]
+            return []
+        except Exception as e:
+            logger.warning(f"Native open panel failed, using folder dialog: {e}")
+            folder = QFileDialog.getExistingDirectory(self, "Select Folder to Index", str(Path.home()))
+            return [folder] if folder else []
     
     def _clear_all_indexed_paths(self):
         """Clear all indexed files from the database."""
@@ -8115,7 +8130,7 @@ Move Plan Summary:
         """Reset drop zone to default styling."""
         # Use object name selector for consistency with QSS
         self.drop_zone.setStyleSheet("")  # Let QSS handle styling
-        self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
+        self._update_drop_zone("Add files or folder to analyze", "Drag files or folders here, or click to browse")
     
     def _handle_dropped_paths(self, paths: list):
         """Handle dropped file/folder paths and start indexing."""
@@ -8385,58 +8400,78 @@ Move Plan Summary:
             user_instructions: Optional user-provided focus instructions for AI tag generation
         """
         from app.core.search import search_service
-        
         total = len(files)
-        
-        # Show progress container
+        if total == 0:
+            return
+
+        # Per-file analysis (especially VIDEO: frame decode + audio export + transcription) is
+        # heavy — run it OFF the UI thread so the app never lags, exactly like folder indexing.
         if hasattr(self, 'index_progress_container'):
             self.index_progress_container.setVisible(True)
-        
-        # Update drop zone to show status
-        self._update_drop_zone(f"Analyzing {total} files...", "Drop more files to add to queue")
-        
+        self._update_drop_zone(f"Analyzing {total} file{'s' if total != 1 else ''}…", "")
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(0)
         self.index_percent_label.setVisible(True)
         self.index_progress_label.setVisible(True)
-        
-        indexed = 0
-        for file_path in files:
+        self.index_cancel_btn.setVisible(True)
+        self.is_indexing = True
+
+        worker = IndexWorker(Path(files[0]))   # directory_path is unused; we replace run()
+        self.index_worker = worker
+        worker.progress_data.connect(self._on_file_index_progress)
+        worker.index_completed.connect(self._on_individual_files_done)
+        worker.index_error.connect(self.on_index_error)
+
+        def run_files():
+            indexed = 0
             try:
-                result = search_service.index_single_file(file_path, user_instructions=user_instructions)
-                if not result.get('error'):
-                    indexed += 1
-                percent = int((indexed / total) * 100)
-                self.progress_bar.setValue(indexed)
-                self.index_percent_label.setText(f"{percent}%")
-                self.index_progress_label.setText(f"Analyzing file {indexed} of {total}")
-                QApplication.processEvents()  # Keep UI responsive
+                for i, fp in enumerate(files):
+                    if worker.is_cancelled():
+                        break
+                    try:
+                        result = search_service.index_single_file(fp, user_instructions=user_instructions)
+                        if not (result or {}).get('error'):
+                            indexed += 1
+                    except Exception as e:
+                        logger.error(f"Error indexing {fp}: {e}")
+                    worker.progress_data.emit(i + 1, total, f"Analyzing file {i + 1} of {total}")
+                worker.index_completed.emit({'indexed': indexed})
             except Exception as e:
-                logger.error(f"Error indexing {file_path}: {e}")
-        
-        # Done - hide progress
+                worker.index_error.emit(str(e))
+        worker.run = run_files  # type: ignore
+        worker.start()
+
+    def _on_file_index_progress(self, done: int, total: int, message: str):
+        """Thread-safe progress update for individual-file indexing (runs on the UI thread)."""
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(done)
+        if total:
+            self.index_percent_label.setText(f"{int(done / total * 100)}%")
+        self.index_progress_label.setText(message)
+
+    def _on_individual_files_done(self, result: dict):
+        """Finish individual-file indexing: hide progress, refresh the list."""
+        self.is_indexing = False
         if hasattr(self, 'index_progress_container'):
             self.index_progress_container.setVisible(False)
-        
         self.progress_bar.setVisible(False)
         self.index_percent_label.setVisible(False)
         self.index_progress_label.setVisible(False)
-        
-        # Reset drop zone
-        self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
-        
-        QMessageBox.information(
-            self,
-            "Analysis Complete",
-            f"Successfully analyzed {indexed} of {total} files."
-        )
-        
-        # Refresh views and update paths list
+        self.index_cancel_btn.setVisible(False)
+        self._update_drop_zone("Add files or folder to analyze", "Drag files or folders here, or click to browse")
         self.refresh_debug_view()
-        self._update_indexed_paths_list()
-        stats = search_service.get_index_statistics()
-        self.update_search_statistics(stats)
-        self.search_button.setEnabled(True)
+        try:
+            self._update_view_files_button_count()
+        except Exception:
+            pass
+        self.status_bar.showMessage(f"Analyzed {result.get('indexed', 0)} file(s)", 3000)
+        try:
+            from app.core.search import search_service
+            self.update_search_statistics(search_service.get_index_statistics())
+            self.search_button.setEnabled(True)
+        except Exception:
+            pass
     
     # ==================== END DRAG AND DROP ====================
     
