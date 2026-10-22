@@ -2,7 +2,7 @@
 Phase 2 tests — Filect Voice dictation controller + transcription client.
 
 Everything native/network is mocked, so this runs offline with just PySide6:
-  - VoiceRecorder is replaced with a fake that emits the same signals
+  - StreamingTranscriber is replaced with a fake that emits the same signals
   - the global-hotkey helpers are unavailable in this env (_HOTKEY_OK False), so
     no native calls happen
   - text insertion (_insert_text) is mocked
@@ -32,7 +32,7 @@ def qapp():
 
 
 class FakeRecorder(QObject):
-    """Stand-in for VoiceRecorder — same signal surface, no audio/network."""
+    """Stand-in for StreamingTranscriber — same signal surface, no audio/network."""
     finished = Signal(str)
     error = Signal(str)
     recording_stopped = Signal()
@@ -69,7 +69,7 @@ def _make_controller():
 
 def test_toggle_starts_and_stops_recording(qapp):
     import app.ui.dictation as d
-    with patch.object(d, "VoiceRecorder", FakeRecorder):
+    with patch.object(d, "StreamingTranscriber", FakeRecorder):
         _, c = _make_controller()
         assert c._recorder is None
         assert c._state == "idle"
@@ -86,7 +86,7 @@ def test_toggle_starts_and_stops_recording(qapp):
 def test_toggle_ignored_while_transcribing(qapp):
     """A press during transcription must NOT spawn a second recorder (BUG 1)."""
     import app.ui.dictation as d
-    with patch.object(d, "VoiceRecorder", FakeRecorder):
+    with patch.object(d, "StreamingTranscriber", FakeRecorder):
         _, c = _make_controller()
         c._toggle()                      # idle -> recording
         first = c._recorder
@@ -101,7 +101,7 @@ def test_toggle_ignored_while_transcribing(qapp):
 def test_state_resets_to_idle_after_result(qapp):
     """Both finish and error paths return the controller to idle so it can start again."""
     import app.ui.dictation as d
-    with patch.object(d, "VoiceRecorder", FakeRecorder):
+    with patch.object(d, "StreamingTranscriber", FakeRecorder):
         _, c = _make_controller()
         c._insert_text = MagicMock()
         c._toggle()                      # recording
@@ -115,7 +115,7 @@ def test_state_resets_to_idle_after_result(qapp):
 
 def test_finished_schedules_insert_with_text(qapp):
     import app.ui.dictation as d
-    with patch.object(d, "VoiceRecorder", FakeRecorder):
+    with patch.object(d, "StreamingTranscriber", FakeRecorder):
         _, c = _make_controller()
         c._insert_text = MagicMock()
         c._toggle()                      # start -> creates recorder + wires _on_text
@@ -131,7 +131,7 @@ def test_finished_schedules_insert_with_text(qapp):
 
 def test_empty_transcript_does_not_insert(qapp):
     import app.ui.dictation as d
-    with patch.object(d, "VoiceRecorder", FakeRecorder):
+    with patch.object(d, "StreamingTranscriber", FakeRecorder):
         _, c = _make_controller()
         c._insert_text = MagicMock()
         c._on_text("   ")               # whitespace-only -> nothing to type

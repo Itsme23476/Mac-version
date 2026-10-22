@@ -42,6 +42,8 @@ class Settings:
         #   polished = light + smooth phrasing. (Replaced the old on/off dictation_ai_cleanup.)
         self.dictation_language: str = ''  # Voice > Language: '' = auto-detect; else a code
         #   (e.g. 'en', 'es') forcing Grok to transcribe in exactly that language.
+        self.dictation_last_niche: str = ''  # Voice > Custom Words: last field the user asked the
+        #   AI to suggest terms for, so we can prefill it next time.
         self.organize_voice_target: str = ''  # Voice organize (Fn+Option): default folder to
         #   organize when none is picked on the Organize page. '' = fall back to ~/Downloads.
         self.dictation_mute_while_recording: bool = True  # Voice: mute system output while
@@ -284,6 +286,9 @@ class Settings:
         lg = data.get('dictation_language')
         if isinstance(lg, str):
             self.dictation_language = lg.strip()
+        ln = data.get('dictation_last_niche')
+        if isinstance(ln, str):
+            self.dictation_last_niche = ln.strip()
         ovt = data.get('organize_voice_target')
         if isinstance(ovt, str):
             self.organize_voice_target = ovt.strip()
@@ -393,6 +398,7 @@ class Settings:
             'dictation_custom_terms': self.dictation_custom_terms,
             'dictation_polish_level': self.dictation_polish_level,
             'dictation_language': self.dictation_language,
+            'dictation_last_niche': self.dictation_last_niche,
             'organize_voice_target': self.organize_voice_target,
             'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'theme': self.theme,
@@ -456,6 +462,25 @@ class Settings:
         sc = (shortcut or '').strip().lower() or 'ctrl+shift+d'
         self.dictation_shortcut = sc
         self._save_config()
+
+    def add_custom_terms(self, terms) -> int:
+        """Merge new Custom Words into dictation_custom_terms (case-insensitive dedup) and
+        persist. Capped at 100 — Grok's key-term biasing limit per request. Returns the
+        number actually added."""
+        existing = {t.lower() for t in self.dictation_custom_terms}
+        added = 0
+        for t in (terms or []):
+            t = str(t).strip()
+            if not t or len(t) > 50 or t.lower() in existing:
+                continue
+            if len(self.dictation_custom_terms) >= 100:
+                break
+            self.dictation_custom_terms.append(t)
+            existing.add(t.lower())
+            added += 1
+        if added:
+            self._save_config()
+        return added
 
     def set_theme(self, theme: str) -> None:
         """Set the application theme ('dark' or 'light')."""

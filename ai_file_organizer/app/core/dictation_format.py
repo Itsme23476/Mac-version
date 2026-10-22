@@ -126,6 +126,68 @@ def format_spoken(text: str) -> str:
         return text
 
 
+def tidy_text(text: str) -> str:
+    """Deterministic formatting polish that runs regardless of the AI Cleanup toggle:
+      * collapse accidental runs of spaces/tabs into one
+      * remove a stray space before , . ; : ! ?
+      * capitalize the standalone pronoun 'i' (covers i'm / i'll / i've / i'd)
+      * capitalize the first letter of a NEW sentence after . ! ? inside the text
+    Lossless on everything else; never raises (returns the input on any error)."""
+    if not text or not text.strip():
+        return text
+    try:
+        s = re.sub(r"[ \t]{2,}", " ", text)                  # collapse multi-space
+        s = re.sub(r"[ \t]+([,.;:!?])", r"\1", s)            # no space before punctuation
+        s = re.sub(r"\bi\b", "I", s)                          # pronoun I (also i'm, i'll, ...)
+        s = re.sub(r"(?<![.!?])([.!?])(\s+)([a-z])",          # capitalize new-sentence starts
+                   lambda m: m.group(1) + m.group(2) + m.group(3).upper(), s)  # (not after '...')
+        return s
+    except Exception:
+        return text
+
+
+def apply_sentence_case(text: str, before_caret, custom_terms=None) -> str:
+    """Fix the FIRST letter's case based on what's right before the insertion point, the way
+    a good dictation app (Whispr Flow) does. This is deterministic — it runs whether or not
+    the AI Cleanup polish is on.
+
+    `before_caret` is the text immediately before the caret in the target field, or None when
+    it couldn't be read (then we leave the text unchanged — no regression). Rule:
+      * start of field, or after sentence-ending punctuation (. ! ? or a newline) -> capitalize
+      * anywhere mid-sentence -> lowercase a wrongly-capitalized first word, EXCEPT an acronym
+        (all-caps, e.g. GPT/API) or one of the user's Custom Words (a proper noun like Filect).
+    """
+    if not text or before_caret is None:
+        return text
+    # first alphabetic character of the dictation
+    i = 0
+    while i < len(text) and not text[i].isalpha():
+        i += 1
+    if i >= len(text):
+        return text
+    trimmed = before_caret.rstrip(" \t")
+    at_sentence_start = (not trimmed) or trimmed[-1] in ".!?\n"
+    first = text[i]
+    # the first word (for acronym / custom-term checks)
+    j = i
+    while j < len(text) and (text[j].isalnum() or text[j] in "_-"):
+        j += 1
+    word = text[i:j]
+
+    if at_sentence_start:
+        return text[:i] + first.upper() + text[i + 1:] if first.islower() else text
+
+    # mid-sentence: drop the stray capital, but protect acronyms + the user's proper nouns
+    if first.isupper():
+        if len(word) > 1 and word.isupper():
+            return text  # acronym (GPT, API, JSON)
+        terms = {str(t).strip().lower() for t in (custom_terms or []) if str(t).strip()}
+        if word.lower() in terms:
+            return text  # user's Custom Word (proper noun)
+        return text[:i] + first.lower() + text[i + 1:]
+    return text
+
+
 if __name__ == "__main__":
     cases = [
         # (input, expected)

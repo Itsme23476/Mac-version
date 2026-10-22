@@ -1702,6 +1702,65 @@ def log_autofill_diagnostics(prefix: str = "[QS-DIAG]") -> None:
         logger.warning(f"{prefix} AX focused-element read failed: {e}")
 
 
+def text_before_caret():
+    """Return the text immediately before the caret in the frontmost app's focused text
+    field (a short tail — used only to decide dictation capitalization), or None if it can't
+    be read: no AX text access, a secure/password field, or no caret. On None the caller
+    leaves the dictation unchanged, so capitalization never regresses where AX isn't
+    available. Reads at most ~40 chars and never logs the content (privacy)."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide, AXUIElementCopyAttributeValue, AXValueGetValue,
+            kAXFocusedUIElementAttribute, kAXSelectedTextRangeAttribute,
+            kAXValueAttribute, kAXSubroleAttribute,
+        )
+        try:
+            from ApplicationServices import kAXValueCFRangeType as _CFRANGE_T
+        except Exception:
+            from ApplicationServices import kAXValueTypeCFRange as _CFRANGE_T
+
+        sysw = AXUIElementCreateSystemWide()
+        err, el = AXUIElementCopyAttributeValue(sysw, kAXFocusedUIElementAttribute, None)
+        if err != 0 or not el:
+            return None
+
+        def _attr(attr):
+            try:
+                e, v = AXUIElementCopyAttributeValue(el, attr, None)
+                return v if e == 0 else None
+            except Exception:
+                return None
+
+        if _attr(kAXSubroleAttribute) == "AXSecureTextField":
+            return None  # never read a password field
+
+        rng_val = _attr(kAXSelectedTextRangeAttribute)
+        if rng_val is None:
+            return None
+        ok, rng = AXValueGetValue(rng_val, _CFRANGE_T, None)
+        if not ok:
+            return None
+        loc = getattr(rng, "location", None)
+        if loc is None:
+            try:
+                loc = int(rng[0])
+            except Exception:
+                return None
+        if loc is None or loc < 0:
+            return None
+        if loc == 0:
+            return ""  # caret at the very start -> treat as a sentence start
+        full = _attr(kAXValueAttribute)
+        if full is None:
+            return None
+        full = str(full)
+        if loc > len(full):
+            return None
+        return full[max(0, loc - 40):loc]
+    except Exception:
+        return None
+
+
 def autofill_via_clipboard_paste(path: str) -> bool:
     """
     Autofill a file dialog by copying path to clipboard and pasting.

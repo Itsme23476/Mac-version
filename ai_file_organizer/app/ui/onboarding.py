@@ -115,8 +115,10 @@ class OnboardingAnimation(QWidget):
         elif self._step == 6:
             self._draw_voice(painter)   # AI Cleanup step — voice-themed, reuse the voice anim
         elif self._step == 7:
-            self._draw_settings(painter)
+            self._draw_voice(painter)   # Custom Words step — voice-themed, reuse the voice anim
         elif self._step == 8:
+            self._draw_settings(painter)
+        elif self._step == 9:
             self._draw_ready(painter)
 
         painter.end()
@@ -809,6 +811,16 @@ class OnboardingOverlay(QDialog):
                 "highlight": "voice_cleanup_card"
             },
             {
+                "title": "🗣️ Teach Filect your words",
+                "description": "Tell us your field and we'll suggest words to spell right.",
+                "nav_index": None,
+                "button_text": "Next",
+                "show_try_it": False,
+                "interactive": "vocab",
+                "dim_all": True,
+                "highlight": None
+            },
+            {
                 "title": "⚙️ Settings",
                 "description": "• Protect files from being moved\n• Add exclusion patterns (.json, .py)\n• Configure app behavior",
                 "nav_index": 3,
@@ -908,6 +920,15 @@ class OnboardingOverlay(QDialog):
         self.desc_label.setWordWrap(True)
         self.desc_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         layout.addWidget(self.desc_label)
+
+        # Interactive vocabulary panel — shown ONLY on the custom-words step so the user
+        # types their field and picks suggested terms right here, instead of a spotlight
+        # behind the dialog that covers the card. Hidden on every other step.
+        from app.ui.voice_cards.vocab_suggest import VocabSuggestPanel
+        self.vocab_panel = VocabSuggestPanel(self.container)
+        self.vocab_panel.setVisible(False)
+        layout.addWidget(self.vocab_panel)
+
         layout.addStretch(1)
 
         # Keyboard hint
@@ -1072,7 +1093,7 @@ class OnboardingOverlay(QDialog):
     # Stable slugs so analytics aren't broken by future title rewordings.
     _STEP_SLUGS = [
         "welcome", "smart_search", "organize_files",
-        "auto_organize", "index_files", "voice", "ai_cleanup", "settings", "ready",
+        "auto_organize", "index_files", "voice", "ai_cleanup", "custom_words", "settings", "ready",
     ]
 
     def _update_step(self):
@@ -1111,7 +1132,14 @@ class OnboardingOverlay(QDialog):
         
         # Update animation
         self.anim_widget.set_step(self.current_step)
-        
+
+        # Interactive vocab step: swap the animation + description for the live suggest panel.
+        is_vocab = step.get("interactive") == "vocab"
+        self.vocab_panel.setVisible(is_vocab)
+        self.anim_widget.setVisible(not is_vocab)
+        self.desc_label.setVisible(not is_vocab)
+        self.keyboard_hint.setVisible(not is_vocab)
+
         # Navigate to the appropriate page in the app
         nav_index = step["nav_index"]
         if nav_index is not None:
@@ -1131,9 +1159,24 @@ class OnboardingOverlay(QDialog):
         if sub_tab is not None and hasattr(self.main_window, 'organize_page'):
             self.main_window.organize_page._switch_tab(sub_tab)
         
-        # Phase 3: Update spotlight overlay
-        self._update_spotlight(step.get("highlight"))
-    
+        # Phase 3: Update spotlight overlay. Full dim on the interactive vocab step (so the
+        # dialog is the sole focus); normal cutout spotlight on the others.
+        if step.get("dim_all"):
+            self._show_full_dim()
+        else:
+            self._update_spotlight(step.get("highlight"))
+
+    def _show_full_dim(self):
+        """Dim the entire app behind the dialog (no bright cutout) so the interactive
+        onboarding step gets the user's full attention."""
+        if not self.spotlight:
+            self.spotlight = SpotlightOverlay(self.main_window)
+        self.spotlight.setGeometry(self.main_window.rect())
+        self.spotlight.set_spotlight(None)   # None -> fills the whole window, no cutout
+        self.spotlight.show()
+        self.spotlight.raise_()
+        self.raise_()
+
     def _update_spotlight(self, highlight_attr):
         """Update the spotlight overlay to highlight a widget"""
         # Hide existing spotlight when not needed or on certain steps

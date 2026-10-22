@@ -487,10 +487,24 @@ class VoiceDictationController(QObject):
         # dollars" -> "$10,000", "fifty percent" -> "50%"). Lossless on everything else;
         # runs for both raw and AI-polished dictation, so the pasted AND saved text match.
         try:
-            from app.core.dictation_format import format_spoken
-            text = format_spoken(text)
+            from app.core.dictation_format import format_spoken, tidy_text
+            # format_spoken: numbers/currency/percent. tidy_text: spacing, pronoun "I",
+            # new-sentence capitalization — all deterministic, so they run WITH AI Cleanup off.
+            text = tidy_text(format_spoken(text))
         except Exception as e:
             logger.warning(f"number formatting skipped: {e}")
+
+        # Context-aware capitalization (deterministic — runs with AI Cleanup OFF too): keep a
+        # leading capital only at the start of a field or after sentence-ending punctuation;
+        # otherwise drop a stray capital on the first word (protecting acronyms + Custom Words).
+        # Reads the char before the caret via Accessibility; if it can't, leaves text unchanged.
+        try:
+            from app.ui.mac_hotkey import text_before_caret
+            from app.core.dictation_format import apply_sentence_case
+            text = apply_sentence_case(text, text_before_caret(),
+                                       getattr(settings, 'dictation_custom_terms', None))
+        except Exception as e:
+            logger.debug(f"context capitalization skipped: {e}")
 
         def _do_insert():
             # Cut the animation the INSTANT we paste (hide is instant — no window fade),
