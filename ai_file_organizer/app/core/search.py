@@ -398,8 +398,24 @@ class SearchService:
             self._cancel_flag.clear()
             self._pause_flag.clear()
             
+            # Scan up to the user's TIER limit, not a hardcoded 1000. Pro is sold as 5000
+            # and Premium as 50000, but scan_directory defaulted to 1000 — so a Pro user's
+            # folder beyond 1000 files was never fully scanned (indexed partially, and the
+            # organize check kept flagging the remainder as "unindexed"). The paid media
+            # quota is still enforced by _check_index_limit below; this only lifts the
+            # artificial scan ceiling. Fallback 1000 when unauthenticated/unknown.
+            # ponytail: max_files caps TOTAL files; the quota is media-only, so a huge
+            # non-media folder can still crowd the ceiling — fine, still far better than 1000.
+            try:
+                from app.core.supabase_client import supabase_auth
+                scan_cap = supabase_auth.get_index_limit() if supabase_auth.is_authenticated else 1000
+            except Exception:
+                scan_cap = 1000
+            if not scan_cap or scan_cap <= 0:
+                scan_cap = 1000
+
             # Scan directory for files
-            files = scan_directory(directory_path)
+            files = scan_directory(directory_path, max_files=scan_cap)
             total = len(files)
             
             if progress_cb:

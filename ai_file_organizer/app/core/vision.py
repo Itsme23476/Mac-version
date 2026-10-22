@@ -49,16 +49,19 @@ def _get_auth_token() -> Optional[str]:
         return None
 
 
-def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 500, temperature: float = 0.2) -> Optional[Dict[str, Any]]:
+def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 500, temperature: float = 0.2, model: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Call OpenAI via Supabase Edge Function proxy.
-    
+
     Args:
         endpoint: 'chat' or 'vision'
         messages: OpenAI-format messages array
         max_tokens: Max tokens for response
         temperature: Temperature for generation
-        
+        model: Optional model hint. The proxy only honours an allow-listed value
+            (e.g. 'gpt-5-mini' for the organize plan) and otherwise defaults to nano.
+            Omit it for the high-volume tagging calls so they stay on cheap nano.
+
     Returns:
         OpenAI response data or None on failure
     """
@@ -79,8 +82,10 @@ def _call_openai_proxy(endpoint: str, messages: List[Dict], max_tokens: int = 50
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        
-        logger.info(f"Calling OpenAI proxy: endpoint={endpoint}")
+        if model:
+            payload["model"] = model
+
+        logger.info(f"Calling OpenAI proxy: endpoint={endpoint}" + (f" model={model}" if model else ""))
         response = requests.post(OPENAI_PROXY_URL, json=payload, headers=headers, timeout=120)
         
         if response.status_code == 401:

@@ -177,12 +177,61 @@ def build_file_summary(files: List[Dict[str, Any]], max_files: int = 300) -> str
 # this many files, plans each, and merges by folder name (passing already-created folder
 # names to later chunks so the structure stays consistent).
 _PLAN_CHUNK_SIZE = 250
-# Retry a chunk this many times before treating the whole plan as failed. A chunk can
-# come back empty on a transient AI/network hiccup; retrying usually clears it.
-_PLAN_CHUNK_RETRIES = 2
+# Retry a chunk this many times before treating it as failed. A chunk can come back
+# empty/garbled on a transient gpt-5-nano hiccup; retrying usually clears it.
+_PLAN_CHUNK_RETRIES = 3
 # Plan this many chunks at once. These are small text-only requests, so a handful in flight
 # just shortens big-folder planning; kept modest to stay well under rate limits.
 _PLAN_MAX_PARALLEL = 6
+# The organize PLAN uses a sturdier model than the per-file tagging. nano is fine for
+# tagging (tiny output, no hard constraint) but writes sloppy plans; gpt-5-mini covers
+# every file far more cleanly. Tagging/vision calls send NO model → stay on cheap nano.
+PLAN_MODEL = "gpt-5-mini"
+
+
+def _normalize_plan_shape(plan: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """gpt-5-nano sometimes returns the folder map WITHOUT the {"folders": ...} wrapper
+    (e.g. {"Invoices": [1,2], "Photos": [3]}). Accept that by wrapping it, so one
+    stylistic miss isn't treated as a failed plan. Returns None if unrecognizable or empty."""
+    if not isinstance(plan, dict):
+        return None
+    folders = plan.get("folders")
+    if isinstance(folders, dict):
+        return plan if folders else None          # empty folders == no plan
+    # Salvage a bare {name: [ids], ...} map.
+    if plan and all(isinstance(v, list) for v in plan.values()):
+        return {"folders": plan}
+    return None
+
+
+def _plan_with_retries(user_instruction: str, chunk: List[Dict[str, Any]],
+                       idx: int = 0, n_chunks: int = 1) -> Optional[Dict[str, Any]]:
+    """Plan one file set, retrying a flaky/empty gpt-5-nano reply before giving up.
+    Returns a non-empty {"folders": {...}} dict, or None if every attempt failed."""
+    for attempt in range(1, _PLAN_CHUNK_RETRIES + 1):
+        part = _request_plan_single(user_instruction, chunk)
+        if part and part.get("folders"):
+            return part
+        logger.warning(f"Plan chunk {idx + 1}/{n_chunks} returned no usable plan "
+                       f"(attempt {attempt}/{_PLAN_CHUNK_RETRIES})")
+    logger.error(f"Plan chunk {idx + 1}/{n_chunks} failed after {_PLAN_CHUNK_RETRIES} attempts")
+    return None
+
+
+def _fallback_plan_by_category(files: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Deterministic last-resort plan for when the AI is unavailable: group each file by
+    its indexed category (or, failing that, its file extension). No network, never fails.
+    Guarantees organize never dead-ends on an AI outage — the user gets a sane by-type
+    grouping they can review and refine. The UI uses this only after the AI path fails
+    AND the user is confirmed still entitled (a lapsed user gets the resubscribe wall)."""
+    folders: Dict[str, List[Any]] = {}
+    for f in files:
+        cat = (f.get("category") or "").strip()
+        if not cat:
+            name = f.get("file_name") or ""
+            cat = (name.rsplit(".", 1)[-1].lower() if "." in name else "other") or "other"
+        folders.setdefault(cat.title(), []).append(f["id"])
+    return {"folders": folders} if folders else None
 
 
 def request_organization_plan(
@@ -196,7 +245,9 @@ def request_organization_plan(
         logger.warning("No files provided for organization")
         return None
     if len(files) <= _PLAN_CHUNK_SIZE:
-        return _request_plan_single(user_instruction, files)
+        # Single request still gets retries — a lone flaky/empty gpt-5-nano reply must not
+        # fail the whole organize (this path previously had NO retry).
+        return _plan_with_retries(user_instruction, files, 0, 1)
 
     # Plan the chunks IN PARALLEL. They're small text-only requests on this (background) worker
     # thread, so a few in flight let a big folder finish planning in roughly the time of one
@@ -210,33 +261,29 @@ def request_organization_plan(
     logger.info(f"Chunking organization plan: {len(files)} files → {n_chunks} chunks of "
                 f"{_PLAN_CHUNK_SIZE} (planned in parallel, up to {_PLAN_MAX_PARALLEL} at once)")
 
-    def _plan_one(idx: int, chunk: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        # Retry a flaky chunk before giving up (same contract as the sequential version).
-        for attempt in range(1, _PLAN_CHUNK_RETRIES + 1):
-            part = _request_plan_single(user_instruction, chunk)
-            if part and "folders" in part:
-                return part
-            logger.warning(f"Plan chunk {idx + 1}/{n_chunks} returned no plan "
-                           f"(attempt {attempt}/{_PLAN_CHUNK_RETRIES})")
-        logger.error(f"Plan chunk {idx + 1}/{n_chunks} failed after {_PLAN_CHUNK_RETRIES} attempts")
-        return None
-
     from concurrent.futures import ThreadPoolExecutor, as_completed
     parts: List[Optional[Dict[str, Any]]] = [None] * n_chunks
     with ThreadPoolExecutor(max_workers=min(n_chunks, _PLAN_MAX_PARALLEL)) as ex:
-        futs = {ex.submit(_plan_one, i, c): i for i, c in enumerate(chunks)}
+        futs = {ex.submit(_plan_with_retries, user_instruction, c, i, n_chunks): i
+                for i, c in enumerate(chunks)}
         for fut in as_completed(futs):
             parts[futs[fut]] = fut.result()
 
-    # If any chunk permanently failed, abort the whole plan (return None) rather than silently
-    # skipping its files — all callers treat None as "Plan Failed".
-    if any(p is None for p in parts):
-        logger.error("A plan chunk failed after retries — aborting plan so no files are silently skipped")
+    # ROBUST (gpt-5-nano is flaky): a chunk that fails after retries no longer kills the
+    # whole organize. Keep the chunks that succeeded; the caller runs
+    # ensure_all_files_included(), which places any dropped chunk's files into the
+    # best-matching folder — so nothing is silently lost and the user still gets a plan.
+    good = [p for p in parts if p and p.get("folders")]
+    if not good:
+        logger.error("Every plan chunk failed after retries — no plan produced")
         return None
+    if len(good) < n_chunks:
+        logger.error(f"{n_chunks - len(good)} of {n_chunks} plan chunks failed after retries — "
+                     "returning a partial plan; caller will conserve the remaining files")
 
     # Merge in chunk order (deterministic) by folder name.
     merged: Dict[str, Any] = {"folders": {}}
-    for part in parts:
+    for part in good:
         for name, ids in part["folders"].items():
             merged["folders"].setdefault(name, []).extend(ids)
     return merged if merged["folders"] else None
@@ -375,14 +422,16 @@ CRITICAL RULES:
 Propose an organization plan. Return JSON only."""
 
     provider = settings.ai_provider
-    
+
     if provider == 'openai':
-        return _request_openai(user_message)
+        plan = _request_openai(user_message)
     elif provider == 'local':
-        return _request_ollama(user_message)
+        plan = _request_ollama(user_message)
     else:
         logger.warning("No AI provider configured")
         return None
+    # Accept a wrapper-less {name:[ids]} reply; reject empty/garbled → caller retries.
+    return _normalize_plan_shape(plan)
 
 
 def request_plan_refinement(
@@ -483,8 +532,9 @@ def _request_openai(user_message: str) -> Optional[Dict[str, Any]]:
             {"role": "user", "content": user_message},
         ]
         
-        # Call OpenAI via Supabase Edge Function proxy
-        resp_data = _call_openai_proxy("chat", messages, max_tokens=4000, temperature=0.1)
+        # Call OpenAI via Supabase Edge Function proxy. The plan uses the sturdier
+        # PLAN_MODEL (gpt-5-mini) for cleaner multi-file JSON; tagging stays on nano.
+        resp_data = _call_openai_proxy("chat", messages, max_tokens=4000, temperature=0.1, model=PLAN_MODEL)
         
         if not resp_data:
             logger.error("OpenAI proxy returned no data for organization plan")
