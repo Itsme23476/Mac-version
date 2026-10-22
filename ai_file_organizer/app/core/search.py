@@ -298,7 +298,7 @@ class SearchService:
                     extracted = extract_file_text(file_path)
                     if extracted:
                         snippet = extracted
-                        if ext == '.csv' or ext in {'.xlsx', '.xls', '.pdf'}:
+                        if ext == '.csv' or ext in {'.xlsx', '.xls', '.pdf', '.docx', '.pptx', '.rtf', '.eml', '.epub', '.odt', '.ods', '.odp'}:
                             full_metadata['ocr_text'] = extracted[:5000]
                             full_metadata['has_ocr'] = True
                     else:

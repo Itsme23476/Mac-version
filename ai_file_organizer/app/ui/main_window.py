@@ -1816,21 +1816,14 @@ class MainWindow(QMainWindow):
         ])
         
         debug_header = self.debug_table.horizontalHeader()
+        # All Interactive with fixed starting widths. ResizeToContents was measuring every one
+        # of the 1000+ rows for each of ~9 columns on every refresh — a major source of the lag.
         debug_header.setSectionResizeMode(0, QHeaderView.Fixed)
-        self.debug_table.setColumnWidth(0, 40)
-        debug_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(7, QHeaderView.Interactive)
-        self.debug_table.setColumnWidth(7, 200)
-        debug_header.setSectionResizeMode(8, QHeaderView.Interactive)
-        self.debug_table.setColumnWidth(8, 200)
-        debug_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
+        for _col, _w in ((0, 40), (1, 220), (2, 110), (3, 80), (4, 70), (5, 120), (6, 240),
+                         (7, 200), (8, 200), (9, 130), (10, 90), (11, 150)):
+            if _col != 0:
+                debug_header.setSectionResizeMode(_col, QHeaderView.Interactive)
+            self.debug_table.setColumnWidth(_col, _w)
         debug_header.setSectionResizeMode(12, QHeaderView.Interactive)
         self.debug_table.setColumnWidth(12, 200)
         debug_header.setSectionResizeMode(13, QHeaderView.Interactive)
@@ -2298,17 +2291,9 @@ class MainWindow(QMainWindow):
         
         # Process events to ensure table layout is calculated with data
         QApplication.processEvents()
-        
-        # Force column resize after data is loaded
-        for col in range(1, self.debug_table.columnCount()):
-            self.debug_table.resizeColumnToContents(col)
-        
-        # Ensure minimum width for key columns
-        if self.debug_table.columnWidth(1) < 200:  # File Name
-            self.debug_table.setColumnWidth(1, 200)
-        if self.debug_table.columnWidth(2) < 100:  # Category
-            self.debug_table.setColumnWidth(2, 100)
-        
+        # (Removed the per-refresh resizeColumnToContents loop — it measured every row for each
+        #  column and was a major lag source. Columns use fixed Interactive widths now.)
+
         # Update usage labels before showing
         self._update_usage_labels()
         
@@ -8529,73 +8514,92 @@ Move Plan Summary:
 
     # Debug functionality methods
     def _filter_indexed_files(self, search_text: str):
-        """Filter the indexed files table based on search text."""
-        if not hasattr(self, 'debug_table'):
+        """Filter the indexed files view. Re-renders from the cached FULL set, so the row cap
+        never hides a matching file."""
+        if not hasattr(self, 'debug_table') or self.debug_table is None:
             return
-        
-        search = search_text.lower().strip()
-        
-        # Columns to search:
-        # 1: File Name, 2: Category, 5: Label, 6: Tags, 7: Caption, 11: Purpose, 14: File Path
-        searchable_cols = [1, 2, 5, 6, 7, 11, 14]
-        
-        for row in range(self.debug_table.rowCount()):
-            if not search:
-                # Show all rows when search is empty
-                self.debug_table.setRowHidden(row, False)
-                continue
-            
-            # Check all searchable columns
-            match = False
-            for col in searchable_cols:
-                item = self.debug_table.item(row, col)
-                if item and search in item.text().lower():
-                    match = True
-                    break
-            
-            self.debug_table.setRowHidden(row, not match)
-        
-        # Update selection count label
-        visible_count = sum(1 for row in range(self.debug_table.rowCount()) if not self.debug_table.isRowHidden(row))
-        if search:
-            self.debug_selection_count_label.setText(f"{visible_count} files found")
-        else:
-            self._on_debug_selection_changed()
+        self._render_filtered_debug()
     
+    _DEBUG_ROW_CAP = 300  # render at most this many rows at once; search filters the FULL set
+
     def refresh_debug_view(self):
-        """Refresh the debug view with current database contents."""
-        # Skip if debug table doesn't exist (hidden in MVP mode)
-        if not hasattr(self, 'debug_table'):
-            logger.warning("refresh_debug_view: debug_table not found")
+        """Reload all files from the DB (cached for search) and render the capped view. Opening
+        is instant no matter how many files are indexed; search re-renders from the cached full
+        set, so the cap never hides a file from search."""
+        if not hasattr(self, 'debug_table') or self.debug_table is None:
             return
-        
-        if self.debug_table is None:
-            logger.warning("refresh_debug_view: debug_table is None")
-            return
-            
         try:
-            # Get all files from database using a direct query
             import sqlite3
             from app.core.database import file_index
-            
-            logger.info(f"refresh_debug_view: Querying database at {file_index.db_path}")
-            
             with sqlite3.connect(file_index.db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM files ORDER BY file_name")
-                rows = cursor.fetchall()
-            
-            logger.info(f"refresh_debug_view: Found {len(rows)} files in database")
-            
+                self._all_debug_rows = conn.execute(
+                    "SELECT * FROM files ORDER BY file_name").fetchall()
+            logger.info(f"refresh_debug_view: Found {len(self._all_debug_rows)} files in database")
+            self._render_filtered_debug()
+        except Exception as e:
+            QMessageBox.critical(self, "Debug Error", f"Error refreshing debug view:\n{e}")
+            self.debug_info_label.setText("Error loading debug data")
+
+    def _render_filtered_debug(self):
+        """Apply the current search text to the cached rows, cap to _DEBUG_ROW_CAP, render."""
+        all_rows = getattr(self, '_all_debug_rows', [])
+        search = ""
+        if getattr(self, '_files_search_input', None):
+            search = self._files_search_input.text().lower().strip()
+        if search:
+            import json as _json
+            def _m(r):
+                hay = " ".join(str(r[k] or "") for k in
+                               ("file_name", "category", "label", "tags", "caption", "file_path")).lower()
+                if search in hay:
+                    return True
+                try:  # the old filter also matched the Purpose field (stored in metadata)
+                    purpose = (_json.loads(r["metadata"]) if r["metadata"] else {}).get("purpose", "")
+                    return search in str(purpose).lower()
+                except Exception:
+                    return False
+            filtered = [r for r in all_rows if _m(r)]
+        else:
+            filtered = all_rows
+        rows = filtered[:self._DEBUG_ROW_CAP]
+        self._render_debug_table(rows)
+        total = len(all_rows)
+        if search:
+            self.debug_info_label.setText(f"Found {len(filtered)} matching — showing {len(rows)}")
+        elif total > len(rows):
+            self.debug_info_label.setText(
+                f"Showing {len(rows)} of {total} — type in search to find any file")
+        else:
+            self.debug_info_label.setText(f"Showing {total} indexed files")
+        if hasattr(self, 'view_files_btn'):
+            self.view_files_btn.setText(f"View Analyzed Files ({total})")
+        try:
+            self._update_indexed_paths_list()
+        except Exception:
+            pass
+
+    def _render_debug_table(self, rows):
+        """Render exactly the given rows into the table. Editing/selection/actions operate on
+        whatever is rendered; the full set lives in self._all_debug_rows."""
+        try:
             # Store file data for Quick Actions
             self._last_debug_files = []
-            
+
             # Update debug table
             self._populating_debug_table = True
             self.debug_table.blockSignals(True)
+            self.debug_table.setUpdatesEnabled(False)   # no repaints during the bulk fill
+            # Style the per-row action buttons ONCE (this CSS was being re-parsed for every
+            # button on every row — ~2 parses x N rows — the main cause of the open lag).
+            if not getattr(self, "_debug_action_css_set", False):
+                self.debug_table.setStyleSheet(self.debug_table.styleSheet() +
+                    " QPushButton#rowActionBtn{background-color:#7C4DFF;color:white;font-size:11px;"
+                    "font-weight:bold;border:none;border-radius:5px;padding:2px 10px;min-height:22px;"
+                    "max-height:22px;} QPushButton#rowActionBtn:hover{background-color:#9575FF;}")
+                self._debug_action_css_set = True
             self.debug_table.setRowCount(len(rows))
-            
+
             for row_idx, row in enumerate(rows):
                 # Build file dict for Quick Actions
                 try:
@@ -8734,31 +8738,14 @@ Move Plan Summary:
                 actions_layout.setSpacing(12)  # More space between buttons
                 actions_layout.setAlignment(Qt.AlignVCenter)
                 
-                btn_style = """
-                    QPushButton {
-                        background-color: #7C4DFF;
-                        color: white;
-                        font-size: 11px;
-                        font-weight: bold;
-                        border: none;
-                        border-radius: 5px;
-                        padding: 2px 10px;
-                        min-height: 22px;
-                        max-height: 22px;
-                    }
-                    QPushButton:hover {
-                        background-color: #9575FF;
-                    }
-                """
-                
                 btn_copy = QPushButton("Copy")
                 btn_open = QPushButton("Open")
+                btn_copy.setObjectName("rowActionBtn")   # styled once at table level (see above)
+                btn_open.setObjectName("rowActionBtn")
                 btn_copy.setFixedHeight(22)
                 btn_open.setFixedHeight(22)
                 btn_copy.setMinimumWidth(52)
                 btn_open.setMinimumWidth(52)
-                btn_copy.setStyleSheet(btn_style)
-                btn_open.setStyleSheet(btn_style)
                 btn_copy.setToolTip("Copy file path to clipboard")
                 btn_open.setToolTip("Open file with default app")
                 actions_layout.addWidget(btn_copy)
@@ -8773,26 +8760,16 @@ Move Plan Summary:
                 btn_open.clicked.connect(lambda _, p=file_path_val: self.open_file_in_os(p))
             
             self.debug_table.blockSignals(False)
+            self.debug_table.setUpdatesEnabled(True)   # re-enable repaints (one paint, not N)
             self._populating_debug_table = False
-            self.debug_info_label.setText(f"Showing {len(rows)} indexed files")
-            self.status_bar.showMessage(f"Files view refreshed - {len(rows)} files shown")
-            
-            # Force table to update and scroll to top
+            self.status_bar.showMessage(f"Files view refreshed - {len(rows)} shown")
             self.debug_table.scrollToTop()
             self.debug_table.viewport().update()
-            
-            logger.info(f"refresh_debug_view: Table updated with {len(rows)} rows")
-            
-            # Update indexed paths list in sidebar
-            self._update_indexed_paths_list()
-            
-            # Update the View Files button count
-            if hasattr(self, 'view_files_btn'):
-                self.view_files_btn.setText(f"View Analyzed Files ({len(rows)})")
-            
+            logger.info(f"_render_debug_table: rendered {len(rows)} rows")
         except Exception as e:
-            QMessageBox.critical(self, "Debug Error", f"Error refreshing debug view:\n{e}")
-            self.debug_info_label.setText("Error loading debug data")
+            self.debug_table.setUpdatesEnabled(True)
+            self._populating_debug_table = False
+            logger.error(f"_render_debug_table error: {e}")
     
     def clear_index(self):
         """Clear the search index."""
