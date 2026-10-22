@@ -303,6 +303,42 @@ class IndexBeforeOrganizeWorker(QThread):
                 self.error.emit(str(e))
 
 
+class OrganizePrepWorker(QThread):
+    """Runs the heavy, blocking parts of organize prep OFF the UI thread so the app never
+    freezes ("Not Responding") on a big/slow/cloud folder. It only calls the page's existing
+    (now GUI-free) helpers; every dialog/decision stays on the main thread in the slot that
+    receives `done`.
+        mode 'check_unindexed' -> {'mode','unindexed': [...]}
+        mode 'load_verify'     -> {'mode','stage':'nofiles'}
+                               or {'mode','stage':'ready','files':[...],'original_count':N}
+        on failure             -> {'mode', 'error': '...'}
+    """
+    done = Signal(dict)
+
+    def __init__(self, page, mode: str):
+        super().__init__()
+        self.page = page
+        self.mode = mode
+
+    def run(self):
+        try:
+            if self.mode == "check_unindexed":
+                unindexed = self.page._check_for_unindexed_files()
+                self.done.emit({"mode": "check_unindexed", "unindexed": unindexed})
+            else:  # load_verify
+                files = self.page._load_files_from_db()
+                if not files:
+                    self.done.emit({"mode": "load_verify", "stage": "nofiles"})
+                    return
+                original_count = len(files)
+                files = self.page._verify_and_fix_paths(files)
+                self.done.emit({"mode": "load_verify", "stage": "ready",
+                                "files": files, "original_count": original_count})
+        except Exception as e:
+            logger.error(f"OrganizePrepWorker ({self.mode}) failed: {e}")
+            self.done.emit({"mode": self.mode, "error": str(e)})
+
+
 class IndexProgressDialog(QDialog):
     """Modal progress dialog for indexing with Cancel/Skip options."""
     
@@ -6941,25 +6977,12 @@ class OrganizePage(QWidget):
                 removed_count += 1
                 removed_names.append(file_name)
         
-        # Show summary dialog if changes were made
         if updated_count > 0 or removed_count > 0:
+            # NOTE: this runs on the OrganizePrepWorker background thread, so it must NOT
+            # touch any Qt widget. The status label is updated by the main-thread slot
+            # after the worker finishes.
             logger.info(f"Path verification: {updated_count} updated, {removed_count} removed, {len(verified_files)} verified")
-            
-            msg_parts = []
-            if updated_count > 0:
-                msg_parts.append(f"✓ Updated {updated_count} file path(s):")
-                for name in updated_names[:5]:
-                    msg_parts.append(f"   • {name}")
-                if len(updated_names) > 5:
-                    msg_parts.append(f"   ... and {len(updated_names) - 5} more")
-            
-            # Silent path verification - just update status bar, no popup
-            status_msg = f"Path check: {updated_count} fixed"
-            if removed_count > 0:
-                status_msg += f", {removed_count} missing"
-            status_msg += f". Sending {len(verified_files)} files to AI..."
-            self.status_label.setText(status_msg)
-        
+
         return verified_files
     
     def _check_for_unindexed_files(self) -> List[str]:
@@ -7002,47 +7025,89 @@ class OrganizePage(QWidget):
         return unindexed_files
     
     def generate_plan(self):
-        """Request organization plan from LLM."""
+        """Request organization plan from LLM.
+
+        The heavy folder-scanning/DB work (two full os.walks + the DB load) now runs on a
+        background worker (OrganizePrepWorker) so the UI never freezes ("Not Responding")
+        on a big/slow/cloud folder. The dialogs and decisions stay on the main thread,
+        driven by the worker's `done` signal -> _on_prep_done -> _continue_after_unindexed
+        -> _on_files_prepared. Behaviour (dialogs, order, the index-then-retry loop) is
+        unchanged; only WHERE the scanning runs moved off the UI thread."""
         instruction = self.instruction_input.text().strip()
 
         if not self.destination_path:
             return
 
+        # Guard against re-entry (e.g. rapid Enter in the instruction box) while a prep
+        # worker is already scanning. The old synchronous version was implicitly guarded by
+        # the UI freeze it caused; now that prep is async we must guard explicitly.
+        if getattr(self, "_prep_worker", None) is not None and self._prep_worker.isRunning():
+            return
+
         # Once we've already run an index pass (or the user hit Skip), do NOT re-scan for
-        # "unindexed" files. The indexer's 1000-file cap and skip rules can legitimately
-        # leave files the raw recursive walk still sees, which otherwise re-opens this
-        # dialog forever. Index once, then proceed with whatever made it into the DB.
+        # "unindexed" files. The indexer's cap and skip rules can legitimately leave files
+        # the raw recursive walk still sees, which otherwise re-opens the dialog forever.
         skip_index_check = getattr(self, "_skip_index_check_once", False)
         self._skip_index_check_once = False
+        self._pending_instruction = instruction
 
-        # Check for unindexed files and offer to index them with full AI analysis
-        unindexed_files = [] if skip_index_check else self._check_for_unindexed_files()
-        if unindexed_files:
-            # Ask user if they want to index new files first
-            confirmed = ModernConfirmDialog.ask(
-                self,
-                title="New Files Detected",
-                message=f"Found {len(unindexed_files)} new file(s) that haven't been analyzed yet.",
-                details=[
-                    "AI analysis provides better organization",
-                    "Files will be tagged and categorized",
-                    "This only takes a moment"
-                ],
-                info_text="Indexing ensures the AI can make smart organization decisions.",
-                yes_text="Index Now",
-                no_text="Skip"
-            )
-            
-            if confirmed:
-                # Trigger full AI indexing, then continue with plan
-                self._index_folder_before_organize(self.destination_path)
-                return  # Will call generate_plan again after indexing
-        
+        if skip_index_check:
+            # Already indexed this pass -- skip the unindexed scan, go straight to load+verify.
+            self._continue_after_unindexed()
+            return
+
+        # Heavy #1: scan for unindexed files -- on a worker so a big/slow folder can't freeze.
+        self.generate_button.setEnabled(False)
+        self.status_label.setText("Scanning folder...")
+        self._prep_worker = OrganizePrepWorker(self, "check_unindexed")
+        self._prep_worker.done.connect(self._on_prep_done)
+        self._prep_worker.start()
+
+    def _on_prep_done(self, result: Dict[str, Any]):
+        """Main-thread handler for OrganizePrepWorker results -- all dialogs/decisions live here."""
+        if result.get("error"):
+            self.generate_button.setEnabled(True)
+            self.status_label.setText("Couldn't scan the folder. Please try again.")
+            return
+
+        if result.get("mode") == "check_unindexed":
+            unindexed_files = result.get("unindexed", [])
+            if unindexed_files:
+                # Ask user if they want to index new files first
+                confirmed = ModernConfirmDialog.ask(
+                    self,
+                    title="New Files Detected",
+                    message=f"Found {len(unindexed_files)} new file(s) that haven't been analyzed yet.",
+                    details=[
+                        "AI analysis provides better organization",
+                        "Files will be tagged and categorized",
+                        "This only takes a moment"
+                    ],
+                    info_text="Indexing ensures the AI can make smart organization decisions.",
+                    yes_text="Index Now",
+                    no_text="Skip"
+                )
+                if confirmed:
+                    # Trigger full AI indexing, then continue with plan
+                    self._index_folder_before_organize(self.destination_path)
+                    return  # Will call generate_plan again after indexing
+                # Skip -> fall through and use what's already indexed
+            self._continue_after_unindexed()
+            return
+
+        # mode == "load_verify"
+        self._on_files_prepared(result)
+
+    def _continue_after_unindexed(self):
+        """Cheap main-thread checks (exclusions + auto-organize mode), then kick off the
+        heavy load+verify on a worker."""
+        instruction = getattr(self, "_pending_instruction", "")
+
         # Check if instruction mentions excluded file types
         if instruction:
             excluded_types_mentioned = self._check_instruction_for_exclusions(instruction)
             if excluded_types_mentioned:
-                # Show warning and don't proceed
+                self.generate_button.setEnabled(True)
                 excluded_list = ", ".join(excluded_types_mentioned)
                 QMessageBox.warning(
                     self,
@@ -7053,7 +7118,7 @@ class OrganizePage(QWidget):
                     f"To organize them, go to Settings → Exclusions and remove the pattern."
                 )
                 return
-        
+
         # Auto-organize mode: no instruction provided
         if not instruction:
             confirmed = ModernConfirmDialog.ask(
@@ -7062,7 +7127,7 @@ class OrganizePage(QWidget):
                 message="AI will analyze your files and propose an organization structure based on:",
                 details=[
                     "File types and categories",
-                    "AI-generated tags and labels", 
+                    "AI-generated tags and labels",
                     "Content analysis"
                 ],
                 highlight_text="The structure will be kept simple with minimal nesting.",
@@ -7071,8 +7136,9 @@ class OrganizePage(QWidget):
                 no_text="Cancel"
             )
             if not confirmed:
+                self.generate_button.setEnabled(True)
                 return
-            
+
             # Use auto-organize instruction - MUST organize ALL files
             instruction = (
                 "[AUTO-ORGANIZE] Organize ALL of the provided files into a logical folder structure. "
@@ -7083,16 +7149,23 @@ class OrganizePage(QWidget):
                 "If some files don't fit any clear category, put them in a 'misc' or 'other' folder. "
                 "EVERY file_id provided MUST appear in exactly one folder."
             )
-        
+
         # Save the instruction for potential refinement
         self.original_instruction = instruction
-        
-        files = self._load_files_from_db()
-        
-        if not files:
+        self._pending_instruction = instruction
+
+        # Heavy #2: load from DB + verify/fix paths (another full os.walk) -- on a worker.
+        self.generate_button.setEnabled(False)
+        self.status_label.setText("Loading your files...")
+        self._prep_worker = OrganizePrepWorker(self, "load_verify")
+        self._prep_worker.done.connect(self._on_prep_done)
+        self._prep_worker.start()
+
+    def _on_files_prepared(self, result: Dict[str, Any]):
+        """Main-thread handler once files are loaded + path-verified on the worker."""
+        if result.get("stage") == "nofiles":
             # No indexed files - check if destination folder has files to index
             if self.destination_path and self.destination_path.exists():
-                # Count files in destination folder
                 folder_files = []
                 try:
                     for item in os.listdir(str(self.destination_path)):
@@ -7101,9 +7174,8 @@ class OrganizePage(QWidget):
                             folder_files.append(item_path)
                 except Exception as e:
                     logger.error(f"Error scanning destination folder: {e}")
-                
+
                 if folder_files:
-                    # Ask user if they want to index the folder first
                     reply = QMessageBox.question(
                         self,
                         "Index Files First?",
@@ -7112,25 +7184,23 @@ class OrganizePage(QWidget):
                         QMessageBox.Yes | QMessageBox.No,
                         QMessageBox.Yes
                     )
-                    
                     if reply == QMessageBox.Yes:
-                        # Index the folder
                         self._index_folder_before_organize(self.destination_path)
                         return  # The indexing will call generate_plan again when done
                     else:
+                        self.generate_button.setEnabled(True)
                         return
-            
+
+            self.generate_button.setEnabled(True)
             QMessageBox.warning(
                 self, "No Files",
                 "No indexed files found. Please go to Index Files and index some files first."
             )
             return
-        
-        # Verify file paths and fix any that have been moved
-        self.status_label.setText("Verifying file paths...")
-        original_count = len(files)
-        files = self._verify_and_fix_paths(files)
-        
+
+        files = result.get("files", [])
+        original_count = result.get("original_count", len(files))
+
         # Re-filter exclusions after path verification (paths may have changed)
         excluded_after_verify = 0
         filtered_files = []
@@ -7143,11 +7213,12 @@ class OrganizePage(QWidget):
         files = filtered_files
         if excluded_after_verify > 0:
             logger.info(f"Excluded {excluded_after_verify} files based on exclusion patterns (post-verification)")
-        
+
         # Update files_by_id with verified files only
         self.files_by_id = {f["id"]: f for f in files}
 
         if not files:
+            self.generate_button.setEnabled(True)
             QMessageBox.warning(
                 self, "No Valid Files",
                 f"All {original_count} indexed files have been moved or deleted.\n\n"
@@ -7172,11 +7243,11 @@ class OrganizePage(QWidget):
         self.plan_tree.clear()
         # Details panel removed
 
-        self.plan_worker = PlanWorker(instruction, files)
+        self.plan_worker = PlanWorker(self.original_instruction, files)
         self.plan_worker.finished.connect(self._on_plan_received)
         self.plan_worker.error.connect(self._on_plan_error)
         self.plan_worker.start()
-    
+
     def _index_folder_before_organize(self, folder_path: Path):
         """Index a folder before organizing, then continue with organization."""
         # Count files to index
