@@ -258,8 +258,9 @@ def _tag_transcript(transcript: str) -> dict:
             "You label an AUDIO clip for a file-search index, given a transcript of what is "
             "said. Identify the real TOPICS, people, products, tools and themes discussed. "
             "Return a one-sentence caption summarizing the clip, a short category (e.g. "
-            "'podcast', 'meeting', 'voice memo', 'lecture', 'interview', 'music'), and up to 15 "
-            "topic tags. Tag only actual content — NEVER the file format, the words "
+            "'podcast', 'meeting', 'voice memo', 'lecture', 'interview', 'music'), and up to 20 "
+            "topic tags — only as many as the clip GENUINELY covers; do NOT pad a short clip to "
+            "reach a number. Tag only actual content — NEVER the file format, the words "
             "'audio'/'transcript'/'caption', or any filename. Return JSON only: "
             "{\"caption\": \"...\", \"category\": \"...\", \"tags\": [\"t1\", \"t2\"]}."
         )
@@ -274,7 +275,7 @@ def _tag_transcript(transcript: str) -> dict:
         if not isinstance(data, dict):
             return {}
         tags = data.get("tags") or []
-        tags = [str(t).lower()[:64] for t in tags][:15] if isinstance(tags, list) else []
+        tags = [str(t).lower()[:64] for t in tags][:20] if isinstance(tags, list) else []
         return {
             "caption": str(data.get("caption", "")).strip()[:1200],
             "label": (str(data.get("category", "audio")).strip().lower() or "audio"),

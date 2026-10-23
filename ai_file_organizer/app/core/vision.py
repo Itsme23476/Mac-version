@@ -547,7 +547,9 @@ def _gpt_text_analysis(text: str, filename: Optional[str] = None, user_instructi
             "would search for. NEVER include the file format/extension (pdf, docx, pptx, eml, epub, "
             "odt...), the filename, layout or visual descriptions (columns, images, thumbnail, 16:9, "
             "caption, no images), or vague filler (document, page, text, plain text, office, "
-            "professional, business, formal, official). 6 to 14 tags, lowercase, no duplicates. For "
+            "professional, business, formal, official). Up to 20 tags, lowercase, no duplicates — "
+            "but only as many as the file GENUINELY covers; do NOT pad a short or simple file to "
+            "reach a number (a one-line note should get a handful of tags, not twenty). For "
             "an email, DO include the sender and recipient." + focus
         )
         user_prompt = ((f"Filename (context only - do NOT tag it): {filename}\n" if filename else "")
@@ -592,7 +594,7 @@ def _gpt_text_analysis(text: str, filename: Optional[str] = None, user_instructi
         tags = data.get("tags") or []
         if not isinstance(tags, list):
             tags = []
-        tags = [str(t).lower()[:64] for t in tags][:14]
+        tags = [str(t).lower()[:64] for t in tags][:20]
         caption = str(data.get("caption", "")).strip()[:400]
         try:
             conf = float(data.get("confidence", 0))
