@@ -2426,6 +2426,83 @@ class MainWindow(QMainWindow):
         self.organize_page = OrganizePage(self)
         self.page_stack.addWidget(self.organize_page)
 
+    def _build_mcp_connect_card(self):
+        """Settings card: one-click connect/disconnect the Filect MCP server in Claude Desktop."""
+        c = theme_manager.get_colors()
+        card = QFrame()
+        card.setObjectName("settingsCardMcp")
+        card.setStyleSheet(f"""
+            QFrame#settingsCardMcp {{
+                background-color: {c['surface']};
+                border: 1px solid {c['border']};
+                border-radius: 16px;
+            }}
+            QFrame#settingsCardMcp QLabel {{ border: none; background: transparent; }}
+        """)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(10)
+        title = QLabel("Connect to Claude")
+        title.setStyleSheet("font-size: 15px; font-weight: 600; color: #7C4DFF; "
+                            "background: transparent; border: none;")
+        lay.addWidget(title)
+        desc = QLabel("Let Claude use Filect to search, analyze, and organize your files — "
+                      "right from Claude Desktop.")
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent; border: none;")
+        lay.addWidget(desc)
+        self._mcp_status_label = QLabel()
+        lay.addWidget(self._mcp_status_label)
+        row = QHBoxLayout()
+        self._mcp_connect_btn = QPushButton()
+        self._mcp_connect_btn.setMinimumHeight(36)
+        self._mcp_connect_btn.setCursor(Qt.PointingHandCursor)
+        self._mcp_connect_btn.setStyleSheet(
+            "QPushButton { background-color:#7C4DFF; color:white; border:none; border-radius:10px; "
+            "padding:0 18px; font-weight:600; } QPushButton:hover { background-color:#6A3DF0; }")
+        self._mcp_connect_btn.clicked.connect(self._on_mcp_connect_clicked)
+        row.addWidget(self._mcp_connect_btn)
+        row.addStretch()
+        lay.addLayout(row)
+        hint = QLabel("Quit and reopen Claude Desktop after connecting, then ask Claude to search "
+                      "or organize your files.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #4A4A5A; font-size: 11px; background: transparent; border: none;")
+        lay.addWidget(hint)
+        self._refresh_mcp_card()
+        return card
+
+    def _refresh_mcp_card(self):
+        connected = False
+        try:
+            from app.core import mcp_connect
+            connected = mcp_connect.is_connected()
+        except Exception:
+            pass
+        if connected:
+            self._mcp_status_label.setText("●  Connected")
+            self._mcp_status_label.setStyleSheet("color:#4CAF50; font-size:13px; background:transparent; border:none;")
+            self._mcp_connect_btn.setText("Disconnect")
+        else:
+            self._mcp_status_label.setText("○  Not connected")
+            self._mcp_status_label.setStyleSheet("color:#7A7A90; font-size:13px; background:transparent; border:none;")
+            self._mcp_connect_btn.setText("Connect to Claude")
+
+    def _on_mcp_connect_clicked(self):
+        from app.core import mcp_connect
+        try:
+            if mcp_connect.is_connected():
+                ok, msg = mcp_connect.disconnect()
+            else:
+                ok, msg = mcp_connect.connect()
+        except Exception as e:
+            ok, msg = False, f"Error: {e}"
+        self._refresh_mcp_card()
+        try:
+            self.status_bar.showMessage(msg, 6000)
+        except Exception:
+            pass
+
     def setup_settings_page(self):
         """Setup the Settings page with AI and app configuration."""
         # Create scroll area for settings
@@ -2503,8 +2580,11 @@ class MainWindow(QMainWindow):
         theme_row.addWidget(self.theme_toggle_btn)
         theme_row.addStretch()
         appearance_layout.addLayout(theme_row)
-        
+
         layout.addWidget(appearance_card)
+
+        # ======= CONNECT TO CLAUDE (MCP) CARD =======
+        layout.addWidget(self._build_mcp_connect_card())
 
         # ======= HELP & ONBOARDING CARD =======
         help_card = QFrame()
