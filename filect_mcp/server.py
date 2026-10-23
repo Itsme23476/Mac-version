@@ -180,5 +180,138 @@ def analyze_file(path: str) -> dict:
         return {"error": f"analyze failed: {e}"}
 
 
+def _mcp_plans_dir():
+    from app.core.settings import settings
+    d = settings.get_app_data_dir() / "mcp_plans"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _files_under(folder: str):
+    """Indexed files whose path is under `folder`, as dicts the plan functions expect. Matches
+    both the given path and its resolved form (handles symlinks like /tmp -> /private/tmp)."""
+    import sqlite3
+    import json as _json
+    from pathlib import Path
+    from app.core.database import file_index
+    cands = {str(Path(folder)).rstrip("/"), str(Path(folder).resolve()).rstrip("/")}
+    conn = sqlite3.connect(file_index.db_path)
+    conn.row_factory = sqlite3.Row
+    seen, out = set(), []
+    for c in cands:
+        for r in conn.execute("SELECT * FROM files WHERE file_path LIKE ?", (c + "/%",)).fetchall():
+            d = dict(r)
+            if d["id"] in seen:
+                continue
+            seen.add(d["id"])
+            try:
+                d["tags"] = _json.loads(d.get("tags") or "[]")
+            except Exception:
+                d["tags"] = []
+            try:
+                d["metadata"] = _json.loads(d.get("metadata") or "{}")
+            except Exception:
+                d["metadata"] = {}
+            out.append(d)
+    return out
+
+
+@server.tool(description="Preview how Filect would organize a folder. READ-ONLY — moves nothing. "
+                         "Returns a plan_id and the proposed folders (which files go where). The "
+                         "folder must already be indexed in Filect. Review the plan, then call "
+                         "apply_organization_plan(plan_id) to actually move the files.")
+def generate_organization_plan(folder: str, instructions: str = "") -> dict:
+    try:
+        _ensure_auth()
+        import json as _json
+        import uuid
+        from pathlib import Path
+        from app.core.ai_organizer import request_organization_plan, plan_to_moves
+        files = _files_under(folder)
+        if not files:
+            return {"error": "No indexed files under this folder — index it in Filect first."}
+        files_by_id = {f["id"]: f for f in files}
+        plan = request_organization_plan(
+            instructions or "Organize these files into sensible folders by content and type.", files)
+        if not plan or not plan.get("folders"):
+            return {"error": "Could not generate a plan."}
+        moves = plan_to_moves(plan, files_by_id, Path(folder))
+        if not moves:
+            return {"error": "The plan produced no moves."}
+        plan_id = uuid.uuid4().hex[:12]
+        (_mcp_plans_dir() / f"plan-{plan_id}.json").write_text(_json.dumps(moves), encoding="utf-8")
+        summary = {}
+        for m in moves:
+            folder_name = Path(m["destination_path"]).parent.name
+            summary.setdefault(folder_name, []).append(Path(m["source_path"]).name)
+        return _jsonsafe({
+            "plan_id": plan_id,
+            "total_files": len(moves),
+            "proposed_folders": {k: v[:20] for k, v in summary.items()},
+            "note": "Nothing moved yet. Call apply_organization_plan(plan_id) to apply.",
+        })
+    except Exception as e:
+        return {"error": f"plan failed: {e}"}
+
+
+@server.tool(description="Apply a plan from generate_organization_plan: MOVES the files into the "
+                         "proposed folders. Reversible with undo_last_organize. Never deletes "
+                         "anything. Needs the plan_id from a prior generate call.")
+def apply_organization_plan(plan_id: str) -> dict:
+    try:
+        import json as _json
+        from app.core.apply import apply_moves
+        pf = _mcp_plans_dir() / f"plan-{plan_id}.json"
+        if not pf.exists():
+            return {"error": "Unknown plan_id — generate a plan first."}
+        moves = _json.loads(pf.read_text(encoding="utf-8"))
+        success, errors, log_file, renamed = apply_moves(moves)
+        return _jsonsafe({
+            "success": success,
+            "moved": len(moves) - len(errors),
+            "errors": errors[:10],
+            "renamed_to_avoid_collision": renamed,
+            "log_file": log_file,
+            "note": "Call undo_last_organize() to reverse this.",
+        })
+    except Exception as e:
+        return {"error": f"apply failed: {e}"}
+
+
+@server.tool(description="Reverse the MOST RECENT organize operation — moves every file back to "
+                         "where it was. Never deletes anything. Use right after an "
+                         "apply_organization_plan you want to take back.")
+def undo_last_organize() -> dict:
+    try:
+        import json as _json
+        import shutil
+        from pathlib import Path
+        from app.core.settings import settings
+        logs = sorted(settings.get_moves_dir().glob("moves-*.json"))
+        if not logs:
+            return {"error": "No organize operation to undo."}
+        latest = logs[-1]
+        moves = _json.loads(latest.read_text(encoding="utf-8")).get("moves", [])
+        reverted, skipped = 0, []
+        for m in reversed(moves):
+            src = Path(m.get("to", ""))      # file is currently at the destination
+            dst = Path(m.get("from", ""))    # move it back to the original
+            if not src.exists():
+                skipped.append(f"missing: {src.name}")
+                continue
+            if dst.exists():
+                skipped.append(f"original occupied: {dst.name}")
+                continue
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                reverted += 1
+            except Exception as e:
+                skipped.append(f"{src.name}: {e}")
+        return {"reverted": reverted, "skipped": skipped[:10], "from_log": latest.name}
+    except Exception as e:
+        return {"error": f"undo failed: {e}"}
+
+
 if __name__ == "__main__":
     server.run("stdio")
