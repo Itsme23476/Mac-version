@@ -41,6 +41,7 @@ hidden_imports = [
     'app.core.text_extract',
     'app.core.update_checker',
     'app.core.vision',
+    'app.core.video_analysis',
     'app.core.transcription',
     'app.core.dictation_format',
     'app.core.dictation_history',
@@ -83,6 +84,8 @@ hidden_imports = [
     'AppKit',
     'Foundation',
     'Quartz',
+    'AVFoundation',   # video keyframe + audio extraction (video_analysis)
+    'CoreMedia',      # CMTime helpers for the above
     'objc',
     
     # Other dependencies
@@ -101,6 +104,20 @@ hidden_imports = [
     'dateparser.data',
     'regex',
     'PyPDF2',
+    'docx',          # Word .docx extraction (python-docx)
+    'pptx',          # PowerPoint .pptx extraction (python-pptx)
+    'lxml',
+    'lxml.etree',
+    'lxml._elementpath',
+    'striprtf',
+    'striprtf.striprtf',
+    'ebooklib',       # .epub extraction
+    'bs4',            # HTML parsing for epub
+    'soupsieve',
+    'odf',            # OpenDocument (.odt/.ods/.odp)
+    'odf.opendocument',
+    'odf.text',
+    'odf.teletype',
     'rapidfuzz',
     'spellchecker',
     'sounddevice',
@@ -134,6 +151,13 @@ datas += collect_data_files('certifi')
 
 # Collect spellchecker language dictionaries
 datas += collect_data_files('spellchecker')
+
+# Collect python-pptx + python-docx package data (default templates / content-type maps)
+try:
+    datas += collect_data_files('pptx')
+    datas += collect_data_files('docx')
+except Exception:
+    pass
 
 # Collect dateparser data files (language definitions)
 datas += collect_data_files('dateparser')
@@ -217,8 +241,8 @@ app = BUNDLE(
         'CFBundleName': _DISPLAY_NAME,
         'CFBundleDisplayName': _DISPLAY_NAME,
         'CFBundleIdentifier': _BUNDLE_ID,
-        'CFBundleVersion': '14.6.0',
-        'CFBundleShortVersionString': '14.6.0',
+        'CFBundleVersion': '14.8.0',
+        'CFBundleShortVersionString': '14.8.0',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleExecutable': 'Filect',

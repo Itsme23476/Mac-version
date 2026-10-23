@@ -1570,13 +1570,13 @@ class MainWindow(QMainWindow):
         drop_layout.addWidget(self.drop_icon, 0, Qt.AlignCenter)
         
         # Main text
-        self.drop_title = QLabel("Add folder to index")
+        self.drop_title = QLabel("Add files or folder to index")
         self.drop_title.setObjectName("dropTitleLarge")
         self.drop_title.setAlignment(Qt.AlignCenter)
         drop_layout.addWidget(self.drop_title)
-        
+
         # Subtitle
-        self.drop_subtitle = QLabel("Drag and drop folders here, or click to browse")
+        self.drop_subtitle = QLabel("Drag files or folders here, or click to browse")
         self.drop_subtitle.setObjectName("dropSubtitleLarge")
         self.drop_subtitle.setAlignment(Qt.AlignCenter)
         drop_layout.addWidget(self.drop_subtitle)
@@ -1816,21 +1816,14 @@ class MainWindow(QMainWindow):
         ])
         
         debug_header = self.debug_table.horizontalHeader()
+        # All Interactive with fixed starting widths. ResizeToContents was measuring every one
+        # of the 1000+ rows for each of ~9 columns on every refresh — a major source of the lag.
         debug_header.setSectionResizeMode(0, QHeaderView.Fixed)
-        self.debug_table.setColumnWidth(0, 40)
-        debug_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(7, QHeaderView.Interactive)
-        self.debug_table.setColumnWidth(7, 200)
-        debug_header.setSectionResizeMode(8, QHeaderView.Interactive)
-        self.debug_table.setColumnWidth(8, 200)
-        debug_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(10, QHeaderView.ResizeToContents)
-        debug_header.setSectionResizeMode(11, QHeaderView.ResizeToContents)
+        for _col, _w in ((0, 40), (1, 220), (2, 110), (3, 80), (4, 70), (5, 120), (6, 240),
+                         (7, 200), (8, 200), (9, 130), (10, 90), (11, 150)):
+            if _col != 0:
+                debug_header.setSectionResizeMode(_col, QHeaderView.Interactive)
+            self.debug_table.setColumnWidth(_col, _w)
         debug_header.setSectionResizeMode(12, QHeaderView.Interactive)
         self.debug_table.setColumnWidth(12, 200)
         debug_header.setSectionResizeMode(13, QHeaderView.Interactive)
@@ -2298,17 +2291,9 @@ class MainWindow(QMainWindow):
         
         # Process events to ensure table layout is calculated with data
         QApplication.processEvents()
-        
-        # Force column resize after data is loaded
-        for col in range(1, self.debug_table.columnCount()):
-            self.debug_table.resizeColumnToContents(col)
-        
-        # Ensure minimum width for key columns
-        if self.debug_table.columnWidth(1) < 200:  # File Name
-            self.debug_table.setColumnWidth(1, 200)
-        if self.debug_table.columnWidth(2) < 100:  # Category
-            self.debug_table.setColumnWidth(2, 100)
-        
+        # (Removed the per-refresh resizeColumnToContents loop — it measured every row for each
+        #  column and was a major lag source. Columns use fixed Interactive widths now.)
+
         # Update usage labels before showing
         self._update_usage_labels()
         
@@ -2430,14 +2415,11 @@ class MainWindow(QMainWindow):
     def _update_view_files_button_count(self):
         """Update the View Files button with the current file count."""
         try:
-            from app.core.indexer import FileIndexer
-            indexer = FileIndexer()
-            files = indexer.get_all_indexed_files()
-            count = len(files)
+            from app.core.search import search_service
+            count = search_service.get_index_statistics().get('total_files', 0)
             self.view_files_btn.setText(f"View Analyzed Files ({count})")
         except Exception as e:
             logger.error(f"Error updating file count: {e}")
-            self.view_files_btn.setText("View Analyzed Files (0)")
 
     def setup_organize_page(self):
         """Setup the AI-powered file organization page."""
@@ -8073,14 +8055,32 @@ Move Plan Summary:
             self.drop_subtitle.setText(subtitle)
     
     def _on_drop_zone_clicked(self, event):
-        """Handle click on drop zone to open folder dialog."""
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Folder to Index",
-            str(Path.home())
-        )
-        if folder:
-            self._handle_dropped_paths([folder])
+        """Handle click on drop zone: pick individual FILES or a FOLDER (both, multi-select)."""
+        paths = self._pick_files_or_folder()
+        if paths:
+            self._handle_dropped_paths(paths)
+
+    def _pick_files_or_folder(self):
+        """Native open panel that lets the user choose files AND/OR folders (multi-select) in
+        one dialog — Qt's QFileDialog can only do one or the other. Returns a list of paths
+        (empty if cancelled). Falls back to the folder-only Qt dialog if the native panel is
+        unavailable, so picking never breaks."""
+        try:
+            from AppKit import NSOpenPanel
+            panel = NSOpenPanel.openPanel()
+            panel.setCanChooseFiles_(True)
+            panel.setCanChooseDirectories_(True)
+            panel.setAllowsMultipleSelection_(True)
+            panel.setResolvesAliases_(True)
+            panel.setTitle_("Select files or a folder to index")
+            panel.setPrompt_("Index")
+            if panel.runModal() == 1:  # NSModalResponseOK
+                return [str(u.path()) for u in panel.URLs() if u.path()]
+            return []
+        except Exception as e:
+            logger.warning(f"Native open panel failed, using folder dialog: {e}")
+            folder = QFileDialog.getExistingDirectory(self, "Select Folder to Index", str(Path.home()))
+            return [folder] if folder else []
     
     def _clear_all_indexed_paths(self):
         """Clear all indexed files from the database."""
@@ -8115,7 +8115,7 @@ Move Plan Summary:
         """Reset drop zone to default styling."""
         # Use object name selector for consistency with QSS
         self.drop_zone.setStyleSheet("")  # Let QSS handle styling
-        self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
+        self._update_drop_zone("Add files or folder to analyze", "Drag files or folders here, or click to browse")
     
     def _handle_dropped_paths(self, paths: list):
         """Handle dropped file/folder paths and start indexing."""
@@ -8385,58 +8385,78 @@ Move Plan Summary:
             user_instructions: Optional user-provided focus instructions for AI tag generation
         """
         from app.core.search import search_service
-        
         total = len(files)
-        
-        # Show progress container
+        if total == 0:
+            return
+
+        # Per-file analysis (especially VIDEO: frame decode + audio export + transcription) is
+        # heavy — run it OFF the UI thread so the app never lags, exactly like folder indexing.
         if hasattr(self, 'index_progress_container'):
             self.index_progress_container.setVisible(True)
-        
-        # Update drop zone to show status
-        self._update_drop_zone(f"Analyzing {total} files...", "Drop more files to add to queue")
-        
+        self._update_drop_zone(f"Analyzing {total} file{'s' if total != 1 else ''}…", "")
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(0)
         self.index_percent_label.setVisible(True)
         self.index_progress_label.setVisible(True)
-        
-        indexed = 0
-        for file_path in files:
+        self.index_cancel_btn.setVisible(True)
+        self.is_indexing = True
+
+        worker = IndexWorker(Path(files[0]))   # directory_path is unused; we replace run()
+        self.index_worker = worker
+        worker.progress_data.connect(self._on_file_index_progress)
+        worker.index_completed.connect(self._on_individual_files_done)
+        worker.index_error.connect(self.on_index_error)
+
+        def run_files():
+            indexed = 0
             try:
-                result = search_service.index_single_file(file_path, user_instructions=user_instructions)
-                if not result.get('error'):
-                    indexed += 1
-                percent = int((indexed / total) * 100)
-                self.progress_bar.setValue(indexed)
-                self.index_percent_label.setText(f"{percent}%")
-                self.index_progress_label.setText(f"Analyzing file {indexed} of {total}")
-                QApplication.processEvents()  # Keep UI responsive
+                for i, fp in enumerate(files):
+                    if worker.is_cancelled():
+                        break
+                    try:
+                        result = search_service.index_single_file(fp, user_instructions=user_instructions)
+                        if not (result or {}).get('error'):
+                            indexed += 1
+                    except Exception as e:
+                        logger.error(f"Error indexing {fp}: {e}")
+                    worker.progress_data.emit(i + 1, total, f"Analyzing file {i + 1} of {total}")
+                worker.index_completed.emit({'indexed': indexed})
             except Exception as e:
-                logger.error(f"Error indexing {file_path}: {e}")
-        
-        # Done - hide progress
+                worker.index_error.emit(str(e))
+        worker.run = run_files  # type: ignore
+        worker.start()
+
+    def _on_file_index_progress(self, done: int, total: int, message: str):
+        """Thread-safe progress update for individual-file indexing (runs on the UI thread)."""
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(done)
+        if total:
+            self.index_percent_label.setText(f"{int(done / total * 100)}%")
+        self.index_progress_label.setText(message)
+
+    def _on_individual_files_done(self, result: dict):
+        """Finish individual-file indexing: hide progress, refresh the list."""
+        self.is_indexing = False
         if hasattr(self, 'index_progress_container'):
             self.index_progress_container.setVisible(False)
-        
         self.progress_bar.setVisible(False)
         self.index_percent_label.setVisible(False)
         self.index_progress_label.setVisible(False)
-        
-        # Reset drop zone
-        self._update_drop_zone("Add folder to analyze", "Drag and drop or click to browse")
-        
-        QMessageBox.information(
-            self,
-            "Analysis Complete",
-            f"Successfully analyzed {indexed} of {total} files."
-        )
-        
-        # Refresh views and update paths list
+        self.index_cancel_btn.setVisible(False)
+        self._update_drop_zone("Add files or folder to analyze", "Drag files or folders here, or click to browse")
         self.refresh_debug_view()
-        self._update_indexed_paths_list()
-        stats = search_service.get_index_statistics()
-        self.update_search_statistics(stats)
-        self.search_button.setEnabled(True)
+        try:
+            self._update_view_files_button_count()
+        except Exception:
+            pass
+        self.status_bar.showMessage(f"Analyzed {result.get('indexed', 0)} file(s)", 3000)
+        try:
+            from app.core.search import search_service
+            self.update_search_statistics(search_service.get_index_statistics())
+            self.search_button.setEnabled(True)
+        except Exception:
+            pass
     
     # ==================== END DRAG AND DROP ====================
     
@@ -8494,73 +8514,92 @@ Move Plan Summary:
 
     # Debug functionality methods
     def _filter_indexed_files(self, search_text: str):
-        """Filter the indexed files table based on search text."""
-        if not hasattr(self, 'debug_table'):
+        """Filter the indexed files view. Re-renders from the cached FULL set, so the row cap
+        never hides a matching file."""
+        if not hasattr(self, 'debug_table') or self.debug_table is None:
             return
-        
-        search = search_text.lower().strip()
-        
-        # Columns to search:
-        # 1: File Name, 2: Category, 5: Label, 6: Tags, 7: Caption, 11: Purpose, 14: File Path
-        searchable_cols = [1, 2, 5, 6, 7, 11, 14]
-        
-        for row in range(self.debug_table.rowCount()):
-            if not search:
-                # Show all rows when search is empty
-                self.debug_table.setRowHidden(row, False)
-                continue
-            
-            # Check all searchable columns
-            match = False
-            for col in searchable_cols:
-                item = self.debug_table.item(row, col)
-                if item and search in item.text().lower():
-                    match = True
-                    break
-            
-            self.debug_table.setRowHidden(row, not match)
-        
-        # Update selection count label
-        visible_count = sum(1 for row in range(self.debug_table.rowCount()) if not self.debug_table.isRowHidden(row))
-        if search:
-            self.debug_selection_count_label.setText(f"{visible_count} files found")
-        else:
-            self._on_debug_selection_changed()
+        self._render_filtered_debug()
     
+    _DEBUG_ROW_CAP = 300  # render at most this many rows at once; search filters the FULL set
+
     def refresh_debug_view(self):
-        """Refresh the debug view with current database contents."""
-        # Skip if debug table doesn't exist (hidden in MVP mode)
-        if not hasattr(self, 'debug_table'):
-            logger.warning("refresh_debug_view: debug_table not found")
+        """Reload all files from the DB (cached for search) and render the capped view. Opening
+        is instant no matter how many files are indexed; search re-renders from the cached full
+        set, so the cap never hides a file from search."""
+        if not hasattr(self, 'debug_table') or self.debug_table is None:
             return
-        
-        if self.debug_table is None:
-            logger.warning("refresh_debug_view: debug_table is None")
-            return
-            
         try:
-            # Get all files from database using a direct query
             import sqlite3
             from app.core.database import file_index
-            
-            logger.info(f"refresh_debug_view: Querying database at {file_index.db_path}")
-            
             with sqlite3.connect(file_index.db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM files ORDER BY file_name")
-                rows = cursor.fetchall()
-            
-            logger.info(f"refresh_debug_view: Found {len(rows)} files in database")
-            
+                self._all_debug_rows = conn.execute(
+                    "SELECT * FROM files ORDER BY file_name").fetchall()
+            logger.info(f"refresh_debug_view: Found {len(self._all_debug_rows)} files in database")
+            self._render_filtered_debug()
+        except Exception as e:
+            QMessageBox.critical(self, "Debug Error", f"Error refreshing debug view:\n{e}")
+            self.debug_info_label.setText("Error loading debug data")
+
+    def _render_filtered_debug(self):
+        """Apply the current search text to the cached rows, cap to _DEBUG_ROW_CAP, render."""
+        all_rows = getattr(self, '_all_debug_rows', [])
+        search = ""
+        if getattr(self, '_files_search_input', None):
+            search = self._files_search_input.text().lower().strip()
+        if search:
+            import json as _json
+            def _m(r):
+                hay = " ".join(str(r[k] or "") for k in
+                               ("file_name", "category", "label", "tags", "caption", "file_path")).lower()
+                if search in hay:
+                    return True
+                try:  # the old filter also matched the Purpose field (stored in metadata)
+                    purpose = (_json.loads(r["metadata"]) if r["metadata"] else {}).get("purpose", "")
+                    return search in str(purpose).lower()
+                except Exception:
+                    return False
+            filtered = [r for r in all_rows if _m(r)]
+        else:
+            filtered = all_rows
+        rows = filtered[:self._DEBUG_ROW_CAP]
+        self._render_debug_table(rows)
+        total = len(all_rows)
+        if search:
+            self.debug_info_label.setText(f"Found {len(filtered)} matching — showing {len(rows)}")
+        elif total > len(rows):
+            self.debug_info_label.setText(
+                f"Showing {len(rows)} of {total} — type in search to find any file")
+        else:
+            self.debug_info_label.setText(f"Showing {total} indexed files")
+        if hasattr(self, 'view_files_btn'):
+            self.view_files_btn.setText(f"View Analyzed Files ({total})")
+        try:
+            self._update_indexed_paths_list()
+        except Exception:
+            pass
+
+    def _render_debug_table(self, rows):
+        """Render exactly the given rows into the table. Editing/selection/actions operate on
+        whatever is rendered; the full set lives in self._all_debug_rows."""
+        try:
             # Store file data for Quick Actions
             self._last_debug_files = []
-            
+
             # Update debug table
             self._populating_debug_table = True
             self.debug_table.blockSignals(True)
+            self.debug_table.setUpdatesEnabled(False)   # no repaints during the bulk fill
+            # Style the per-row action buttons ONCE (this CSS was being re-parsed for every
+            # button on every row — ~2 parses x N rows — the main cause of the open lag).
+            if not getattr(self, "_debug_action_css_set", False):
+                self.debug_table.setStyleSheet(self.debug_table.styleSheet() +
+                    " QPushButton#rowActionBtn{background-color:#7C4DFF;color:white;font-size:11px;"
+                    "font-weight:bold;border:none;border-radius:5px;padding:2px 10px;min-height:22px;"
+                    "max-height:22px;} QPushButton#rowActionBtn:hover{background-color:#9575FF;}")
+                self._debug_action_css_set = True
             self.debug_table.setRowCount(len(rows))
-            
+
             for row_idx, row in enumerate(rows):
                 # Build file dict for Quick Actions
                 try:
@@ -8699,31 +8738,14 @@ Move Plan Summary:
                 actions_layout.setSpacing(12)  # More space between buttons
                 actions_layout.setAlignment(Qt.AlignVCenter)
                 
-                btn_style = """
-                    QPushButton {
-                        background-color: #7C4DFF;
-                        color: white;
-                        font-size: 11px;
-                        font-weight: bold;
-                        border: none;
-                        border-radius: 5px;
-                        padding: 2px 10px;
-                        min-height: 22px;
-                        max-height: 22px;
-                    }
-                    QPushButton:hover {
-                        background-color: #9575FF;
-                    }
-                """
-                
                 btn_copy = QPushButton("Copy")
                 btn_open = QPushButton("Open")
+                btn_copy.setObjectName("rowActionBtn")   # styled once at table level (see above)
+                btn_open.setObjectName("rowActionBtn")
                 btn_copy.setFixedHeight(22)
                 btn_open.setFixedHeight(22)
                 btn_copy.setMinimumWidth(52)
                 btn_open.setMinimumWidth(52)
-                btn_copy.setStyleSheet(btn_style)
-                btn_open.setStyleSheet(btn_style)
                 btn_copy.setToolTip("Copy file path to clipboard")
                 btn_open.setToolTip("Open file with default app")
                 actions_layout.addWidget(btn_copy)
@@ -8738,26 +8760,16 @@ Move Plan Summary:
                 btn_open.clicked.connect(lambda _, p=file_path_val: self.open_file_in_os(p))
             
             self.debug_table.blockSignals(False)
+            self.debug_table.setUpdatesEnabled(True)   # re-enable repaints (one paint, not N)
             self._populating_debug_table = False
-            self.debug_info_label.setText(f"Showing {len(rows)} indexed files")
-            self.status_bar.showMessage(f"Files view refreshed - {len(rows)} files shown")
-            
-            # Force table to update and scroll to top
+            self.status_bar.showMessage(f"Files view refreshed - {len(rows)} shown")
             self.debug_table.scrollToTop()
             self.debug_table.viewport().update()
-            
-            logger.info(f"refresh_debug_view: Table updated with {len(rows)} rows")
-            
-            # Update indexed paths list in sidebar
-            self._update_indexed_paths_list()
-            
-            # Update the View Files button count
-            if hasattr(self, 'view_files_btn'):
-                self.view_files_btn.setText(f"View Analyzed Files ({len(rows)})")
-            
+            logger.info(f"_render_debug_table: rendered {len(rows)} rows")
         except Exception as e:
-            QMessageBox.critical(self, "Debug Error", f"Error refreshing debug view:\n{e}")
-            self.debug_info_label.setText("Error loading debug data")
+            self.debug_table.setUpdatesEnabled(True)
+            self._populating_debug_table = False
+            logger.error(f"_render_debug_table error: {e}")
     
     def clear_index(self):
         """Clear the search index."""

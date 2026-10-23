@@ -14,6 +14,12 @@ supabase-auth>=2.0.0
 httpx>=0.26.0
 dateparser>=1.2.0
 PyPDF2>=3.0.0
+python-docx>=1.1.0    # Word .docx text extraction
+python-pptx>=1.0.0    # PowerPoint .pptx text extraction
+striprtf>=0.0.26      # RTF -> plain text (.eml uses the stdlib email module)
+ebooklib>=0.18        # .epub ebook text extraction
+beautifulsoup4>=4.12  # HTML parsing for .epub chapters
+odfpy>=1.4            # OpenDocument (.odt/.ods/.odp) text extraction
 rapidfuzz>=3.0.0
 pyspellchecker>=0.8.0
 sounddevice>=0.4.6
@@ -23,3 +29,5 @@ scipy>=1.11.0
 pynput>=1.7.6
 pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'
 pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'
+pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'  # video keyframe + audio extraction
+pyobjc-framework-CoreMedia>=10.0; sys_platform == 'darwin'     # CMTime helpers for video_analysis
