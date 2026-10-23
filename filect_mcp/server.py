@@ -160,6 +160,16 @@ def analyze_file(path: str) -> dict:
         p = Path(path)
         if not p.exists():
             return {"error": "file not found"}
+        # macOS TCC blocks reads in protected folders (Downloads/Desktop/Documents) unless the
+        # launching app has Full Disk Access — catch that here with a clear message instead of
+        # silently returning an empty analysis.
+        try:
+            with open(p, "rb") as _f:
+                _f.read(16)
+        except Exception as e:
+            return {"error": f"Can't read this file ({e}). On macOS, grant the app that launched "
+                             "this MCP (e.g. Claude Desktop) Full Disk Access in System Settings "
+                             "> Privacy & Security, then try again."}
         # Same per-file router the indexer uses (image/video/audio/pdf/doc), but we don't persist —
         # _process_single_file returns metadata; only index_single_file would write to the index.
         meta = search_service._process_single_file(
@@ -175,6 +185,9 @@ def analyze_file(path: str) -> dict:
             "transcript_or_text": meta.get("ocr_text") or None,
             "duration_seconds": meta.get("duration"),
         }
+        if not out["tags"] and not out["transcript_or_text"] and not out["caption"]:
+            return {"error": "Analysis produced no content — the file may be unreadable (see Full "
+                             "Disk Access above), empty, or an unsupported format."}
         return _jsonsafe(out)
     except Exception as e:
         return {"error": f"analyze failed: {e}"}
