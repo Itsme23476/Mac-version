@@ -11,11 +11,11 @@ local index DB + your saved Filect session, and makes the same paid AI calls the
 
 | tool | what it does | cost |
 |------|--------------|------|
+| **`analyze_file(path)`** | **analyze ANY file — image, video (frames + transcript), audio, PDF, or document (docx/pptx/rtf/eml/epub/odt) → type, tags, caption, transcript/text.** Read-only. | paid AI call |
 | `search_files(query, limit=20)` | semantic search over your index | free (local) |
 | `get_file_details(path)` | stored tags/caption/category for one file | free (local) |
-| `analyze_image(path)` | vision label + tags + caption (images only) | paid AI call |
-| `transcribe_file(path)` | transcribe an audio file | paid AI call |
 | `suggest_custom_words(niche)` | suggest dictation custom words for a field (returns only) | paid AI call |
+| `analyze_image(path)` / `transcribe_file(path)` | narrower helpers — now subsumed by `analyze_file` | paid AI call |
 
 > **Not yet:** video+sound analysis (would need frame + audio-track extraction — a new app
 > feature), organization-plan preview, and anything that moves files. Those come later and

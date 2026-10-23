@@ -29,9 +29,11 @@ from mcp.server.mcpserver import MCPServer
 server = MCPServer(
     "filect",
     instructions=(
-        "Filect: local semantic file search + AI organization. These tools find indexed "
-        "files, analyze an image, transcribe an audio file, and suggest dictation custom "
-        "words. READ-ONLY: nothing here moves, deletes, or re-indexes files."
+        "Filect: local semantic file search + AI content analysis. Use analyze_file to "
+        "understand the contents of ANY file — images, video (frames + spoken transcript), "
+        "audio, PDFs, and documents (Word/PowerPoint/RTF/email/ebook/OpenDocument). Other "
+        "tools search the index and suggest dictation words. READ-ONLY: nothing here moves, "
+        "deletes, or re-indexes files."
     ),
     version="0.1.0",
 )
@@ -48,6 +50,7 @@ def _ensure_auth() -> bool:
     try:
         from app.core.settings import settings
         from app.core.supabase_client import supabase_auth
+        settings.ai_provider = "openai"   # the MCP always analyzes via the cloud backend
         if supabase_auth.is_authenticated:
             _auth_ok = True
         elif settings.has_stored_session():
@@ -142,6 +145,39 @@ def suggest_custom_words(niche: str) -> list:
         return suggest_terms_for_niche(niche)
     except Exception as e:
         return [f"error: {e}"]
+
+
+@server.tool(description="Analyze ANY supported file and return its content: works on images, "
+                         "VIDEO (keyframes + spoken transcript), AUDIO, PDFs, and documents "
+                         "(.docx/.pptx/.rtf/.eml/.epub/.odt). Returns the type, content tags, a "
+                         "caption, and any transcript/extracted text. READ-ONLY: does NOT add the "
+                         "file to the index or move it. Makes paid AI calls.")
+def analyze_file(path: str) -> dict:
+    try:
+        _ensure_auth()
+        from pathlib import Path
+        from app.core.search import search_service
+        p = Path(path)
+        if not p.exists():
+            return {"error": "file not found"}
+        # Same per-file router the indexer uses (image/video/audio/pdf/doc), but we don't persist —
+        # _process_single_file returns metadata; only index_single_file would write to the index.
+        meta = search_service._process_single_file(
+            {"source_path": str(p), "name": p.name}, p.parent, force_ai=True)
+        if not meta or meta.get("_error"):
+            return {"error": (meta.get("_error") if meta else "could not analyze this file")}
+        out = {
+            "file": p.name,
+            "type": meta.get("label"),
+            "tags": meta.get("tags") or [],
+            "caption": meta.get("caption"),
+            "ai_source": meta.get("ai_source"),
+            "transcript_or_text": meta.get("ocr_text") or None,
+            "duration_seconds": meta.get("duration"),
+        }
+        return _jsonsafe(out)
+    except Exception as e:
+        return {"error": f"analyze failed: {e}"}
 
 
 if __name__ == "__main__":
