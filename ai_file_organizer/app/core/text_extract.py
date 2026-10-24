@@ -205,7 +205,48 @@ def extract_spreadsheet_text(file_path: Path) -> Optional[str]:
         except Exception as e:
             logger.error(f"Error reading Excel file {file_path}: {e}")
             return None
-    
+
+    if ext == '.xls':
+        try:
+            import xlrd
+            wb = xlrd.open_workbook(str(file_path))
+
+            parts: List[str] = []
+            parts.append(f"Excel File: {file_path.name}")
+            parts.append(f"Sheets: {', '.join(wb.sheet_names())}")
+            parts.append("")
+
+            for sheet_name in wb.sheet_names()[:3]:  # First 3 sheets
+                sheet = wb.sheet_by_name(sheet_name)
+                parts.append(f"Sheet: {sheet_name}")
+
+                rows_data: List[List[str]] = []
+                for i in range(min(sheet.nrows, 20)):
+                    row = sheet.row_values(i)
+                    rows_data.append([str(cell)[:100] if cell not in (None, '') else '' for cell in row[:15]])
+
+                if rows_data:
+                    headers = rows_data[0]
+                    parts.append(f"  Columns: {', '.join([h for h in headers if h])}")
+                    for j, row in enumerate(rows_data[1:10]):
+                        if headers:
+                            pairs = [f"{h}: {v}" for h, v in zip(headers, row) if v]
+                            if pairs:
+                                parts.append(f"    Row {j+1}: {'; '.join(pairs[:6])}")
+                parts.append("")
+
+            result = '\n'.join(parts)
+            if len(result) > MAX_CHARS:
+                result = result[:MAX_CHARS] + "\n... (truncated)"
+            return result
+
+        except ImportError:
+            logger.warning("xlrd not installed - cannot read .xls files")
+            return None
+        except Exception as e:
+            logger.error(f"Error reading .xls file {file_path}: {e}")
+            return None
+
     return None
 
 
