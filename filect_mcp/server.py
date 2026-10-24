@@ -33,10 +33,13 @@ server = MCPServer(
         "Filect: local semantic file search + AI content analysis + file organizing. Use "
         "analyze_file to understand the contents of ANY file — images, video (frames + spoken "
         "transcript), audio, PDFs, and documents (Word/PowerPoint/RTF/email/ebook/OpenDocument). "
-        "search_files/get_file_details read the index; suggest_custom_words proposes dictation "
-        "words. The organize tools MOVE files: generate_organization_plan previews, "
-        "apply_organization_plan moves them, and undo_last_organize reverses the most recent "
-        "move. Nothing deletes files or changes app settings."
+        "search_files/get_file_details read the index; save_to_index stores your analysis so "
+        "search can find the file. suggest_custom_words proposes dictation words and "
+        "add_custom_words saves them. The organize tools MOVE files: generate_organization_plan "
+        "previews, apply_organization_plan moves them, undo_last_organize reverses the most recent "
+        "move; enable_auto_organize turns on background auto-sorting for a folder. Tools that change "
+        "app settings (add_custom_words, enable_auto_organize) must be confirmed with the user "
+        "first. Nothing deletes files."
     ),
     version="0.1.0",
 )
@@ -189,13 +192,35 @@ def suggest_custom_words(niche: str) -> list:
         return [f"error: {e}"]
 
 
+@server.tool(description="Add dictation custom words to the user's Filect app (persists to "
+                         "settings — case-insensitive dedup, capped at 100). Use after "
+                         "suggest_custom_words once the user approves, or whenever the user asks to "
+                         "add dictation vocabulary. Returns how many were actually added.")
+def add_custom_words(words: list) -> dict:
+    try:
+        gate = _require_access()
+        if gate:
+            return gate
+        from app.core.settings import settings
+        added = settings.add_custom_terms(words or [])
+        return {
+            "added": added,
+            "total_now": len(settings.dictation_custom_terms),
+            "note": (f"Added {added} new custom word(s) to Filect's dictation vocabulary."
+                     if added else "Nothing added (already present, empty, or at the 100 cap)."),
+        }
+    except Exception as e:
+        return {"error": f"add failed: {e}"}
+
+
 @server.tool(description="Analyze ANY file and return what YOU (the client model) need to "
                          "understand and tag it, WITHOUT Filect's paid backend: documents & text "
                          "PDFs come back as extracted TEXT; images & video keyframes come back as "
                          "IMAGES for your own vision; audio comes back as a speech transcript (via "
                          "Filect's speech backend). You then produce the label/tags/caption "
                          "yourself. Unreadable/scanned files fall back to Filect's own analyzer. "
-                         "READ-ONLY: never adds to the index, moves, or deletes.")
+                         "This only READS — call save_to_index afterward with your tags to make the "
+                         "file searchable; it never moves or deletes the file.")
 def analyze_file(path: str):
     try:
         gate = _require_access()
@@ -306,6 +331,58 @@ def analyze_file(path: str):
         return _jsonsafe(out)
     except Exception as e:
         return {"error": f"analyze failed: {e}"}
+
+
+@server.tool(description="Save a file you just analyzed into Filect's index so it becomes "
+                         "SEARCHABLE (search_files will find it). Call AFTER analyze_file, passing "
+                         "the label/tags/caption YOU produced plus any extracted text/transcript. "
+                         "Writes to the local index only — never moves or changes the file. Images "
+                         "and videos count against the plan's media index limit, same as the app.")
+def save_to_index(path: str, label: str = "", tags: list = None, caption: str = "", text: str = "") -> dict:
+    try:
+        gate = _require_access()
+        if gate:
+            return gate
+        import mimetypes
+        from pathlib import Path
+        from app.core.database import file_index
+        from app.core.search import is_media_file
+        p = Path(path)
+        if not p.exists():
+            return {"error": "file not found"}
+        # Media (images/videos) count against the plan's monthly index limit, same as the app.
+        if is_media_file(p):
+            from app.core.supabase_client import supabase_auth
+            chk = supabase_auth.can_index_media(1) or {}
+            if not chk.get("allowed"):
+                return {"error": chk.get("reason") or "media index limit reached for your plan",
+                        "remaining": chk.get("remaining"), "limit": chk.get("limit")}
+        file_data = {
+            "source_path": str(p),
+            "name": p.name,
+            "extension": p.suffix.lower(),
+            "size": p.stat().st_size,
+            "mime_type": mimetypes.guess_type(str(p))[0] or "",
+            "category": "Misc",
+            "label": (label or "").strip(),
+            "tags": tags or [],
+            "caption": (caption or "").strip(),
+            "ocr_text": (text or "").strip(),
+            "has_ocr": bool((text or "").strip()),
+            "ai_source": "mcp:client-model",
+            "metadata": {"is_file": True, "is_dir": False},
+        }
+        ok = file_index.add_file(file_data)
+        if ok and is_media_file(p):
+            try:
+                from app.core.supabase_client import supabase_auth
+                supabase_auth.increment_index_usage(1)
+            except Exception:
+                pass
+        return {"saved": bool(ok), "file": p.name,
+                "note": "Indexed — search_files can find it now." if ok else "could not save to index"}
+    except Exception as e:
+        return {"error": f"save failed: {e}"}
 
 
 def _mcp_plans_dir():
@@ -447,6 +524,43 @@ def undo_last_organize() -> dict:
         return {"reverted": reverted, "skipped": skipped[:10], "from_log": latest.name}
     except Exception as e:
         return {"error": f"undo failed: {e}"}
+
+
+@server.tool(description="Turn ON auto-organize for a folder (ongoing background sorting). There are "
+                         "THREE modes and you MUST ask the user which one they want before calling — "
+                         "do NOT pick a default: mode=1 'Re-organize All' (sorts ALL existing files "
+                         "AND new ones), mode=2 'Organize As-Is' (sorts files only into the folder's "
+                         "EXISTING subfolders), mode=3 'New files only' (leaves existing files alone, "
+                         "only sorts files added from now on). Required flow: (1) ASK the user which "
+                         "mode; (2) preview with generate_organization_plan and show it; (3) ask "
+                         "'confirm? this will auto-organize your files based on this'; (4) only on an "
+                         "explicit YES, call this. Takes effect when the Filect app next (re)starts; "
+                         "removable from the app's Auto-Organize tab.")
+def enable_auto_organize(folder: str, mode: int, instruction: str = "") -> dict:
+    try:
+        gate = _require_access()
+        if gate:
+            return gate
+        from pathlib import Path
+        from app.core.settings import settings
+        if mode not in (1, 2, 3):
+            return {"error": "mode must be 1 (re-organize all), 2 (organize as-is), or 3 (new files only)"}
+        p = Path(folder)
+        if not p.exists() or not p.is_dir():
+            return {"error": "folder not found"}
+        settings.add_auto_organize_folder(str(p), instruction or "")
+        settings.update_auto_organize_action(str(p), mode)
+        mode_name = {1: "re-organize all files", 2: "organize into existing subfolders only",
+                     3: "new files only (existing untouched)"}[mode]
+        return {
+            "enabled": True,
+            "folder": str(p),
+            "mode": mode_name,
+            "note": "Registered. Filect starts watching this folder when the app next launches. "
+                    "Remove it anytime from the app's Auto-Organize tab.",
+        }
+    except Exception as e:
+        return {"error": f"setup failed: {e}"}
 
 
 if __name__ == "__main__":
