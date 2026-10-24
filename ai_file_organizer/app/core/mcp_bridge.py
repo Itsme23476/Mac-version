@@ -201,18 +201,52 @@ def start(force: bool = False) -> bool:
 
 # ---------------- the client (used by the separate MCP process) ----------------
 
-def call(op: str, timeout: float = 180.0, **kwargs) -> Optional[dict]:
-    """MCP-side: POST an op to the running app's bridge. Returns the result dict, or None if the
-    bridge isn't reachable (app not running / MCP not connected / stale token)."""
+def _do_call(op: str, timeout: float, **kwargs) -> dict:
+    import urllib.request
+    st = json.loads(_state_path().read_text())
+    token, port = st["token"], st["port"]
+    data = json.dumps({"op": op, **kwargs}).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/", data=data,
+        headers={"X-Filect-Token": token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _launch_background_bridge() -> bool:
+    """Launch the Filect app HEADLESS + in the BACKGROUND (--mcp-bridge), so its bridge runs with
+    the app's own folder grants — no window, no focus, ever. Shipped (frozen) app only; in dev the
+    bridge is run separately. Returns True if a launch was attempted."""
+    import sys
+    import subprocess
+    if not getattr(sys, "frozen", False):
+        return False
     try:
-        import urllib.request
-        st = json.loads(_state_path().read_text())
-        token, port = st["token"], st["port"]
-        data = json.dumps({"op": op, **kwargs}).encode()
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/", data=data,
-            headers={"X-Filect-Token": token, "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+        app = Path(sys.executable).resolve().parents[2]  # .app/Contents/MacOS/exe -> .app
+        if app.suffix == ".app":
+            # -g: do NOT bring to foreground ; -j: launch hidden ; then --args --mcp-bridge
+            subprocess.Popen(["open", "-gj", str(app), "--args", "--mcp-bridge"])
+            return True
     except Exception:
-        return None
+        pass
+    return False
+
+
+def call(op: str, timeout: float = 180.0, **kwargs) -> Optional[dict]:
+    """MCP-side: POST an op to the running app's bridge. If the bridge isn't up, launch the app
+    HEADLESS in the background (no window/focus) and retry. Returns the result dict, or None if the
+    bridge still isn't reachable (the tool then falls back to a direct read)."""
+    try:
+        return _do_call(op, timeout, **kwargs)
+    except Exception:
+        pass
+    # Bridge not reachable → start it headlessly (no focus) and retry for a few seconds.
+    if _launch_background_bridge():
+        import time
+        for _ in range(10):
+            time.sleep(0.75)
+            try:
+                return _do_call(op, timeout, **kwargs)
+            except Exception:
+                continue
+    return None

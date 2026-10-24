@@ -6,4 +6,9 @@
   <key>com.apple.security.cs.disable-library-validation</key><true/>
   <!-- Microphone access for voice dictation (required under hardened runtime). -->
   <key>com.apple.security.device.audio-input</key><true/>
+  <!-- Loopback MCP bridge (127.0.0.1): the app binds a local server and the MCP connects to it.
+       Not strictly required while the app is un-sandboxed, but guarantees the bridge works under
+       the hardened runtime (and if the app is ever sandboxed). -->
+  <key>com.apple.security.network.server</key><true/>
+  <key>com.apple.security.network.client</key><true/>
 </dict></plist>
