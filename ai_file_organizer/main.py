@@ -395,6 +395,24 @@ def _passes_entitlement_gate(app) -> bool:
 
 def main():
     """Main application entry point."""
+    # MCP server mode: when Claude/Codex launches `Filect --mcp-server`, act as the stdio MCP
+    # server instead of launching the GUI. This reuses the app's bundled runtime (so the MCP
+    # ships inside the one signed app binary), and because file reads are DELEGATED to the
+    # running GUI app's bridge, this process needs no file access of its own.
+    if "--mcp-server" in sys.argv:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        # filect_mcp is a sibling of ai_file_organizer in source (bundled at the root when frozen)
+        _repo = Path(__file__).resolve().parent.parent
+        if str(_repo) not in sys.path:
+            sys.path.insert(0, str(_repo))
+        try:
+            from filect_mcp.server import server as _mcp_server
+            _mcp_server.run("stdio")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("MCP server mode failed: %s", e)
+        return
+
     # Setup logging
     setup_logging()
     

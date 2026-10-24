@@ -22,9 +22,10 @@ def claude_config_path() -> Path:
 def mcp_command():
     """(command, args, env) Claude Desktop should use to launch the Filect MCP server."""
     if getattr(sys, "frozen", False):
-        # Shipped app: a standalone MCP binary bundled next to the app executable.
-        exe_dir = Path(sys.executable).resolve().parent
-        return str(exe_dir / "filect-mcp"), [], {"QT_QPA_PLATFORM": "offscreen"}
+        # Shipped app: the Filect app binary IS the MCP server when launched with --mcp-server.
+        # One signed binary, stable path; file reads are delegated to the running app's bridge,
+        # so this launched instance needs no Full Disk Access of its own.
+        return str(Path(sys.executable).resolve()), ["--mcp-server"], {"QT_QPA_PLATFORM": "offscreen"}
     # Running from source: the current Python interpreter + the server script.
     repo_root = Path(__file__).resolve().parents[3]
     server = repo_root / "filect_mcp" / "server.py"
