@@ -118,6 +118,8 @@ hidden_imports = [
     'odf.opendocument',
     'odf.text',
     'odf.teletype',
+    'openpyxl',       # Excel .xlsx text extraction
+    'xlrd',           # legacy Excel .xls text extraction
     'rapidfuzz',
     'spellchecker',
     'sounddevice',
@@ -241,8 +243,8 @@ app = BUNDLE(
         'CFBundleName': _DISPLAY_NAME,
         'CFBundleDisplayName': _DISPLAY_NAME,
         'CFBundleIdentifier': _BUNDLE_ID,
-        'CFBundleVersion': '14.8.1',
-        'CFBundleShortVersionString': '14.8.1',
+        'CFBundleVersion': '14.8.2',
+        'CFBundleShortVersionString': '14.8.2',
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleExecutable': 'Filect',
