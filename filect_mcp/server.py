@@ -1,12 +1,13 @@
-"""Filect MCP server — EXPERIMENTAL, read-only v1.
+"""Filect MCP server — EXPERIMENTAL.
 
-Exposes Filect's existing capabilities to an MCP client (Claude Desktop/Code) WITHOUT
-touching the app. It imports `app.core.*` and calls the same functions the app uses; it
-never edits app code and is not in the PyInstaller build.
+Exposes Filect's capabilities to an MCP client (Claude Desktop/Code) WITHOUT touching the
+app's code. It imports `app.core.*` and calls the same functions the app uses; it never
+edits app code and is not in the PyInstaller build.
 
-v1 is strictly READ-ONLY: it never moves/deletes files, never writes app settings, never
-re-indexes. It reads the local index DB and the saved Supabase session, and makes the same
-paid AI calls the app makes for image analysis / transcription / suggestions.
+Read tools (search, file details, analyze) only read the local index and make the same paid
+AI calls the app makes. Write tools organize files: apply_organization_plan MOVES files and
+undo_last_organize reverses the most recent move. Nothing here DELETES a file or changes app
+settings. Cloud AI calls need the saved Supabase session (sign into Filect once).
 
 Run:  QT_QPA_PLATFORM=offscreen /path/venv311/bin/python -m filect_mcp.server
 (registered in Claude via claude config — see README.md)
@@ -29,11 +30,13 @@ from mcp.server.mcpserver import MCPServer
 server = MCPServer(
     "filect",
     instructions=(
-        "Filect: local semantic file search + AI content analysis. Use analyze_file to "
-        "understand the contents of ANY file — images, video (frames + spoken transcript), "
-        "audio, PDFs, and documents (Word/PowerPoint/RTF/email/ebook/OpenDocument). Other "
-        "tools search the index and suggest dictation words. READ-ONLY: nothing here moves, "
-        "deletes, or re-indexes files."
+        "Filect: local semantic file search + AI content analysis + file organizing. Use "
+        "analyze_file to understand the contents of ANY file — images, video (frames + spoken "
+        "transcript), audio, PDFs, and documents (Word/PowerPoint/RTF/email/ebook/OpenDocument). "
+        "search_files/get_file_details read the index; suggest_custom_words proposes dictation "
+        "words. The organize tools MOVE files: generate_organization_plan previews, "
+        "apply_organization_plan moves them, and undo_last_organize reverses the most recent "
+        "move. Nothing deletes files or changes app settings."
     ),
     version="0.1.0",
 )
@@ -60,6 +63,33 @@ def _ensure_auth() -> bool:
     except Exception:
         _auth_ok = False
     return _auth_ok
+
+
+_access_ok = False
+
+
+def _require_access():
+    """Gate EVERY tool on a valid Filect subscription — the SAME rule the app's paywall uses
+    (get_entitlement): access is granted only while the plan is active or trialing, or a
+    cancellation whose end date hasn't passed yet (a canceled sub stays 'active' until its
+    period end). Returns an {'error': ...} dict to hand back to the client when NOT entitled,
+    or None when access is granted. Cached per process once granted."""
+    global _access_ok
+    if _access_ok:
+        return None
+    _ensure_auth()  # restore the saved session first (loads tokens, sets provider)
+    try:
+        from app.core.supabase_client import supabase_auth
+        ent = supabase_auth.get_entitlement() or {}
+    except Exception as e:
+        return {"error": f"Could not verify your Filect subscription ({e}). Open Filect, sign in, and try again."}
+    if ent.get("entitled"):
+        _access_ok = True
+        return None
+    reason = ent.get("reason") or ent.get("status") or "no active subscription"
+    return {"error": "An active Filect subscription is required to use this. Your plan must be "
+                     "active or trialing, or a cancellation that hasn't reached its end date yet "
+                     f"(current status: {reason}). Open Filect to manage your subscription."}
 
 
 def _coerce(v):
@@ -92,6 +122,9 @@ def _jsonsafe(d):
                          "matching files with their path, name, type and relevance. Read-only.")
 def search_files(query: str, limit: int = 20) -> list:
     try:
+        gate = _require_access()
+        if gate:
+            return [gate]
         from app.core.search import search_service
         rows = search_service.search_files(query, limit=max(1, min(limit, 100))) or []
         return [_jsonsafe(r) for r in rows]
@@ -103,6 +136,9 @@ def search_files(query: str, limit: int = 20) -> list:
                          "(tags, caption, category, dates). Read-only.")
 def get_file_details(path: str) -> dict:
     try:
+        gate = _require_access()
+        if gate:
+            return gate
         from app.core.search import search_service
         d = search_service.get_file_details(path)
         return _jsonsafe(d) if d else {"error": "not found in index"}
@@ -115,7 +151,9 @@ def get_file_details(path: str) -> dict:
                          "work on video. Read-only.")
 def analyze_image(path: str) -> dict:
     try:
-        _ensure_auth()
+        gate = _require_access()
+        if gate:
+            return gate
         from app.core.vision import analyze_image as _ai
         res = _ai(Path(path))
         return _jsonsafe(res) if res else {"error": "no result (unsupported file or provider off)"}
@@ -127,7 +165,9 @@ def analyze_image(path: str) -> dict:
                          "Makes a paid AI call. Read-only.")
 def transcribe_file(path: str) -> dict:
     try:
-        _ensure_auth()
+        gate = _require_access()
+        if gate:
+            return gate
         from app.core.transcription import transcribe_audio
         return transcribe_audio(path)
     except Exception as e:
@@ -140,21 +180,27 @@ def transcribe_file(path: str) -> dict:
                          "paid AI call.")
 def suggest_custom_words(niche: str) -> list:
     try:
-        _ensure_auth()
+        gate = _require_access()
+        if gate:
+            return [gate]
         from app.core.vocab import suggest_terms_for_niche
         return suggest_terms_for_niche(niche)
     except Exception as e:
         return [f"error: {e}"]
 
 
-@server.tool(description="Analyze ANY supported file and return its content: works on images, "
-                         "VIDEO (keyframes + spoken transcript), AUDIO, PDFs, and documents "
-                         "(.docx/.pptx/.rtf/.eml/.epub/.odt). Returns the type, content tags, a "
-                         "caption, and any transcript/extracted text. READ-ONLY: does NOT add the "
-                         "file to the index or move it. Makes paid AI calls.")
-def analyze_file(path: str) -> dict:
+@server.tool(description="Analyze ANY file and return what YOU (the client model) need to "
+                         "understand and tag it, WITHOUT Filect's paid backend: documents & text "
+                         "PDFs come back as extracted TEXT; images & video keyframes come back as "
+                         "IMAGES for your own vision; audio comes back as a speech transcript (via "
+                         "Filect's speech backend). You then produce the label/tags/caption "
+                         "yourself. Unreadable/scanned files fall back to Filect's own analyzer. "
+                         "READ-ONLY: never adds to the index, moves, or deletes.")
+def analyze_file(path: str):
     try:
-        _ensure_auth()
+        gate = _require_access()
+        if gate:
+            return gate
         from pathlib import Path
         from app.core.search import search_service
         p = Path(path)
@@ -170,6 +216,75 @@ def analyze_file(path: str) -> dict:
             return {"error": f"Can't read this file ({e}). On macOS, grant the app that launched "
                              "this MCP (e.g. Claude Desktop) Full Disk Access in System Settings "
                              "> Privacy & Security, then try again."}
+        # Experimental Path B — "use the client's AI, not Filect's backend": for a TEXT
+        # document, hand the locally-extracted text straight back so the MCP client (Claude /
+        # Codex) does the understanding on ITS OWN usage. No paid backend call, nothing persisted.
+        # Images / PDFs / audio / video aren't text-extractable, so they fall through to the
+        # existing backend analyzer below (Path A — the user's subscription).
+        from app.core.text_extract import extract_file_text, get_supported_text_formats
+        # .pdf isn't in get_supported_text_formats() but extract_file_text DOES handle it
+        # (PyPDF2); a text PDF returns text here, a scanned one returns nothing → backend below.
+        if p.suffix.lower() in set(get_supported_text_formats()) or p.suffix.lower() == ".pdf":
+            doc_text = (extract_file_text(p) or "").strip()
+            if doc_text:
+                return {
+                    "file": p.name,
+                    "mode": "raw_text_for_client",
+                    "note": ("Text extracted locally — NO AI backend was used. You (the client "
+                             "model) read this text and produce the label/tags/caption yourself."),
+                    "text": doc_text[:200000],
+                }
+            # No extractable text (e.g. a scanned PDF) → fall through to the backend analyzer.
+
+        suffix = p.suffix.lower()
+
+        # IMAGE → hand a downscaled image to the CLIENT's vision (Claude/Codex). NO backend call.
+        if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"}:
+            try:
+                import io
+                from PIL import Image as _PILImage
+                from mcp.server.mcpserver import Image as _McpImage
+                im = _PILImage.open(p)
+                im.load()
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGB")
+                im.thumbnail((1024, 1024))   # same 1024 cap the app uses; keeps client token cost low
+                buf = io.BytesIO()
+                im.save(buf, format="PNG")
+                note = (f"image_for_client — downscaled '{p.name}' below; NO AI backend was used. "
+                        "You (the client model) look at it and produce the label/tags/caption.")
+                return [note, _McpImage(data=buf.getvalue(), format="png")]
+            except Exception:
+                pass  # PIL can't open it (heic/raw/etc.) → fall through to the backend analyzer
+
+        # VIDEO → hand the keyframes (local AVFoundation extraction, NO backend) to the client.
+        try:
+            from app.core.video_analysis import VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, extract_keyframes
+        except Exception:
+            VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, extract_keyframes = set(), set(), None
+        if extract_keyframes and suffix in VIDEO_EXTENSIONS:
+            frames = extract_keyframes(p, n=4) or []
+            if frames:
+                from mcp.server.mcpserver import Image as _McpImage
+                out = [(f"video_frames_for_client — {len(frames)} keyframes of '{p.name}' below; "
+                        "NO AI backend was used. You (the client model) look at them for the "
+                        "label/tags/caption. For the spoken audio, call transcribe_file on this path.")]
+                out += [_McpImage(data=f, format="png") for f in frames]
+                return out
+            # no frames (silent/unreadable) → fall through to the backend analyzer
+
+        # AUDIO → the ONE backend call: speech-to-text via the existing transcribe tool, returned
+        # for the client to tag (the client model can't do speech-to-text itself).
+        if suffix in AUDIO_EXTENSIONS:
+            from app.core.transcription import transcribe_audio
+            tr = transcribe_audio(str(p)) or {}
+            if tr.get("ok") and (tr.get("text") or "").strip():
+                return {"file": p.name, "mode": "transcript_for_client",
+                        "transcript": tr["text"], "duration_seconds": tr.get("duration"),
+                        "note": "Transcript via Filect's speech backend. You (the client model) "
+                                "produce the label/tags/caption from it."}
+            # transcription failed/empty → fall through to the backend analyzer
+
         # Same per-file router the indexer uses (image/video/audio/pdf/doc), but we don't persist —
         # _process_single_file returns metadata; only index_single_file would write to the index.
         meta = search_service._process_single_file(
@@ -235,7 +350,9 @@ def _files_under(folder: str):
                          "apply_organization_plan(plan_id) to actually move the files.")
 def generate_organization_plan(folder: str, instructions: str = "") -> dict:
     try:
-        _ensure_auth()
+        gate = _require_access()
+        if gate:
+            return gate
         import json as _json
         import uuid
         from pathlib import Path
@@ -272,6 +389,9 @@ def generate_organization_plan(folder: str, instructions: str = "") -> dict:
                          "anything. Needs the plan_id from a prior generate call.")
 def apply_organization_plan(plan_id: str) -> dict:
     try:
+        gate = _require_access()
+        if gate:
+            return gate
         import json as _json
         from app.core.apply import apply_moves
         pf = _mcp_plans_dir() / f"plan-{plan_id}.json"
@@ -296,6 +416,9 @@ def apply_organization_plan(plan_id: str) -> dict:
                          "apply_organization_plan you want to take back.")
 def undo_last_organize() -> dict:
     try:
+        gate = _require_access()
+        if gate:
+            return gate
         import json as _json
         import shutil
         from pathlib import Path
