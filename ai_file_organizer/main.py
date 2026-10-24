@@ -413,6 +413,27 @@ def main():
             logging.getLogger(__name__).error("MCP server mode failed: %s", e)
         return
 
+    # MCP bridge mode: run ONLY the loopback bridge, headless — NO GUI, NO window, NO focus, ever.
+    # This is how the app serves the MCP's file reads/moves in the background without appearing on
+    # screen. A backend process must never steal focus; this mode guarantees it.
+    if "--mcp-bridge" in sys.argv:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import time as _time
+        try:
+            from app.core import mcp_bridge
+            if not mcp_bridge.start(force=True):
+                return
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("MCP bridge mode failed: %s", e)
+            return
+        try:
+            while True:
+                _time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
+        return
+
     # Setup logging
     setup_logging()
     

@@ -172,19 +172,21 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def start() -> bool:
-    """Start the bridge on a daemon thread IF the MCP is connected. Guarded — any failure is
+def start(force: bool = False) -> bool:
+    """Start the bridge on a daemon thread. By default only when the MCP is connected; force=True
+    starts it regardless (used by the headless --mcp-bridge mode). Guarded — any failure is
     swallowed so the app is never affected. Returns True if it is (now) running."""
     global _server, _token, _port
     try:
         if _server is not None:
             return True
-        try:
-            from app.core import mcp_connect
-            if not mcp_connect.is_connected():
+        if not force:
+            try:
+                from app.core import mcp_connect
+                if not mcp_connect.is_connected():
+                    return False
+            except Exception:
                 return False
-        except Exception:
-            return False
         _token = secrets.token_hex(16)
         _server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         _port = _server.server_address[1]
