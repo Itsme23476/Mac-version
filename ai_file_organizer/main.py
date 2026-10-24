@@ -504,6 +504,16 @@ def main():
     # surfaces it reliably for an accessory (LSUIElement) app.
     app._bring_to_front()
 
+    # MCP bridge (guarded, isolated): if the Filect MCP is connected, start a tiny loopback
+    # server on a BACKGROUND thread so the MCP can read/move files via THIS app's folder access
+    # — so the MCP never needs Full Disk Access. A no-op if the MCP isn't connected, and any
+    # failure here is swallowed, so the normal app is never affected.
+    try:
+        from app.core import mcp_bridge
+        mcp_bridge.start()
+    except Exception:
+        pass
+
     # Start event loop
     sys.exit(app.exec())
 

@@ -157,8 +157,10 @@ def analyze_image(path: str) -> dict:
         gate = _require_access()
         if gate:
             return gate
-        from app.core.vision import analyze_image as _ai
-        res = _ai(Path(path))
+        from app.core import mcp_bridge
+        res = mcp_bridge.call("analyze_image_backend", path=path)
+        if res is None:
+            res = mcp_bridge.analyze_image_backend(path)   # fallback: direct (non-protected only)
         return _jsonsafe(res) if res else {"error": "no result (unsupported file or provider off)"}
     except Exception as e:
         return {"error": f"analyze failed: {e}"}
@@ -171,8 +173,13 @@ def transcribe_file(path: str) -> dict:
         gate = _require_access()
         if gate:
             return gate
-        from app.core.transcription import transcribe_audio
-        return transcribe_audio(path)
+        from app.core import mcp_bridge
+        r = mcp_bridge.call("read_content", path=path)
+        if r is None:
+            r = mcp_bridge.read_content(path)   # fallback: direct (non-protected only)
+        if isinstance(r, dict) and r.get("mode") == "transcript":
+            return {"ok": True, "text": r.get("transcript"), "duration": r.get("duration")}
+        return r if isinstance(r, dict) else {"error": "transcription failed"}
     except Exception as e:
         return {"error": f"transcribe failed: {e}"}
 
@@ -213,6 +220,33 @@ def add_custom_words(words: list) -> dict:
         return {"error": f"add failed: {e}"}
 
 
+def _reconstruct_content(r: dict):
+    """Turn the app bridge's content dict into the MCP tool response (images/video need Image blocks)."""
+    mode = r.get("mode")
+    if mode == "raw_text_for_client":
+        return {"file": r.get("file"), "mode": mode, "text": r.get("text"),
+                "note": "Text extracted — NO AI backend. You produce the label/tags/caption."}
+    if mode == "image":
+        import base64
+        from mcp.server.mcpserver import Image as _McpImage
+        note = f"image_for_client — '{r.get('file')}' below; NO AI backend. You look at it and tag it."
+        return [note, _McpImage(data=base64.b64decode(r["image_b64"]), format=r.get("format", "png"))]
+    if mode == "video_frames":
+        import base64
+        from mcp.server.mcpserver import Image as _McpImage
+        fr = r.get("frames_b64", [])
+        note = (f"video_frames_for_client — {len(fr)} keyframes of '{r.get('file')}'; NO AI backend. "
+                "Look at them to tag. For spoken audio, call transcribe_file.")
+        return [note] + [_McpImage(data=base64.b64decode(b), format="png") for b in fr]
+    if mode == "transcript":
+        return {"file": r.get("file"), "mode": "transcript_for_client",
+                "transcript": r.get("transcript"), "duration_seconds": r.get("duration"),
+                "note": "Transcript via Filect's speech backend. You produce the tags."}
+    if mode == "analyzed":
+        return {k: r.get(k) for k in ("file", "type", "tags", "caption", "transcript_or_text")}
+    return r
+
+
 @server.tool(description="Analyze ANY file and return what YOU (the client model) need to "
                          "understand and tag it, WITHOUT Filect's paid backend: documents & text "
                          "PDFs come back as extracted TEXT; images & video keyframes come back as "
@@ -226,6 +260,18 @@ def analyze_file(path: str):
         gate = _require_access()
         if gate:
             return gate
+        # Delegate the file read to the running Filect app (it has folder access). If the app
+        # isn't running, _br is None and we fall through to the direct read below (which works
+        # for non-protected folders and gives the Full Disk Access message for protected ones).
+        try:
+            from app.core import mcp_bridge
+            _br = mcp_bridge.call("read_content", path=path)
+        except Exception:
+            _br = None
+        if isinstance(_br, dict) and _br.get("error"):
+            return _br
+        if isinstance(_br, dict):
+            return _reconstruct_content(_br)
         from pathlib import Path
         from app.core.search import search_service
         p = Path(path)
@@ -470,20 +516,18 @@ def apply_organization_plan(plan_id: str) -> dict:
         if gate:
             return gate
         import json as _json
-        from app.core.apply import apply_moves
+        from app.core import mcp_bridge
         pf = _mcp_plans_dir() / f"plan-{plan_id}.json"
         if not pf.exists():
             return {"error": "Unknown plan_id — generate a plan first."}
         moves = _json.loads(pf.read_text(encoding="utf-8"))
-        success, errors, log_file, renamed = apply_moves(moves)
-        return _jsonsafe({
-            "success": success,
-            "moved": len(moves) - len(errors),
-            "errors": errors[:10],
-            "renamed_to_avoid_collision": renamed,
-            "log_file": log_file,
-            "note": "Call undo_last_organize() to reverse this.",
-        })
+        # Delegate the actual file moves to the running app (it has folder access).
+        res = mcp_bridge.call("apply_moves", moves=moves)
+        if res is None:
+            res = mcp_bridge.apply_moves(moves)   # fallback: direct (non-protected only)
+        if isinstance(res, dict):
+            res["note"] = "Call undo_last_organize() to reverse this."
+        return _jsonsafe(res)
     except Exception as e:
         return {"error": f"apply failed: {e}"}
 
