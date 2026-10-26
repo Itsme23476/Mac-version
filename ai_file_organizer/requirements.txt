@@ -33,3 +33,4 @@ pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'
 pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'
 pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'  # video keyframe + audio extraction
 pyobjc-framework-CoreMedia>=10.0; sys_platform == 'darwin'     # CMTime helpers for video_analysis
+mcp>=2.0.0            # MCP server SDK — the app doubles as a stdio MCP server via --mcp-server

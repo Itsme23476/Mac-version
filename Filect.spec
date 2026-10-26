@@ -132,6 +132,12 @@ hidden_imports = [
     'scipy.io.wavfile',
     'packaging',
     'packaging.version',
+    # MCP: the app runs as the stdio MCP server via --mcp-server; plus the bridge + connect helpers
+    'app.core.mcp_connect',
+    'app.core.mcp_bridge',
+    'filect_mcp',
+    'filect_mcp.server',
+    'mcp',
 ]
 
 # Data files to include
@@ -143,6 +149,8 @@ datas = [
     
     # App modules (ensure they're found)
     (os.path.join(APP_DIR, 'app'), 'app'),
+    # MCP server package (so `--mcp-server` can import filect_mcp.server in the frozen app)
+    (os.path.join(SPEC_DIR, 'filect_mcp'), 'filect_mcp'),
 ]
 
 # Collect PySide6 data files (plugins, etc.)
@@ -169,6 +177,13 @@ try:
     datas += collect_data_files('regex')
 except Exception:
     pass  # regex might not have data files in all versions
+
+# Collect the MCP SDK (pulled in by filect_mcp.server in --mcp-server mode)
+hidden_imports += collect_submodules('mcp')
+try:
+    datas += collect_data_files('mcp')
+except Exception:
+    pass
 
 a = Analysis(
     [os.path.join(APP_DIR, 'main.py')],

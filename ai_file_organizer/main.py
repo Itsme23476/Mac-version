@@ -395,6 +395,45 @@ def _passes_entitlement_gate(app) -> bool:
 
 def main():
     """Main application entry point."""
+    # MCP server mode: when Claude/Codex launches `Filect --mcp-server`, act as the stdio MCP
+    # server instead of launching the GUI. This reuses the app's bundled runtime (so the MCP
+    # ships inside the one signed app binary), and because file reads are DELEGATED to the
+    # running GUI app's bridge, this process needs no file access of its own.
+    if "--mcp-server" in sys.argv:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        # filect_mcp is a sibling of ai_file_organizer in source (bundled at the root when frozen)
+        _repo = Path(__file__).resolve().parent.parent
+        if str(_repo) not in sys.path:
+            sys.path.insert(0, str(_repo))
+        try:
+            from filect_mcp.server import server as _mcp_server
+            _mcp_server.run("stdio")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("MCP server mode failed: %s", e)
+        return
+
+    # MCP bridge mode: run ONLY the loopback bridge, headless — NO GUI, NO window, NO focus, ever.
+    # This is how the app serves the MCP's file reads/moves in the background without appearing on
+    # screen. A backend process must never steal focus; this mode guarantees it.
+    if "--mcp-bridge" in sys.argv:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import time as _time
+        try:
+            from app.core import mcp_bridge
+            if not mcp_bridge.start(force=True):
+                return
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("MCP bridge mode failed: %s", e)
+            return
+        try:
+            while True:
+                _time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
+        return
+
     # Setup logging
     setup_logging()
     
@@ -503,6 +542,16 @@ def main():
     # app stays buried behind the browser tab — _bring_to_front's policy flip
     # surfaces it reliably for an accessory (LSUIElement) app.
     app._bring_to_front()
+
+    # MCP bridge (guarded, isolated): if the Filect MCP is connected, start a tiny loopback
+    # server on a BACKGROUND thread so the MCP can read/move files via THIS app's folder access
+    # — so the MCP never needs Full Disk Access. A no-op if the MCP isn't connected, and any
+    # failure here is swallowed, so the normal app is never affected.
+    try:
+        from app.core import mcp_bridge
+        mcp_bridge.start()
+    except Exception:
+        pass
 
     # Start event loop
     sys.exit(app.exec())
