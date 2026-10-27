@@ -52,7 +52,8 @@ class FileIndex:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_database()
-    
+        self._ensure_fts_healthy()
+
     def _init_database(self):
         """Initialize database tables."""
         with sqlite3.connect(self.db_path) as conn:
@@ -120,26 +121,36 @@ class FileIndex:
             except Exception as e:
                 logger.warning(f"Schema migration warning: {e}")
             
-            # Create full-text search index
-            # Recreate FTS with latest schema (drop if exists)
-            try:
-                cursor.execute("DROP TABLE IF EXISTS files_fts")
-            except Exception:
-                pass
-            cursor.execute(
-                """
-                CREATE VIRTUAL TABLE files_fts USING fts5(
-                    file_name,
-                    file_path,
-                    category,
-                    ocr_text,
-                    caption,
-                    tags,
-                    content='files',
-                    content_rowid='id'
-                )
-                """
+            # Full-text search index. FTS5 can't be ALTER-ed, so the ONLY way to change its columns
+            # is drop+recreate. Doing that on every start — and, worse, without repopulating an
+            # external-content index — silently empties search on every launch. Instead: recreate
+            # ONLY when the columns actually differ from what we expect, and ALWAYS repopulate when
+            # we do. Normal launches leave the index intact (no wipe, no rebuild, no lag). On any
+            # detection error we fall back to a full recreate+repopulate — never worse than before.
+            _fts_cols = ("file_name", "file_path", "category", "ocr_text", "caption", "tags")
+            _create_fts = (
+                "CREATE VIRTUAL TABLE files_fts USING fts5("
+                + ", ".join(_fts_cols)
+                + ", content='files', content_rowid='id')"
             )
+            def _recreate_fts():
+                cursor.execute("DROP TABLE IF EXISTS files_fts")
+                cursor.execute(_create_fts)
+                # external-content FTS5 is empty after CREATE — 'rebuild' fills the inverted index.
+                cursor.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+            try:
+                _existing = [r[1] for r in cursor.execute("PRAGMA table_info(files_fts)").fetchall()]
+                if set(_existing) == set(_fts_cols):
+                    logger.debug("FTS index schema current — preserved (no rebuild).")
+                else:
+                    _recreate_fts()
+                    logger.info("FTS index (re)created + repopulated (schema was %s).", _existing or "missing")
+            except Exception as e:
+                logger.warning("FTS schema check failed (%s); doing a full recreate+repopulate.", e)
+                try:
+                    _recreate_fts()
+                except Exception as e2:
+                    logger.error("FTS recreate failed: %s", e2)
 
             # Embeddings table for semantic search
             cursor.execute(
@@ -336,6 +347,11 @@ class FileIndex:
                         logger.warning(f"Batch path update failed for id {file_id}: {row_err}")
                         continue
                 conn.commit()
+            # Self-heal: a bulk path update can desync the external-content FTS inverted index (its
+            # per-row delete reads already-updated content). If that left MATCH broken, rebuild so
+            # search doesn't silently fall back to alphabetical. Best-effort; never blocks the move.
+            if updated:
+                self._ensure_fts_healthy()
             logger.info(f"Batch-updated {updated}/{len(updates)} file paths in the database")
             return updated
         except Exception as e:
@@ -764,9 +780,13 @@ class FileIndex:
                 else:
                     match = None
 
-                # Base FTS query
+                # Base FTS query. Rank text matches by bm25 relevance (bm25 is negative, lower =
+                # better match) so the most relevant files come first. For a no-match browse
+                # (match is None) there is nothing to score — use a constant and keep name order.
+                # rank_expr is a fixed literal chosen by `match` (no user input) — safe to inline.
+                rank_expr = "bm25(files_fts)" if match else "0.0"
                 sql = (
-                    "SELECT f.*, 1 as rank FROM files f "
+                    f"SELECT f.*, {rank_expr} AS rank FROM files f "
                     "JOIN files_fts ON f.id = files_fts.rowid "
                 )
                 params: List[Any] = []
@@ -791,7 +811,8 @@ class FileIndex:
                         sql += " AND f.tags LIKE ?"
                         params.append(f"%{tg}%")
 
-                sql += " ORDER BY f.file_name LIMIT ?"
+                # Relevance order when we have a text match (bm25 ASC = best first); otherwise name.
+                sql += (" ORDER BY rank ASC LIMIT ?" if match else " ORDER BY f.file_name LIMIT ?")
                 params.append(limit)
 
                 try:
@@ -856,7 +877,10 @@ class FileIndex:
                             'ai_source': row['ai_source'] if 'ai_source' in row.keys() else None,
                             'vision_confidence': row['vision_confidence'] if 'vision_confidence' in row.keys() else None,
                             'metadata': json.loads(row['metadata']) if row['metadata'] else {},
-                            'rank': 0,
+                            # bm25 is negative (lower = better); flip to positive higher-is-better so
+                            # the service-layer sort (desc) and relevance_score work. The LIKE-fallback
+                            # rows (sql2) have no 'rank' column → default 0.
+                            'rank': (-row['rank']) if ('rank' in row.keys() and row['rank'] is not None) else 0,
                         })
                     except Exception:
                         # If any column missing/malformed, skip gracefully
@@ -1302,6 +1326,47 @@ class FileIndex:
         
         return stats
     
+    def _ensure_fts_healthy(self):
+        """Safety net for the external-content FTS5 index.
+
+        files_fts can silently desync — its content rows stay present but the inverted index goes
+        empty, so MATCH returns nothing and every search degrades to the LIKE fallback (alphabetical,
+        unranked). Detect that cheaply and rebuild via the canonical FTS5 'rebuild' command. Purely
+        best-effort: ANY failure is swallowed so app startup / indexing is never affected.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.cursor()
+                try:
+                    n = cur.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+                except Exception:
+                    return  # files table not ready
+                if not n:
+                    return  # empty index — nothing to verify
+                # Broad common-letter prefix probe: matches filenames/paths/extensions of virtually
+                # any non-empty corpus. 0 hits while `files` has rows ⇒ the FTS index is empty/stale.
+                probe = "e* OR a* OR t* OR o* OR i* OR n* OR s* OR p* OR f*"
+                try:
+                    hit = cur.execute(
+                        "SELECT 1 FROM files_fts WHERE files_fts MATCH ? LIMIT 1", (probe,)
+                    ).fetchone()
+                except Exception:
+                    hit = None  # MATCH itself errored ⇒ treat as broken
+                if hit:
+                    return  # healthy
+                logger.warning("FTS index empty/stale (%d files, probe found nothing) — rebuilding.", n)
+                try:
+                    cur.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+                    conn.commit()
+                    logger.info("FTS index rebuilt via FTS5 'rebuild'.")
+                    return
+                except Exception as e:
+                    logger.warning("FTS 'rebuild' failed (%s); trying drop+repopulate.", e)
+            # 'rebuild' failed (e.g. corrupt schema) → full drop/recreate path (own connection).
+            self._auto_rebuild_fts()
+        except Exception as e:
+            logger.error("FTS health check failed: %s", e)
+
     def _auto_rebuild_fts(self):
         """
         Automatically rebuild FTS index when corruption is detected.
