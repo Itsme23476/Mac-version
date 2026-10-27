@@ -136,9 +136,39 @@ def stat(path: str) -> dict:
 
 def apply_moves(moves: list) -> dict:
     from app.core.apply import apply_moves as _apply
-    success, errors, log_file, renamed = _apply(moves or [])
-    return {"success": success, "moved": len(moves or []) - len(errors),
-            "errors": errors[:10], "log_file": log_file, "renamed_to_avoid_collision": renamed}
+    from app.core.database import file_index
+    moves = moves or []
+    # Resolve each file's index id by its CURRENT (pre-move) path up front — _apply mutates
+    # destination_path in place, so we must capture ids before it runs.
+    ids = {}
+    for m in moves:
+        src = m.get("source_path")
+        if src:
+            rec = file_index.get_file_by_path(src)
+            if rec:
+                ids[src] = rec["id"]
+    success, errors, log_file, renamed = _apply(moves)
+    # The core apply_moves only moves files on disk — it does NOT touch the index (the GUI does
+    # that in organize_page). The MCP path has no GUI, so update the index here or search goes
+    # stale (keeps pointing at the old path). Mirror the GUI: update only files that landed.
+    db_updates = []
+    for m in moves:
+        fid, dest = ids.get(m.get("source_path")), m.get("destination_path")
+        if fid and dest:
+            try:
+                if Path(dest).exists():
+                    db_updates.append((fid, dest))
+            except Exception:
+                pass
+    paths_updated = 0
+    if db_updates:
+        try:
+            paths_updated = file_index.update_file_paths_batch(db_updates)
+        except Exception as e:
+            logger.warning("MCP apply_moves: index path update failed: %s", e)
+    return {"success": success, "moved": len(moves) - len(errors),
+            "errors": errors[:10], "log_file": log_file,
+            "renamed_to_avoid_collision": renamed, "paths_updated": paths_updated}
 
 
 _OPS = {"read_content": read_content, "analyze_image_backend": analyze_image_backend,
