@@ -541,31 +541,35 @@ def undo_last_organize() -> dict:
         if gate:
             return gate
         import json as _json
-        import shutil
         from pathlib import Path
+        from app.core import mcp_bridge
         from app.core.settings import settings
         logs = sorted(settings.get_moves_dir().glob("moves-*.json"))
         if not logs:
             return {"error": "No organize operation to undo."}
         latest = logs[-1]
         moves = _json.loads(latest.read_text(encoding="utf-8")).get("moves", [])
-        reverted, skipped = 0, []
-        for m in reversed(moves):
-            src = Path(m.get("to", ""))      # file is currently at the destination
-            dst = Path(m.get("from", ""))    # move it back to the original
-            if not src.exists():
-                skipped.append(f"missing: {src.name}")
-                continue
-            if dst.exists():
-                skipped.append(f"original occupied: {dst.name}")
-                continue
-            try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
-                reverted += 1
-            except Exception as e:
-                skipped.append(f"{src.name}: {e}")
-        return {"reverted": reverted, "skipped": skipped[:10], "from_log": latest.name}
+        # Reverse plan: move each file from its destination back to its origin. DELEGATE to the
+        # running app, which has folder access — a direct shutil.move here runs in the MCP process
+        # (no TCC grant) and fails with "Operation not permitted".
+        reverse = [{"source_path": m.get("to", ""), "destination_path": m.get("from", "")}
+                   for m in reversed(moves) if m.get("to") and m.get("from")]
+        if not reverse:
+            return {"error": "Last organize had no moves to undo."}
+        res = mcp_bridge.call("apply_moves", moves=reverse)
+        if res is None:
+            res = mcp_bridge.apply_moves(reverse)   # fallback: direct (non-protected only)
+        # apply_moves writes a fresh move log for the reverse; drop it so a repeat undo is a no-op
+        # (re-reading the original log finds the files already home) rather than a re-apply.
+        try:
+            if isinstance(res, dict) and res.get("log_file"):
+                Path(res["log_file"]).unlink(missing_ok=True)
+        except Exception:
+            pass
+        if isinstance(res, dict):
+            res["reverted"] = res.get("moved", 0)
+            res["undone_from_log"] = latest.name
+        return _jsonsafe(res)
     except Exception as e:
         return {"error": f"undo failed: {e}"}
 

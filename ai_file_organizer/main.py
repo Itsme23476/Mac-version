@@ -395,11 +395,17 @@ def _passes_entitlement_gate(app) -> bool:
 
 def main():
     """Main application entry point."""
-    # MCP server mode: when Claude/Codex launches `Filect --mcp-server`, act as the stdio MCP
-    # server instead of launching the GUI. This reuses the app's bundled runtime (so the MCP
-    # ships inside the one signed app binary), and because file reads are DELEGATED to the
-    # running GUI app's bridge, this process needs no file access of its own.
-    if "--mcp-server" in sys.argv:
+    # Mode selection. The CLI flags work from source, but a frozen macOS .app munges sys.argv
+    # (PyInstaller's Cocoa launch path drops the passed args), so the mode is ALSO carried in an
+    # env var, which IS inherited reliably. mcp_connect sets FILECT_MODE=mcp-server in Claude
+    # Desktop's launch env; the background bridge is spawned with FILECT_MODE=mcp-bridge.
+    _mode = os.environ.get("FILECT_MODE", "")
+
+    # MCP server mode: when Claude/Codex launches the Filect MCP, act as the stdio MCP server
+    # instead of launching the GUI. This reuses the app's bundled runtime (so the MCP ships inside
+    # the one signed app binary), and because file reads are DELEGATED to the running GUI app's
+    # bridge, this process needs no file access of its own.
+    if "--mcp-server" in sys.argv or _mode == "mcp-server":
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         # filect_mcp is a sibling of ai_file_organizer in source (bundled at the root when frozen)
         _repo = Path(__file__).resolve().parent.parent
@@ -416,7 +422,7 @@ def main():
     # MCP bridge mode: run ONLY the loopback bridge, headless — NO GUI, NO window, NO focus, ever.
     # This is how the app serves the MCP's file reads/moves in the background without appearing on
     # screen. A backend process must never steal focus; this mode guarantees it.
-    if "--mcp-bridge" in sys.argv:
+    if "--mcp-bridge" in sys.argv or _mode == "mcp-bridge":
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         import time as _time
         try:

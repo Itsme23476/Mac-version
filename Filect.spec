@@ -178,8 +178,14 @@ try:
 except Exception:
     pass  # regex might not have data files in all versions
 
-# Collect the MCP SDK (pulled in by filect_mcp.server in --mcp-server mode)
-hidden_imports += collect_submodules('mcp')
+# Collect the MCP SDK (pulled in by filect_mcp.server in --mcp-server mode). Collect ONLY the
+# subpackages we use — NOT collect_submodules('mcp'): that walks into mcp.cli.cli, which imports
+# `typer` (not a dependency) and then sys.exit(1)s, which crashes the build in the isolated child.
+for _mcp_sub in ('mcp.server', 'mcp.shared', 'mcp.client'):
+    try:
+        hidden_imports += collect_submodules(_mcp_sub)
+    except Exception:
+        pass
 try:
     datas += collect_data_files('mcp')
 except Exception:
@@ -198,6 +204,8 @@ a = Analysis(
         'tkinter',
         'matplotlib',
         'pytest',
+        'mcp.cli',       # imports `typer` + sys.exit(1)s at import; unused (we run the stdio server)
+        'mcp.cli.cli',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

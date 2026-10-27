@@ -217,16 +217,26 @@ def _launch_background_bridge() -> bool:
     """Launch the Filect app HEADLESS + in the BACKGROUND (--mcp-bridge), so its bridge runs with
     the app's own folder grants — no window, no focus, ever. Shipped (frozen) app only; in dev the
     bridge is run separately. Returns True if a launch was attempted."""
+    import os
     import sys
     import subprocess
     if not getattr(sys, "frozen", False):
         return False
     try:
-        app = Path(sys.executable).resolve().parents[2]  # .app/Contents/MacOS/exe -> .app
-        if app.suffix == ".app":
-            # -g: do NOT bring to foreground ; -j: launch hidden ; then --args --mcp-bridge
-            subprocess.Popen(["open", "-gj", str(app), "--args", "--mcp-bridge"])
-            return True
+        exe = str(Path(sys.executable).resolve())  # .app/Contents/MacOS/Filect (the inner binary)
+        # Launch the inner binary DIRECTLY, not via `open`. `open --args` to a windowed .app drops
+        # the args (PyInstaller munges argv) and reactivates the already-running GUI instead of
+        # spawning a 2nd headless instance. A direct spawn inherits env, so FILECT_MODE=mcp-bridge
+        # selects bridge mode — which never creates a Qt/NS app, so there is no window and no focus
+        # change. stdout/stderr are discarded so this child can never corrupt the parent
+        # --mcp-server's JSON-RPC stdio; start_new_session detaches it so it outlives the parent.
+        subprocess.Popen(
+            [exe],
+            env={**os.environ, "FILECT_MODE": "mcp-bridge", "QT_QPA_PLATFORM": "offscreen"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
     except Exception:
         pass
     return False
