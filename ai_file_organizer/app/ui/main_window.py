@@ -2469,6 +2469,47 @@ class MainWindow(QMainWindow):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #4A4A5A; font-size: 11px; background: transparent; border: none;")
         lay.addWidget(hint)
+
+        # ---- Codex section (same Filect server; only shown if Codex is installed) ----
+        self._mcp_codex_btn = None
+        try:
+            from app.core import mcp_connect
+            codex_present = mcp_connect.codex_available()
+        except Exception:
+            codex_present = False
+        if codex_present:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setStyleSheet(f"background:{c['border']}; max-height:1px; border:none;")
+            lay.addWidget(sep)
+            ctitle = QLabel("Connect to Codex")
+            ctitle.setStyleSheet("font-size: 15px; font-weight: 600; color: #7C4DFF; "
+                                 "background: transparent; border: none;")
+            lay.addWidget(ctitle)
+            cdesc = QLabel("Also let Codex — the CLI and the ChatGPT desktop app — use Filect to "
+                           "search, analyze, and organize your files.")
+            cdesc.setWordWrap(True)
+            cdesc.setStyleSheet("color: #7A7A90; font-size: 13px; background: transparent; border: none;")
+            lay.addWidget(cdesc)
+            self._mcp_codex_status_label = QLabel()
+            lay.addWidget(self._mcp_codex_status_label)
+            crow = QHBoxLayout()
+            self._mcp_codex_btn = QPushButton()
+            self._mcp_codex_btn.setMinimumHeight(36)
+            self._mcp_codex_btn.setCursor(Qt.PointingHandCursor)
+            self._mcp_codex_btn.setStyleSheet(
+                "QPushButton { background-color:#7C4DFF; color:white; border:none; border-radius:10px; "
+                "padding:0 18px; font-weight:600; } QPushButton:hover { background-color:#6A3DF0; }")
+            self._mcp_codex_btn.clicked.connect(self._on_mcp_codex_clicked)
+            crow.addWidget(self._mcp_codex_btn)
+            crow.addStretch()
+            lay.addLayout(crow)
+            chint = QLabel("Restart the Codex / ChatGPT desktop app after connecting (or start a new "
+                           "Codex session).")
+            chint.setWordWrap(True)
+            chint.setStyleSheet("color: #4A4A5A; font-size: 11px; background: transparent; border: none;")
+            lay.addWidget(chint)
+
         self._refresh_mcp_card()
         return card
 
@@ -2487,6 +2528,22 @@ class MainWindow(QMainWindow):
             self._mcp_status_label.setText("○  Not connected")
             self._mcp_status_label.setStyleSheet("color:#7A7A90; font-size:13px; background:transparent; border:none;")
             self._mcp_connect_btn.setText("Connect to Claude")
+        # Codex (only if its card section was built)
+        if getattr(self, "_mcp_codex_btn", None) is not None:
+            cconn = False
+            try:
+                from app.core import mcp_connect
+                cconn = mcp_connect.codex_is_connected()
+            except Exception:
+                pass
+            if cconn:
+                self._mcp_codex_status_label.setText("●  Connected")
+                self._mcp_codex_status_label.setStyleSheet("color:#4CAF50; font-size:13px; background:transparent; border:none;")
+                self._mcp_codex_btn.setText("Disconnect")
+            else:
+                self._mcp_codex_status_label.setText("○  Not connected")
+                self._mcp_codex_status_label.setStyleSheet("color:#7A7A90; font-size:13px; background:transparent; border:none;")
+                self._mcp_codex_btn.setText("Connect to Codex")
 
     def _on_mcp_connect_clicked(self):
         from app.core import mcp_connect
@@ -2495,6 +2552,21 @@ class MainWindow(QMainWindow):
                 ok, msg = mcp_connect.disconnect()
             else:
                 ok, msg = mcp_connect.connect()
+        except Exception as e:
+            ok, msg = False, f"Error: {e}"
+        self._refresh_mcp_card()
+        try:
+            self.status_bar.showMessage(msg, 6000)
+        except Exception:
+            pass
+
+    def _on_mcp_codex_clicked(self):
+        from app.core import mcp_connect
+        try:
+            if mcp_connect.codex_is_connected():
+                ok, msg = mcp_connect.codex_disconnect()
+            else:
+                ok, msg = mcp_connect.codex_connect()
         except Exception as e:
             ok, msg = False, f"Error: {e}"
         self._refresh_mcp_card()

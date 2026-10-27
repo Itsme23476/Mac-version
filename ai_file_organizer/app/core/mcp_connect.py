@@ -1,11 +1,14 @@
-"""Connect / disconnect the Filect MCP server in Claude Desktop's config.
+"""Connect / disconnect the Filect MCP server in Claude Desktop and Codex.
 
-Powers the "Connect to Claude" Settings card: one click writes (or removes) the Filect server
-entry in Claude Desktop's config file, so the user never edits JSON. Does a SAFE merge — other
-MCP servers in the config are left untouched.
+Powers the Settings cards: one click writes (or removes) the Filect server entry so the user
+never edits config by hand. Claude Desktop is a JSON config we merge directly; Codex is driven
+through its own `codex mcp add/remove/get` CLI (which writes ~/.codex/config.toml — the same file
+the Codex CLI *and* the ChatGPT/Codex desktop app both read). Other servers are left untouched.
 """
 import json
 import logging
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -86,6 +89,75 @@ def disconnect():
     except Exception as e:
         logger.error(f"MCP disconnect failed: {e}")
         return False, f"Could not update the Claude config: {e}"
+
+
+# ---------------- Codex (CLI + ChatGPT desktop app share ~/.codex/config.toml) ----------------
+
+def _codex_bin():
+    """Path to a usable `codex` executable, or None. Checks PATH, the standalone CLI install,
+    then the Codex/ChatGPT desktop app's bundled binary."""
+    found = shutil.which("codex")
+    if found:
+        return found
+    for p in (Path.home() / ".local" / "bin" / "codex",
+              Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")):
+        if p.exists():
+            return str(p)
+    return None
+
+
+def codex_available() -> bool:
+    """True if Codex is installed (so the 'Connect to Codex' card is worth showing)."""
+    return _codex_bin() is not None
+
+
+def _run_codex(args, timeout: float = 20.0):
+    """Run `codex <args>` headlessly. Returns the CompletedProcess, or None if codex is missing
+    or couldn't be launched. Never raises; never shows UI."""
+    bin_ = _codex_bin()
+    if not bin_:
+        return None
+    try:
+        return subprocess.run([bin_, *args], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        logger.warning(f"codex invocation failed: {e}")
+        return None
+
+
+def codex_is_connected() -> bool:
+    r = _run_codex(["mcp", "get", SERVER_KEY])
+    return bool(r and r.returncode == 0)
+
+
+def codex_connect():
+    """Register the Filect MCP server with Codex via its own CLI. (ok, message)."""
+    if not codex_available():
+        return False, "Codex isn't installed."
+    cmd, args, env = mcp_command()
+    add = ["mcp", "add", SERVER_KEY]
+    for k, v in (env or {}).items():
+        add += ["--env", f"{k}={v}"]
+    add += ["--", cmd, *args]
+    # `mcp add` errors if the name already exists; remove first (idempotent) so re-connect works.
+    _run_codex(["mcp", "remove", SERVER_KEY])
+    r = _run_codex(add)
+    if r and r.returncode == 0:
+        return True, "Connected. Restart the Codex / ChatGPT desktop app (or start a new Codex session)."
+    err = ((r.stderr or r.stdout).strip() if r else "codex not runnable") or "unknown error"
+    logger.error(f"Codex connect failed: {err}")
+    return False, f"Could not add Filect to Codex: {err}"
+
+
+def codex_disconnect():
+    """Remove the Filect MCP server from Codex. (ok, message)."""
+    if not codex_available():
+        return False, "Codex isn't installed."
+    r = _run_codex(["mcp", "remove", SERVER_KEY])
+    if r and r.returncode == 0:
+        return True, "Disconnected from Codex. Restart the Codex / ChatGPT desktop app to apply."
+    err = ((r.stderr or r.stdout).strip() if r else "codex not runnable") or "unknown error"
+    logger.error(f"Codex disconnect failed: {err}")
+    return False, f"Could not remove Filect from Codex: {err}"
 
 
 if __name__ == "__main__":
