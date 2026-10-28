@@ -666,6 +666,7 @@ class MainWindow(QMainWindow):
         self.setup_index_page()       # Index 2
         self.setup_settings_page()    # Index 3
         self.setup_voice_page()       # Index 4
+        self.setup_assistant_page()   # Index 5
 
         # Subtle drop-shadows to lift cards off the background (light mode especially).
         self._apply_card_shadows()
@@ -683,6 +684,12 @@ class MainWindow(QMainWindow):
         # Refresh account info after all UI is built
         self._refresh_account_info()
     
+    def setup_assistant_page(self):
+        """Assistant page (index 5): drive a local Claude agent with live steps + Approve/Deny cards."""
+        from app.ui.assistant_page import AssistantPage
+        self.assistant_page = AssistantPage(self)
+        self.page_stack.addWidget(self.assistant_page)   # Index 5
+
     def setup_sidebar(self):
         """Setup the left sidebar with navigation and account section."""
         sidebar_layout = QVBoxLayout(self.sidebar)
@@ -744,6 +751,7 @@ class MainWindow(QMainWindow):
             ("folder", "Organize", 1),
             ("layers", "Analyze Files", 2),
             ("mic", "Voice", 4),
+            ("sparkle", "Assistant", 5),
             ("gear", "Settings", 3),
         ]
 
