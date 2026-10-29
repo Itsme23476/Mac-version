@@ -72,21 +72,26 @@ class AgentRunner:
             return PermissionResultAllow()
         return PermissionResultDeny(message="Denied by user")
 
-    async def run(self, prompt: str, resume: Optional[str] = None, max_turns: int = 40) -> Optional[str]:
+    async def run(self, prompt: str, resume: Optional[str] = None, max_turns: int = 40,
+                  bypass: bool = False) -> Optional[str]:
         """Run (or resume) a task to completion, streaming steps and gating tools. Returns the
-        session id (for resuming later)."""
+        session id (for resuming later).
+
+        bypass=True runs without any Approve/Deny cards — like Claude Code's bypass-permissions
+        mode, the agent edits files and runs commands on its own. Use only for trusted tasks.
+        """
         from claude_agent_sdk import (
             ClaudeSDKClient, ClaudeAgentOptions,
             AssistantMessage, TextBlock, ToolUseBlock, ResultMessage,
         )
-        opts = ClaudeAgentOptions(
-            cwd=self.cwd,
-            can_use_tool=self._can_use_tool,
-            permission_mode="default",
-            setting_sources=[],     # our Approve/Deny cards are the gate, not the user's global ~/.claude settings
-            resume=resume,          # continue an existing (e.g. Claude Desktop) session when given
-            max_turns=max_turns,
-        )
+        # setting_sources=[] isolates from the user's global ~/.claude permissions in both modes.
+        common = dict(cwd=self.cwd, setting_sources=[], resume=resume, max_turns=max_turns)
+        if bypass:
+            # Engine skips permission prompts entirely — no callback, no cards.
+            opts = ClaudeAgentOptions(permission_mode="bypassPermissions", **common)
+        else:
+            # Our Approve/Deny cards are the gate (read-only tools auto-allowed).
+            opts = ClaudeAgentOptions(permission_mode="default", can_use_tool=self._can_use_tool, **common)
         async with ClaudeSDKClient(options=opts) as client:
             await client.query(prompt)
             async for msg in client.receive_response():

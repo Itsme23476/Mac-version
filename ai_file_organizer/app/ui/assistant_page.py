@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QThread, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QFrame, QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QFrame, QScrollArea, QCheckBox,
 )
 
 from app.ui.theme_manager import theme_manager
@@ -35,11 +35,12 @@ class AgentWorker(QObject):
     error = Signal(str)
     done = Signal()
 
-    def __init__(self, cwd: str, prompt: str, resume: str | None = None):
+    def __init__(self, cwd: str, prompt: str, resume: str | None = None, bypass: bool = False):
         super().__init__()
         self._cwd = cwd
         self._prompt = prompt
         self._resume = resume
+        self._bypass = bypass
         self._loop: asyncio.AbstractEventLoop | None = None
         self._approval_fut: asyncio.Future | None = None
 
@@ -76,7 +77,7 @@ class AgentWorker(QObject):
             on_approval=self._on_approval,
             on_result=lambda sid, cost: self.result.emit(sid or "", float(cost or 0.0)),
         )
-        await runner.run(self._prompt, resume=self._resume)
+        await runner.run(self._prompt, resume=self._resume, bypass=self._bypass)
 
 
 class AssistantPage(QWidget):
@@ -145,6 +146,15 @@ class AssistantPage(QWidget):
         row.addWidget(self.run_btn)
         root.addLayout(row)
 
+        # Bypass toggle — like Claude Code's bypass-permissions mode: no Approve/Deny cards.
+        self.bypass_check = QCheckBox("⚡  Bypass approvals — let it run without asking")
+        self.bypass_check.setCursor(Qt.PointingHandCursor)
+        self.bypass_check.setStyleSheet("color:#B26A00; font-size:12px; background:transparent; border:none;")
+        self.bypass_check.setToolTip(
+            "When on, the agent edits files and runs commands without asking you first — like "
+            "Claude Code's bypass-permissions mode. Only use it for tasks you trust.")
+        root.addWidget(self.bypass_check)
+
         # Approval card (hidden until the agent asks)
         self.card = QFrame()
         self.card.setObjectName("approvalCard")
@@ -204,13 +214,16 @@ class AssistantPage(QWidget):
             return
         import os
         os.makedirs(DEFAULT_WORKSPACE, exist_ok=True)
+        bypass = self.bypass_check.isChecked()
         self.feed.clear()
         self._append(f"▶ {prompt}\n")
+        if bypass:
+            self._append("⚡ Bypass mode: running without approval prompts.\n")
         self.run_btn.setEnabled(False)
         self.status_label.setText("Running…")
 
         self._thread = QThread(self)
-        self._worker = AgentWorker(DEFAULT_WORKSPACE, prompt)
+        self._worker = AgentWorker(DEFAULT_WORKSPACE, prompt, bypass=bypass)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.step.connect(self._on_step)
