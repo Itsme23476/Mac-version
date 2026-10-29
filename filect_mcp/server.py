@@ -416,7 +416,10 @@ def save_to_index(path: str, label: str = "", tags: list = None, caption: str = 
             "ocr_text": (text or "").strip(),
             "has_ocr": bool((text or "").strip()),
             "ai_source": "mcp:client-model",
-            "metadata": {"is_file": True, "is_dir": False},
+            # add_file builds the stored metadata from TOP-LEVEL keys (file_data.get('is_file')),
+            # so set these here — nesting them under "metadata" is ignored and left is_file=False.
+            "is_file": True,
+            "is_dir": False,
         }
         ok = file_index.add_file(file_data)
         if ok and is_media_file(p):
