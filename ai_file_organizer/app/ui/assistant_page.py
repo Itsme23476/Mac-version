@@ -85,6 +85,8 @@ class AssistantPage(QWidget):
         self.mw = main_window
         self._thread: QThread | None = None
         self._worker: AgentWorker | None = None
+        self._recorder = None        # StreamingTranscriber while dictating a task
+        self._recording = False
         self._build()
 
     # ---- UI ----
@@ -117,6 +119,21 @@ class AssistantPage(QWidget):
         self.status_label.setStyleSheet("color:#7A7A90; font-size:12px; background:transparent; border:none;")
         row.addWidget(self.status_label)
         row.addStretch()
+        # Voice input — speak the task (reuses Filect's dictation backend)
+        self._mic_idle_style = (
+            "QPushButton { background:transparent; color:#7C4DFF; border:1px solid #7C4DFF; "
+            "border-radius:9px; padding:0 16px; font-weight:600; } "
+            "QPushButton:hover { background:rgba(124,77,255,0.08); } "
+            "QPushButton:disabled { color:#B9A8F0; border-color:#B9A8F0; }")
+        self._mic_rec_style = (
+            "QPushButton { background:#E53935; color:white; border:none; border-radius:9px; "
+            "padding:0 16px; font-weight:600; } QPushButton:hover { background:#D32F2F; }")
+        self.mic_btn = QPushButton("🎤  Speak")
+        self.mic_btn.setMinimumHeight(34)
+        self.mic_btn.setCursor(Qt.PointingHandCursor)
+        self.mic_btn.setStyleSheet(self._mic_idle_style)
+        self.mic_btn.clicked.connect(self._toggle_mic)
+        row.addWidget(self.mic_btn)
         self.run_btn = QPushButton("Run")
         self.run_btn.setMinimumHeight(34)
         self.run_btn.setCursor(Qt.PointingHandCursor)
@@ -202,6 +219,62 @@ class AssistantPage(QWidget):
         self._worker.error.connect(self._on_error)
         self._worker.done.connect(self._on_done)
         self._thread.start()
+
+    # ---- voice input ----
+    def _toggle_mic(self):
+        if self._recording:
+            self._stop_mic()
+        else:
+            self._start_mic()
+
+    def _start_mic(self):
+        try:
+            from app.core.transcription import StreamingTranscriber
+            from app.core.settings import settings
+        except Exception as e:
+            self.status_label.setText(f"Voice unavailable: {e}")
+            return
+        try:
+            self._recorder = StreamingTranscriber(
+                terms=settings.dictation_custom_terms,
+                language=(settings.dictation_language or None))
+            self._recorder.finished.connect(self._on_transcript)
+            self._recorder.error.connect(self._on_mic_error)
+            self._recording = True
+            self.mic_btn.setText("●  Recording… tap to stop")
+            self.mic_btn.setStyleSheet(self._mic_rec_style)
+            self._recorder.start()
+        except Exception as e:
+            self._on_mic_error(str(e))
+
+    def _stop_mic(self):
+        self._recording = False
+        self.mic_btn.setText("Transcribing…")
+        self.mic_btn.setEnabled(False)
+        r = self._recorder
+        if r is not None:
+            try:
+                r.stop_recording()
+            except Exception as e:
+                self._on_mic_error(str(e))
+
+    def _on_transcript(self, text: str):
+        text = (text or "").strip()
+        if text:
+            cur = self.task_input.toPlainText().strip()
+            self.task_input.setPlainText((cur + " " + text).strip() if cur else text)
+        self._reset_mic()
+
+    def _on_mic_error(self, msg: str):
+        self.status_label.setText(f"Voice error: {msg}")
+        self._reset_mic()
+
+    def _reset_mic(self):
+        self._recording = False
+        self._recorder = None
+        self.mic_btn.setEnabled(True)
+        self.mic_btn.setText("🎤  Speak")
+        self.mic_btn.setStyleSheet(self._mic_idle_style)
 
     def _on_step(self, step):
         if step.kind == "tool":
