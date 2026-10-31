@@ -137,7 +137,7 @@ class VoiceDictationController(QObject):
         self._mode = "dictate"        # "dictate" | "search" | "organize" — set at capture start
         self.organize_controller = None   # VoiceOrganizeController, injected by main_window
         self._organize_active = False     # (legacy) unused; mode is now decided at release
-        self._mods_seen = {"shift": False, "option": False}  # modifiers seen during a capture
+        self._mods_seen = {"shift": False, "option": False, "control": False}  # mods seen during capture
         self._mod_timer = None            # QTimer that polls modifiers while recording
         self._tx_watchdog = None          # QTimer: auto-recovers a stuck "transcribing" state
         self._indicator = DictationOverlay() if _OVERLAY_OK else DictationIndicator()
@@ -208,20 +208,22 @@ class VoiceDictationController(QObject):
         # held chord like Fn+Option, the Option bit is often not set yet at the exact
         # Fn-down instant the tap samples, but IS set by now — so OR it in. Makes mode
         # selection reliable no matter how simultaneously the two keys are pressed.
-        live_shift = live_option = None
+        live_shift = live_option = live_control = None
         try:
             from Quartz import (CGEventSourceFlagsState,
                                 kCGEventSourceStateCombinedSessionState)
             _f = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState)
             live_shift = bool(_f & 0x20000)    # kCGEventFlagMaskShift
             live_option = bool(_f & 0x80000)   # kCGEventFlagMaskAlternate (Option / ⌥)
+            live_control = bool(_f & 0x40000)  # kCGEventFlagMaskControl (Fn+Control -> Assistant)
             shift = shift or live_shift
             option = option or live_option
         except Exception:
             pass
-        logger.info(f"[voice] Fn press: live(shift={live_shift} option={live_option}) -> "
-                    f"shift={shift} option={option} state={self._state} "
-                    f"organize_ctrl={self.organize_controller is not None}")
+        control = bool(live_control)
+        logger.info(f"[voice] Fn press: live(shift={live_shift} option={live_option} "
+                    f"control={live_control}) -> shift={shift} option={option} control={control} "
+                    f"state={self._state} organize_ctrl={self.organize_controller is not None}")
         if self._state == "transcribing":
             # A press while a (possibly stuck/laggy) transcription is still in flight =
             # CANCEL it: drop the pending result and return to idle, so a hang never traps
@@ -245,7 +247,7 @@ class VoiceDictationController(QObject):
         # here: the modifier is usually added a beat after Fn, so locking now always misses
         # it. Instead we watch modifiers for the whole hold (_poll_mods) and decide in
         # _stop(). Seed with whatever is already down this instant.
-        self._mods_seen = {"shift": bool(shift), "option": bool(option)}
+        self._mods_seen = {"shift": bool(shift), "option": bool(option), "control": bool(control)}
         self._mode = "dictate"
         self._press_time = time.monotonic()
         self._got_second_tap = False
@@ -369,9 +371,12 @@ class VoiceDictationController(QObject):
             self._mods_seen["shift"] = True
         if f & 0x80000:
             self._mods_seen["option"] = True
-        # Live cue on the pill so you can SEE the mode while holding: folder=organize,
-        # magnifier=search, plain=dictate.
-        provisional = ("organize" if self._mods_seen["option"]
+        if f & 0x40000:
+            self._mods_seen["control"] = True
+        # Live cue on the pill so you can SEE the mode while holding: assistant=Fn+Control,
+        # folder=organize, magnifier=search, plain=dictate.
+        provisional = ("assistant" if self._mods_seen["control"]
+                       else "organize" if self._mods_seen["option"]
                        else "search" if self._mods_seen["shift"] else "dictate")
         try:
             self._indicator.set_mode(provisional)
@@ -397,8 +402,10 @@ class VoiceDictationController(QObject):
             self._mod_timer.stop()
             self._mod_timer = None
         # Decide the mode from whatever modifier was held at ANY point during the hold:
-        # Option -> organize, else Shift -> search, else dictate.
-        if self._mods_seen.get("option"):
+        # Control -> assistant, else Option -> organize, else Shift -> search, else dictate.
+        if self._mods_seen.get("control"):
+            self._mode = "assistant"
+        elif self._mods_seen.get("option"):
             self._mode = "organize"
         elif self._mods_seen.get("shift"):
             self._mode = "search"
@@ -426,6 +433,16 @@ class VoiceDictationController(QObject):
         if not text:
             self._indicator.hide()
             self._status("No speech detected.")
+            return
+        if self._mode == "assistant":
+            # Fn+Control: route the spoken command — it may name an existing conversation to
+            # CONTINUE ("use my sponsorship conversation and …") or be a fresh task.
+            self._indicator.hide()
+            try:
+                self._mw.assistant_page.run_voice_task(text)
+            except Exception as e:
+                logger.error(f"voice assistant start failed: {e}")
+                self._status("Assistant unavailable.")
             return
         if self._mode == "organize":
             self._indicator.hide()

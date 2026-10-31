@@ -69,6 +69,11 @@ hidden_imports = [
     'app.ui.organize_overlay',
     'app.ui.voice_organize_controller',
     'app.ui.mac_spaces',
+    'app.ui.notch_panel',
+    'app.ui.claude_overlay',
+    'app.ui.assistant_page',
+    'app.core.agent_runner',
+    'app.core.agent_sessions',
     'app.version',
     
     # PySide6 modules

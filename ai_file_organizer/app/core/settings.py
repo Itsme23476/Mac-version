@@ -47,6 +47,10 @@ class Settings:
         #   AI to suggest terms for, so we can prefill it next time.
         self.organize_voice_target: str = ''  # Voice organize (Fn+Option): default folder to
         #   organize when none is picked on the Organize page. '' = fall back to ~/Downloads.
+        self.assistant_bypass: bool = False  # Assistant: run agent tasks without Approve/Deny
+        #   cards (Claude Code's bypass-permissions). Persisted so it survives app restarts.
+        self.assistant_model: str = ''   # Assistant: '' = default, else 'opus'/'sonnet'/'haiku'
+        self.assistant_effort: str = ''  # Assistant: '' = default, else low/medium/high/xhigh/max
         self.dictation_mute_while_recording: bool = True  # Voice: mute system output while
         #   recording so a background video/music doesn't bleed into the mic.
         # Theme: 'dark' or 'light'
@@ -298,6 +302,13 @@ class Settings:
         ovt = data.get('organize_voice_target')
         if isinstance(ovt, str):
             self.organize_voice_target = ovt.strip()
+        self.assistant_bypass = bool(data.get('assistant_bypass', self.assistant_bypass))
+        am = data.get('assistant_model')
+        if isinstance(am, str):
+            self.assistant_model = am.strip()
+        ae = data.get('assistant_effort')
+        if isinstance(ae, str):
+            self.assistant_effort = ae.strip()
         mw = data.get('dictation_mute_while_recording')
         if isinstance(mw, bool):
             self.dictation_mute_while_recording = mw
@@ -407,6 +418,9 @@ class Settings:
             'dictation_language': self.dictation_language,
             'dictation_last_niche': self.dictation_last_niche,
             'organize_voice_target': self.organize_voice_target,
+            'assistant_bypass': self.assistant_bypass,
+            'assistant_model': self.assistant_model,
+            'assistant_effort': self.assistant_effort,
             'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
