@@ -839,8 +839,8 @@ class ClaudeOverlay(QWidget):
         meta = "✓ Finished"
         if sid:
             meta += f"  ·  saved {sid}…"
-        if cost:
-            meta += f"  ·  ${cost:.2f}"
+        # No $ figure: on the Claude subscription you're not charged per task — a dollar amount would
+        # falsely imply a bill. (The token value is still in the [asst] trace if we need it.)
         # Lead with what Claude GENERATED (the result), not just "Finished" — that's what you want
         # to glance at. Full output is behind "View task →". Fall back to the prompt if no text.
         shown = self._result_text.strip() or self._task_text.strip()
@@ -862,6 +862,32 @@ class ClaudeOverlay(QWidget):
         self._stack.setCurrentWidget(self._page_error)
         if not self._minimized:
             self._fit()
+
+    def load_state(self, title: str, feed_lines=None, status: str = "working", action: str = "",
+                   approval_req=None, result: str = "", cost: float = 0.0,
+                   session_id: str = "", task: str = "") -> None:
+        """Repaint the notch to show a DIFFERENT conversation's stored state — the left rail swapping
+        focus between concurrent agents. Rebuilds the bubble + Details feed from the snapshot, then
+        sets the status page. ponytail: reuses the existing show_* methods, no parallel render path.
+        (_append_detail dedupes, so re-seeding the last action line is a no-op.)"""
+        self._reset_details()
+        title = (title or "").strip()
+        self._transcript.setText(title[:300])
+        self._transcript.setVisible(bool(title) and not self._minimized)
+        for ln in (feed_lines or []):
+            self._append_detail(ln)
+        if status == "needs_you":
+            tool = getattr(approval_req, "tool", "") if approval_req else ""
+            tin = getattr(approval_req, "tool_input", None) if approval_req else None
+            self.show_needs_you(tool, tin)
+        elif status == "done":
+            self.show_done(session_id=session_id, cost=cost, task=task, result=result or "")
+        elif status == "stopped":
+            self.show_done(task=task, result=result or "Stopped by you.")
+        elif status == "error":
+            self.show_error(result or "Something went wrong.")
+        else:
+            self.show_working(action or "Working…", "")
 
     def set_state(self, state: str) -> None:
         self._state = state

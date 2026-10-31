@@ -51,6 +51,9 @@ class Settings:
         #   cards (Claude Code's bypass-permissions). Persisted so it survives app restarts.
         self.assistant_model: str = ''   # Assistant: '' = default, else 'opus'/'sonnet'/'haiku'
         self.assistant_effort: str = ''  # Assistant: '' = default, else low/medium/high/xhigh/max
+        self.assistant_router_model: str = 'opus'  # Assistant: model for the voice intent router
+        #   (new-vs-follow-up-vs-resume). Opus by default; latency is spawn-bound so the model is
+        #   ~latency-neutral. Change to 'sonnet'/'haiku' to spend less of your Max limits on routing.
         self.dictation_mute_while_recording: bool = True  # Voice: mute system output while
         #   recording so a background video/music doesn't bleed into the mic.
         # Theme: 'dark' or 'light'
@@ -306,6 +309,9 @@ class Settings:
         am = data.get('assistant_model')
         if isinstance(am, str):
             self.assistant_model = am.strip()
+        rm = data.get('assistant_router_model')
+        if isinstance(rm, str) and rm.strip():
+            self.assistant_router_model = rm.strip()
         ae = data.get('assistant_effort')
         if isinstance(ae, str):
             self.assistant_effort = ae.strip()
@@ -420,6 +426,7 @@ class Settings:
             'organize_voice_target': self.organize_voice_target,
             'assistant_bypass': self.assistant_bypass,
             'assistant_model': self.assistant_model,
+            'assistant_router_model': self.assistant_router_model,
             'assistant_effort': self.assistant_effort,
             'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'theme': self.theme,
