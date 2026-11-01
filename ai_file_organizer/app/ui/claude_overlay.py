@@ -36,7 +36,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QCursor
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextEdit, QSlider,
+    QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextEdit, QSlider, QLineEdit,
 )
 
 try:
@@ -66,6 +66,7 @@ TOP_MARGIN = 0
 STRIP_W = 150               # width of the resting handle
 TOPBAR_H = 24
 FOOTER_H = 22               # keycap shortcut hint row
+TYPEFIELD_H = 40            # the "type a task" input row at the bottom
 MIN_H = 16                  # pill strip height BELOW the notch band (window = notch band + this)
 WIN_TITLE = "Filect Assistant"   # unique — notch_panel finds the NSWindow by this
 
@@ -82,7 +83,7 @@ _STACK_H = {"working": 22, "needs_you": 116, "done": 118, "error": 56}
 DETAILS_H = 166      # height of the live "Details" feed when expanded
 TRANSCRIPT_H = 56    # the "what you said" bubble at the top of the card
 CTRL_H = 32          # persistent control row (model pill · Details · primary action)
-MODELPANEL_H = 150   # the inline "Model & effort" panel (model dropdown closed)
+MODELPANEL_H = 170   # the inline "Model & effort" panel (model dropdown closed)
 MODEL_LIST_H = 96    # extra height when the dropdown list is open (3 rows — the selected is hidden)
 _MODELS = ("opus", "sonnet", "haiku", "fable")
 # Display names carry the version (the alias still resolves to Claude Code's latest of each family).
@@ -249,6 +250,45 @@ class _Spinner(QWidget):
         p.end()
 
 
+class _TypeField(QLineEdit):
+    """Text input on the notch. On click it asks the panel to take keyboard focus — allowed because the
+    panel is a floating, non-activating panel with becomesKeyOnlyIfNeeded: a USER click can key it (the
+    old 'dead key window' problem was only for key-grabs with no user click)."""
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self._on_click = on_click
+
+    def mousePressEvent(self, e):
+        try:
+            self._on_click()
+        except Exception:
+            pass
+        super().mousePressEvent(e)
+
+
+class _SendButton(QPushButton):
+    """Send button with a PAINTED up-arrow. A text glyph ('↑') doesn't render in the brand font — it
+    came out as a blank orange square — so we draw the arrow ourselves: always crisp, centered, and
+    visible in both the enabled (white on accent) and disabled (grey) states."""
+    def paintEvent(self, e):
+        super().paintEvent(e)                 # styled background (accent / disabled / hover)
+        from PySide6.QtGui import QPainter, QPen, QColor
+        from PySide6.QtCore import QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor("#FFFFFF") if self.isEnabled() else QColor("#8A8A92"))
+        pen.setWidthF(2.3)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        w, h = self.width(), self.height()
+        cx, top, bot, head = w / 2.0, h * 0.30, h * 0.72, w * 0.18
+        p.drawLine(QPointF(cx, bot), QPointF(cx, top))                 # shaft
+        p.drawLine(QPointF(cx, top), QPointF(cx - head, top + head))   # left wing
+        p.drawLine(QPointF(cx, top), QPointF(cx + head, top + head))   # right wing
+        p.end()
+
+
 class ClaudeOverlay(QWidget):
     """Ambient Assistant notch. Rests as a handle; hover expands; never auto-drops."""
 
@@ -258,6 +298,7 @@ class ClaudeOverlay(QWidget):
     dismissed = Signal()
     model_changed = Signal(str, str)   # (model, effort) picked on the card's model pill
     stop_clicked = Signal()            # "Stop" pressed while a task is running
+    submit_text = Signal(str)          # a typed task submitted from the bottom input field
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -483,7 +524,8 @@ class ClaudeOverlay(QWidget):
             self._model_rows[k] = r
             ml.addWidget(r)
         mp.addWidget(self._model_list)
-        erow = QHBoxLayout()
+        mp.addSpacing(10)          # clear gap so the model dropdown and the effort controls read as
+        erow = QHBoxLayout()       # two separate groups, not one cramped block
         _elbl = QLabel("Effort")
         _elbl.setStyleSheet(f"color:{C['text_muted']}; font-size:10.5px; font-weight:600; background:transparent; border:none;")
         erow.addWidget(_elbl)
@@ -516,6 +558,36 @@ class ClaudeOverlay(QWidget):
         mp.addLayout(ends)
         col.addWidget(self._model_panel)
 
+        # Type a task instead of speaking (VoiceOS-style). Enter routes it through the SAME intent
+        # router as voice (new / follow-up / resume). Precise fallback when the mic mishears.
+        self._type_field = _TypeField(self._key_for_typing)
+        self._type_field.setObjectName("typeField")
+        self._type_field.setPlaceholderText("Type a task…")
+        self._type_field.setFixedHeight(TYPEFIELD_H - 8)
+        self._type_field.setStyleSheet(
+            f"QLineEdit#typeField{{background:#17171C; color:{C['text']}; border:1px solid {C['border']};"
+            f" border-radius:9px; padding:4px 11px; font-size:12px;}}"
+            f"QLineEdit#typeField:focus{{border-color:{ACCENT};}}")
+        self._type_field.returnPressed.connect(self._on_type_submit)
+        # Chat-style SEND button (painted ↑) — Enter still works; enabled only when there's text.
+        self._send_btn = _SendButton()
+        self._send_btn.setObjectName("sendBtn")
+        self._send_btn.setFixedSize(TYPEFIELD_H - 8, TYPEFIELD_H - 8)
+        self._send_btn.setCursor(Qt.PointingHandCursor)
+        self._send_btn.setEnabled(False)
+        self._send_btn.setStyleSheet(
+            f"QPushButton#sendBtn{{background:{ACCENT}; border:none; border-radius:9px;}}"
+            f"QPushButton#sendBtn:disabled{{background:#2E2E36; border:none; border-radius:9px;}}"
+            f"QPushButton#sendBtn:hover{{background:#E08A6B;}}")
+        self._send_btn.clicked.connect(self._on_type_submit)
+        self._type_field.textChanged.connect(lambda s: self._send_btn.setEnabled(bool(s.strip())))
+        trow = QHBoxLayout()
+        trow.setContentsMargins(0, 0, 0, 0)
+        trow.setSpacing(7)
+        trow.addWidget(self._type_field, 1)
+        trow.addWidget(self._send_btn)
+        col.addLayout(trow)
+
         # Footer: keycap shortcut hint (VoiceOS-style), subtle, below the content.
         self._footer = QLabel()
         self._footer.setFixedHeight(FOOTER_H)
@@ -538,6 +610,26 @@ class ClaudeOverlay(QWidget):
                 "padding:1px 5px; font-size:10px;")
         return (f"Hold <span style='{chip}'>fn</span> "
                 f"<span style='{chip}'>⌃ control</span> to speak")
+
+    def _key_for_typing(self):
+        """User clicked the type field — let the non-activating panel take keyboard focus for it.
+        A user click is allowed to key a floating becomesKeyOnlyIfNeeded panel; a no-click grab is not."""
+        if sys.platform != "darwin":
+            return
+        try:
+            ns = notch_panel._ns_window(WIN_TITLE)
+            if ns is not None and hasattr(ns, "makeKeyWindow"):
+                ns.makeKeyWindow()
+        except Exception:
+            pass
+
+    def _on_type_submit(self):
+        text = (self._type_field.text() or "").strip()
+        if not text:
+            return
+        self._type_field.clear()
+        self._type_field.clearFocus()
+        self.submit_text.emit(text)       # -> AssistantPage.run_voice_task (same routing as voice)
 
     def _icon_btn_style(self) -> str:
         return (
@@ -1076,6 +1168,8 @@ class ClaudeOverlay(QWidget):
         self._stack.setVisible(not minimized)
         self._ctrl_row.setVisible(not minimized)
         self._footer.setVisible(not minimized)
+        self._type_field.setVisible(not minimized)
+        self._send_btn.setVisible(not minimized)
         self._transcript.setVisible((not minimized) and bool(self._transcript.text()))
         self._details_feed.setVisible((not minimized) and self._details_open)
         if minimized:
@@ -1129,7 +1223,7 @@ class ClaudeOverlay(QWidget):
                 h += MODEL_LIST_H             # model dropdown list expanded
         if self._details_open:
             h += sp + (DETAILS_H - 6)         # the expanded live feed
-        h += sp + FOOTER_H + cm.bottom() + om.bottom()
+        h += sp + TYPEFIELD_H + sp + FOOTER_H + cm.bottom() + om.bottom()
         self.setMinimumHeight(0)
         self.resize(self.width(), max(60, int(h)))
         self._reassert()

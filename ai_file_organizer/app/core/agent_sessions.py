@@ -245,6 +245,40 @@ def route_speech(text: str, max_candidates: int = 40) -> dict:
         return {"session": None, "task": text}
 
 
+# Politeness / glue words to drop so a spoken prompt collapses to its content words. Kept small and
+# generic — it just has to make "hi go build me a small one page website" read as "Build Small One
+# Page Website". ponytail: a word set + Title Case beats a cloud call for a cosmetic label.
+_TITLE_FILLERS = {
+    "a", "an", "the", "to", "for", "of", "and", "or", "my", "me", "i", "you", "your", "we", "us",
+    "it", "that", "this", "there", "hi", "hey", "hello", "ok", "okay", "so", "um", "uh", "please",
+    "pls", "can", "could", "would", "should", "now", "just", "go", "let", "lets", "want", "wanna",
+    "gonna", "need", "like", "then", "actually", "basically", "really", "kinda", "maybe", "some",
+    "be", "is", "are", "am", "do", "does", "get", "got", "with", "on", "in", "into", "up", "all",
+    "them", "their", "its",
+}
+
+
+def generate_title(prompt: str, max_words: int = 5) -> str:
+    """A short title for a task, built LOCALLY from its prompt — no AI, no network, instant. Takes the
+    first sentence, drops filler/politeness words, keeps the content words and Title-Cases them
+    (preserving acronyms like TODO/API/CSV). Always non-empty for a non-empty prompt.
+
+    "hi go build me a small one page website" -> "Build Small One Page Website".
+    """
+    import re
+    text = (prompt or "").strip()
+    if not text:
+        return ""
+    head = re.split(r"[.!?\n]", text, 1)[0]
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'+#.-]*", head)
+    content = [w for w in words if w.lower() not in _TITLE_FILLERS]
+    picked = (content or words)[:max_words]
+    if not picked:
+        return text[:46].rstrip()
+    title = " ".join(w if w.isupper() else w[:1].upper() + w[1:] for w in picked)
+    return title[:48].rstrip()
+
+
 # --- headless self-check -------------------------------------------------------
 if __name__ == "__main__":
     import tempfile
@@ -291,6 +325,15 @@ if __name__ == "__main__":
     r = route_speech("use my sponsorship conversation and draft a follow-up")
     assert r["session"] is None and "sponsorship" in r["task"].lower(), r
     print("route_speech fallback + fence-strip OK")
+
+    # generate_title: local, no AI — drops filler, keeps content words, preserves acronyms.
+    assert generate_title("") == ""
+    assert generate_title("hi go build me a small one page website for filect") \
+        == "Build Small One Page Website", generate_title("hi go build me a small one page website for filect")
+    assert generate_title("find all the TODO comments in my project and list them") \
+        == "Find TODO Comments Project List", generate_title("find all the TODO comments in my project and list them")
+    assert len(generate_title("x" * 200)) <= 48
+    print("generate_title (local) OK")
 
     # 3) Informational: list the user's REAL local sessions (read-only).
     real = list_sessions(limit=8)

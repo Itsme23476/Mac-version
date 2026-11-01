@@ -357,6 +357,7 @@ class AssistantPage(QWidget):
         ov.dismissed.connect(self._on_notch_dismissed)
         ov.model_changed.connect(self._on_model_changed)
         ov.stop_clicked.connect(self._on_stop_task)
+        ov.submit_text.connect(lambda t: self.run_voice_task(t, source="typed"))   # typed = same routing
         try:
             ov.set_model_effort(self._model, self._effort)   # reflect the saved choice on the pill
         except Exception:
@@ -772,7 +773,7 @@ class AssistantPage(QWidget):
             _add("saved", None, ss.id, ss.cwd, ss.title)
         return cands
 
-    def run_voice_task(self, text: str):
+    def run_voice_task(self, text: str, source: str = "voice"):
         """Fn+Control entry. Route the spoken command to a NEW or RESUMED conversation via one
         quick LLM call (off the UI thread), then run it. The notch shows "Routing…" meanwhile, then
         names the one it picked. Falls back to a new conversation on any routing failure."""
@@ -785,7 +786,7 @@ class AssistantPage(QWidget):
         focused = self._focused
         focused_title = focused.title if focused else None
         candidates = self._build_voice_candidates(text)
-        _trace(f"voice heard: {text!r} | focused={focused_title!r} | "
+        _trace(f"{source} heard: {text!r} | focused={focused_title!r} | "
                f"candidates={[c['title'] for c in candidates]}")
         self._notch("present")
         self._notch("set_title", "Routing…")
