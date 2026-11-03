@@ -121,18 +121,12 @@ class _EdgeTab(QWidget):
         if not getattr(rail, "_cue", False):
             p.fillRect(self.rect(), QColor(0, 0, 0, 2))
             return
-        from PySide6.QtGui import QLinearGradient, QRadialGradient
-        cy, h = self.height() // 2, 64
-        glow = QRadialGradient(0, cy, 30)                     # soft Filect-purple glow off the edge
-        glow.setColorAt(0, QColor(124, 77, 255, 110))
-        glow.setColorAt(1, QColor(124, 77, 255, 0))
-        p.setPen(Qt.NoPen)
-        p.setBrush(glow)
-        p.drawEllipse(-26, cy - 46, 52, 92)
-        pill = QLinearGradient(0, cy - h / 2, 0, cy + h / 2)  # slim pill, #A78BFA → brand #7C4DFF
-        pill.setColorAt(0, QColor(167, 139, 250))
-        pill.setColorAt(1, QColor(124, 77, 255))
-        p.setBrush(pill)
+        from PySide6.QtGui import QPen
+        cy, h = self.height() // 2, 150
+        # See-through: no colour of its own, it just darkens what's behind it a little; a faint light
+        # hairline keeps it findable on dark wallpapers. Tall and slim (Damianos: lighter, taller).
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        p.setBrush(QColor(0, 0, 0, 70))
         p.drawRoundedRect(-4, cy - h // 2, 11, h, 5.5, 5.5)   # left half runs off-screen → ~7px visible
 
 
