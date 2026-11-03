@@ -1,13 +1,13 @@
-"""Left-edge conversation rail — the cockpit for concurrent agents.
+"""Left-edge conversation rail — the cockpit for concurrent agents, styled after VoiceOS's drawer.
 
-A VoiceOS-style roster that lives FLUSH against the left screen edge and tucks away to a thin strip
-when you're not using it: hover the strip and it slides out; move away and it slides back. Grouped like
-Claude's sidebar — RUNNING (chats working or waiting on you right now) pinned on top, then Today /
-Previous 7 days / Previous 30 days / one group per month for everything else (this run's finished
-chats + past voice-agent chats from disk), with search. Selecting a conversation shows it in the
-notch. Reuses the same non-activating,
-all-Spaces, no-focus-steal panel mechanics as the notch (`notch_panel.configure_macos_panel`), so
-driving it never steals focus from your current app.
+At rest: a slim dark see-through sliver against the left screen edge. Hover → the sliver grows (a cue,
+never opens). CLICK → a near-black drawer slides out, flush on the edge with corners that curve into it:
+pill search + a lock, "New chat", then the chats grouped like Claude's sidebar — Running (working or
+waiting on you), Today / Previous 7 days / Previous 30 days / one group per month — one line each with a
+round icon. Unlocked, it tucks away shortly after the mouse leaves; the lock keeps it open. Hover is read
+by polling the cursor (macOS doesn't deliver enter/leave to an inactive app's non-activating panel).
+Selecting a conversation shows it in the notch. Same non-activating, all-Spaces, no-focus-steal panel
+mechanics as the notch (`notch_panel.configure_macos_panel`), so it never steals focus from your app.
 """
 from __future__ import annotations
 import sys
@@ -31,9 +31,12 @@ def _cursor_pos():
     return QCursor.pos()
 
 RAIL_TITLE = "Filect Conversations"   # unique — notch_panel finds the NSWindow by this
-RAIL_W = 272
+RAIL_W = 240                          # window width: the ~224px drawer (VoiceOS-like proportions) + the tab
 EDGE = 7                              # px of the rail left peeking when collapsed (the hover strip)
-TAB_W = 16                            # the edge tab: hover slides it out this far (EDGE → TAB_W) + a grip
+TAB_W = 16                            # the edge tab: hover slides it out this far (EDGE → TAB_W)
+FLARE = 18                            # the drawer's inward-curved corners where it meets the screen edge
+PANEL_R = 20                          # its rounded right corners
+PANEL_FRAC = 0.5                      # drawer height, as a share of the screen (fixed; the list scrolls)
 ANIM_MS = 160
 _RUNNING = ("working", "needs_you")
 
@@ -47,7 +50,7 @@ _STATUS = {
     "stopped":   ("#6E6E78", "Stopped"),
     "recent":    ("#6E6E78", ""),           # a past chat from disk
 }
-_HDR_CSS = "color:#7A7A86;font-size:10.5px;font-weight:800;letter-spacing:1px;background:transparent;"
+_HDR_CSS = "color:#86868F;font-size:11px;font-weight:500;background:transparent;"
 _SCROLL_CSS = (
     "QScrollArea{background:transparent;border:none;}"
     "QScrollBar:vertical{background:transparent;width:6px;margin:0;}"
@@ -107,37 +110,103 @@ def _matches(query: str, *fields) -> bool:
     return all(w in hay for w in query.lower().split())
 
 
+def _glyph(kind: str, px: int = 16, on: bool = False):
+    """Small line glyphs painted in code (the bundle has no icon assets): 'search', 'lock', 'plus'."""
+    from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath
+    from PySide6.QtCore import QRectF, QPointF
+    pm = QPixmap(px * 2, px * 2)
+    pm.setDevicePixelRatio(2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(167, 139, 250) if on else QColor(150, 150, 160), 1.5)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    s = float(px)
+    if kind == "search":
+        p.drawEllipse(QRectF(s * .18, s * .18, s * .5, s * .5))
+        p.drawLine(QPointF(s * .6, s * .6), QPointF(s * .84, s * .84))
+    elif kind == "lock":
+        p.drawRoundedRect(QRectF(s * .22, s * .46, s * .56, s * .4), 2, 2)
+        lift = 0 if on else s * .1                      # unlocked: the shackle sits raised and open
+        path = QPainterPath(QPointF(s * .34, s * .46 - lift))
+        path.lineTo(s * .34, s * .32 - lift)
+        path.arcTo(QRectF(s * .34, s * .14 - lift, s * .32, s * .32), 180, -180)
+        if on:
+            path.lineTo(s * .66, s * .46)
+        p.drawPath(path)
+    elif kind == "plus":
+        p.drawLine(QPointF(s * .5, s * .22), QPointF(s * .5, s * .78))
+        p.drawLine(QPointF(s * .22, s * .5), QPointF(s * .78, s * .5))
+    p.end()
+    return pm
+
+
+def _row_icon(status: str, px: int = 18):
+    """A row's round icon (VoiceOS-style): the Claude logo if one is bundled, else a soft lavender
+    circle; a small badge marks a chat that's working (purple) / waiting on you (amber) / failed (red)."""
+    from PySide6.QtGui import QPixmap, QPainter, QColor, QRadialGradient
+    from PySide6.QtCore import QRectF
+    from app.ui.claude_overlay import _load_logo
+    pm = QPixmap(px * 2, px * 2)
+    pm.setDevicePixelRatio(2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    logo = _load_logo(px)
+    if logo is not None:
+        p.drawPixmap(0, 0, px, px, logo)
+    else:
+        g = QRadialGradient(px * .35, px * .3, px * .8)
+        g.setColorAt(0, QColor(236, 228, 255))
+        g.setColorAt(1, QColor(196, 178, 255))
+        p.setPen(Qt.NoPen)
+        p.setBrush(g)
+        p.drawEllipse(QRectF(0.5, 0.5, px - 1, px - 1))
+    badge = {"working": QColor(124, 77, 255), "needs_you": QColor(230, 162, 60),
+             "error": QColor(242, 100, 90)}.get(status)
+    if badge is not None:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(10, 10, 12))
+        p.drawEllipse(QRectF(px - 8, px - 8, 8, 8))     # dark ring so the dot reads on the icon
+        p.setBrush(badge)
+        p.drawEllipse(QRectF(px - 7, px - 7, 6, 6))
+    p.end()
+    return pm
+
+
 class _EdgeTab(QWidget):
-    """The rail's tab at the screen edge. At rest it's invisible (alpha-2 fill: still hit-testable, so
-    hover works — like VoiceOS, nothing shows). On hover the rail slides out a little and this paints a
-    small dark pill with an orange grip: the cue that a click opens it. Clicks fall through to the rail."""
+    """The rail's tab at the screen edge, VoiceOS-style: at rest a slim dark see-through sliver against
+    the edge; on hover the rail slides out a little and the sliver grows wider, taller and darker — the
+    cue that a click opens it. Clicks fall through to the rail."""
     def paintEvent(self, e):
-        from PySide6.QtGui import QPainter, QColor
+        from PySide6.QtGui import QPainter, QColor, QPen
+        from PySide6.QtCore import QRectF
         rail = self.parent()
+        if getattr(rail, "_expanded", False):
+            return                                   # open: the drawer is the UI, no tab
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        if getattr(rail, "_expanded", False):
-            return                                   # open: the card is the UI, no tab
-        if not getattr(rail, "_cue", False):
-            p.fillRect(self.rect(), QColor(0, 0, 0, 2))
-            return
-        from PySide6.QtGui import QPen
-        cy, h = self.height() // 2, min(320, self.height() - 20)
-        # See-through: no colour of its own, it just darkens what's behind it a little; a faint light
-        # hairline keeps it findable on dark wallpapers. Tall and slim (Damianos: lighter, taller).
-        p.setPen(QPen(QColor(255, 255, 255, 45), 1))
-        p.setBrush(QColor(0, 0, 0, 110))
-        p.drawRoundedRect(-4, cy - h // 2, 11, h, 5.5, 5.5)   # left half runs off-screen → ~7px visible
+        p.fillRect(self.rect(), QColor(0, 0, 0, 2))  # alpha 2: invisible, but keeps the strip clickable
+        cue = getattr(rail, "_cue", False)
+        # Draw from the SCREEN edge: tucked, it's at x = TAB_W - EDGE in here; slid out (cue), at x = 0.
+        x0 = 0 if cue else TAB_W - EDGE
+        w = 8 if cue else 4
+        h = (self.height() - 2 * FLARE) * (0.66 if cue else 0.58)
+        p.setPen(QPen(QColor(255, 255, 255, 45 if cue else 28), 1))
+        p.setBrush(QColor(0, 0, 0, 150 if cue else 115))
+        p.drawRoundedRect(QRectF(x0 - 6, (self.height() - h) / 2, w + 6, h), w / 2 + 1, w / 2 + 1)
 
 
 class _RailRow(QFrame):
-    """One conversation: status dot + title + status/elapsed or how long ago. Clickable."""
+    """One conversation, VoiceOS-style: a round icon + the title on one line (status / when live in the
+    icon badge + the tooltip). Clickable."""
     clicked = Signal()
 
     def __init__(self, title, status, when, focused, parent=None):
         super().__init__(parent)
         self.setObjectName("railRow")
-        color, label = _STATUS.get(status, _STATUS["working"])
+        label = _STATUS.get(status, _STATUS["working"])[1]
         if status == "working":
             sub = f"{label} · {_elapsed(when)}"
         elif status == "needs_you":
@@ -146,28 +215,24 @@ class _RailRow(QFrame):
             sub = f"{label} · {_ago(when)}"
         else:                                    # finished / past: just when
             sub = _ago(when)
-        border = "rgba(124,77,255,0.55)" if focused else "transparent"
-        bg = "rgba(124,77,255,0.16)" if focused else "transparent"
+        title = title or "Untitled"
+        self.setToolTip(f"{title}\n{sub}")
+        bg = "rgba(124,77,255,0.20)" if focused else "transparent"
         self.setStyleSheet(
-            f"QFrame#railRow{{background:{bg};border:1px solid {border};border-radius:10px;}}"
-            "QFrame#railRow:hover{background:rgba(255,255,255,0.05);} "
+            f"QFrame#railRow{{background:{bg};border:none;border-radius:10px;}}"
+            "QFrame#railRow:hover{background:rgba(255,255,255,0.07);} "
             "QFrame#railRow QLabel{background:transparent;border:none;}")
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 7, 10, 7)
-        lay.setSpacing(9)
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color:{color};font-size:11px;")
-        lay.addWidget(dot, 0, Qt.AlignVCenter)
-        col = QVBoxLayout()
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(1)
-        t = QLabel((title or "Untitled")[:40])
-        t.setStyleSheet("color:#ECECEC;font-size:12.5px;font-weight:600;")
-        s = QLabel(sub)
-        s.setStyleSheet(f"color:{color if status in ('needs_you', 'error') else '#8A8A92'};font-size:10.5px;")
-        col.addWidget(t)
-        col.addWidget(s)
-        lay.addLayout(col, 1)
+        lay.setContentsMargins(8, 7, 8, 7)
+        lay.setSpacing(10)
+        icon = QLabel()
+        icon.setFixedSize(18, 18)
+        icon.setPixmap(_row_icon(status))
+        lay.addWidget(icon, 0, Qt.AlignVCenter)
+        t = QLabel()
+        t.setStyleSheet("color:#EDEDED;font-size:12.5px;font-weight:500;")
+        t.setText(t.fontMetrics().elidedText(title, Qt.ElideRight, RAIL_W - TAB_W - 66))
+        lay.addWidget(t, 1)
 
     def mousePressEvent(self, e):
         self.clicked.emit()
@@ -180,7 +245,11 @@ class ConversationRail(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._pinned = False          # a click pins it open so it stays while you use the notch
+        self._pinned = False          # the lock: keeps the drawer open after the mouse leaves it
+        self._close_timer = QTimer(self)
+        self._close_timer.setSingleShot(True)
+        self._close_timer.setInterval(450)    # grace before an unlocked drawer tucks away on leave
+        self._close_timer.timeout.connect(self._close_if_left)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -205,38 +274,55 @@ class ConversationRail(QWidget):
         self._build()
 
     def _build(self):
+        from PySide6.QtGui import QIcon
+        from PySide6.QtWidgets import QLineEdit
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 10, TAB_W, 10)     # left=0: card flush on the screen edge; right: the tab
+        # left=0: flush on the screen edge. top/bottom=FLARE: room for the curved corners (painted in
+        # paintEvent). right=TAB_W: the edge tab.
+        outer.setContentsMargins(0, FLARE, TAB_W, FLARE)
         self._tab = _EdgeTab(self)
-        self._card = QFrame()
+        self._card = QFrame()                  # the drawer's content; its dark shape is painted by us
         self._card.setObjectName("railCard")
-        self._card.setStyleSheet(
-            "QFrame#railCard{background:#0E0E11;border:1px solid rgba(255,255,255,0.07);"
-            "border-top-left-radius:0px;border-bottom-left-radius:0px;"
-            "border-top-right-radius:18px;border-bottom-right-radius:18px;}")
+        self._card.setStyleSheet("QFrame#railCard{background:transparent;border:none;}")
         outer.addWidget(self._card)
         col = QVBoxLayout(self._card)
-        col.setContentsMargins(12, 12, 10, 12)
-        col.setSpacing(8)
-        # Search: filters the list as you type. Clicking it pins the rail and keys the panel so it can
-        # take typing (see _focus_search).
+        col.setContentsMargins(10, 12, 8, 10)
+        col.setSpacing(6)
+        # Top bar (VoiceOS): a pill search box + a lock that keeps the drawer open. Clicking the search
+        # keys the panel so it can take typing (see _focus_search).
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
         self._search = _TypeField(self._focus_search)
         self._search.setObjectName("railSearch")
-        self._search.setPlaceholderText("Search chats")
+        self._search.setPlaceholderText("Search")
         self._search.setClearButtonEnabled(True)
+        self._search.addAction(QIcon(_glyph("search")), QLineEdit.LeadingPosition)
+        self._search.setFixedHeight(30)
         self._search.setStyleSheet(
-            "QLineEdit#railSearch{background:#17171C;color:#ECECEC;border:1px solid rgba(255,255,255,0.08);"
-            "border-radius:10px;padding:6px 10px;font-size:12px;}"
+            "QLineEdit#railSearch{background:#232327;color:#ECECEC;border:1px solid transparent;"
+            "border-radius:15px;padding:0 8px 0 2px;font-size:12.5px;}"
             "QLineEdit#railSearch:focus{border-color:rgba(124,77,255,0.7);}")
         self._search.textChanged.connect(lambda _t: self._render())
         self._search.installEventFilter(self)
-        col.addWidget(self._search)
-        self._new_btn = QPushButton("＋  New chat")
+        top.addWidget(self._search, 1)
+        self._lock_btn = QPushButton()
+        self._lock_btn.setFixedSize(30, 30)
+        self._lock_btn.setCursor(Qt.PointingHandCursor)
+        self._lock_btn.setStyleSheet(
+            "QPushButton{background:#232327;border:none;border-radius:15px;}"
+            "QPushButton:hover{background:#2E2E33;}")
+        self._lock_btn.clicked.connect(self._toggle_lock)
+        self._sync_lock()
+        top.addWidget(self._lock_btn)
+        col.addLayout(top)
+        self._new_btn = QPushButton("New chat")
+        self._new_btn.setIcon(QIcon(_glyph("plus")))
         self._new_btn.setCursor(Qt.PointingHandCursor)
         self._new_btn.setStyleSheet(
-            "QPushButton{background:transparent;color:#B9B9C2;border:1px dashed rgba(255,255,255,0.14);"
-            "border-radius:10px;padding:7px 10px;font-size:12px;text-align:left;}"
-            "QPushButton:hover{color:#ECECEC;border-color:rgba(124,77,255,0.6);}")
+            "QPushButton{background:transparent;color:#CFCFD6;border:none;border-radius:10px;"
+            "padding:7px 8px;font-size:12.5px;text-align:left;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.07);color:#FFFFFF;}")
         self._new_btn.clicked.connect(self.new_requested.emit)
         col.addWidget(self._new_btn)
         # The grouped list scrolls. Every layer is explicitly transparent: an unstyled viewport falls
@@ -292,8 +378,8 @@ class ConversationRail(QWidget):
         groups = _group(sessions, recent)
         added = []
         for i, (header, items) in enumerate(groups):
-            h = QLabel(header)
-            h.setStyleSheet(_HDR_CSS + ("padding-top:8px;" if i else ""))
+            h = QLabel(header.capitalize())          # "PREVIOUS 7 DAYS" → "Previous 7 days" (VoiceOS-quiet)
+            h.setStyleSheet(_HDR_CSS + f"padding:{8 if i else 2}px 6px 2px 6px;")
             added.append(h)
             for kind, obj in items:
                 if kind == "session":
@@ -364,20 +450,19 @@ class ConversationRail(QWidget):
         geo = notch_panel.screen_geo()
         if geo is None:
             return
-        # Size the list to its content, capped so the whole rail fits in 72% of the screen (it scrolls).
+        # A FIXED-height drawer (PANEL_FRAC of the screen), centered vertically like VoiceOS's; the list
+        # scrolls inside it. Fixed, so the search box never jumps and the edge sliver stays put.
         col = self._card.layout()
-        chrome = (10 + 10 + 12 + 12 + 2 * col.spacing()
-                  + self._search.sizeHint().height() + self._new_btn.sizeHint().height())
-        cap = int(geo.height() * 0.72) - chrome
-        self._scroll.setFixedHeight(max(40, min(self._list.sizeHint().height(), cap)))
+        chrome = (2 * FLARE + 12 + 10 + 2 * col.spacing()
+                  + self._search.height() + self._new_btn.sizeHint().height())
+        cap = int(geo.height() * PANEL_FRAC) - chrome
+        self._scroll.setFixedHeight(max(40, cap))
         # The outer layout caches the card's size hint and only refreshes it when the CARD reports a
         # change (not when its inner scroll area does) — without this the rail lagged one resize behind.
         self._card.updateGeometry()
         self.layout().activate()
         self.resize(RAIL_W, self.sizeHint().height())   # explicit: adjustSize() never SHRANK the rail
-        # Anchor the TOP where a full-height rail would start, so the rail grows/shrinks downward and
-        # the search box doesn't jump out from under you as results change.
-        self._y = geo.y() + (geo.height() - (cap + chrome)) // 2
+        self._y = geo.y() + (geo.height() - self.height()) // 2
         self._x_open = geo.x()                          # flush on the screen's left edge
         self._x_closed = geo.x() - (RAIL_W - EDGE)      # tucked left, only EDGE px peeking
         self._x_cue = geo.x() - (RAIL_W - TAB_W)        # hovered: the whole tab shows
@@ -387,6 +472,26 @@ class ConversationRail(QWidget):
         super().resizeEvent(e)
         self._tab.setGeometry(self.width() - TAB_W, 0, TAB_W, self.height())
         self._tab.raise_()
+
+    def paintEvent(self, e):
+        """The drawer, VoiceOS-style: near-black, flush on the screen edge with corners that curve
+        INTO the edge (top-left / bottom-left) and rounded corners on the right."""
+        from PySide6.QtGui import QPainter, QPainterPath, QColor
+        r = self._card.geometry()
+        top, bot, w, f, R = r.top(), r.bottom() + 1, r.right() + 1, FLARE, PANEL_R
+        path = QPainterPath()
+        path.moveTo(0, top - f)
+        path.cubicTo(0, top - f * .45, f * .45, top, f, top)        # inward curve off the screen edge
+        path.lineTo(w - R, top)
+        path.quadTo(w, top, w, top + R)
+        path.lineTo(w, bot - R)
+        path.quadTo(w, bot, w - R, bot)
+        path.lineTo(f, bot)
+        path.cubicTo(f * .45, bot, 0, bot + f * .45, 0, bot + f)
+        path.closeSubpath()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.fillPath(path, QColor(11, 11, 13, 248))
 
     def _slide_to(self, x: int):
         self._anim.stop()
@@ -421,17 +526,44 @@ class ConversationRail(QWidget):
         if inside == self._hovered:
             return
         self._hovered = inside
-        logger.info("[rail] hover in" if inside else f"[rail] hover out (pinned={self._pinned})")
+        logger.info("[rail] hover in" if inside else f"[rail] hover out (locked={self._pinned})")
         self._set_cue(inside)
-        if not inside and self._expanded and not self._pinned:
+        if inside:
+            self._close_timer.stop()
+        elif self._expanded:
+            self._close_timer.start()            # unlocked → tuck away shortly after you leave
+
+    def _close_if_left(self):
+        """Grace period over: tuck the drawer away unless it's locked, you came back, or you're typing
+        in the search box."""
+        # (search TEXT, not focus: Qt hands the search box focus as soon as the drawer shows)
+        if self._expanded and not self._pinned and not self._hovered and not self._search.text():
+            logger.info("[rail] closed (mouse left, unlocked)")
             self._set_expanded(False)
+
+    def _toggle_lock(self):
+        self._pinned = not self._pinned
+        logger.info(f"[rail] lock {'on' if self._pinned else 'off'}")
+        self._sync_lock()
+        if not self._pinned and not self._hovered:
+            self._close_timer.start()
+
+    def _sync_lock(self):
+        from PySide6.QtGui import QIcon
+        self._lock_btn.setIcon(QIcon(_glyph("lock", on=self._pinned)))
+        self._lock_btn.setToolTip("Unlock (tuck away when the mouse leaves)" if self._pinned
+                                  else "Lock open")
 
     def _poll_hover(self):
         """Hover source of truth: is the global cursor over the rail (incl. the 7 px edge strip)? macOS
         doesn't reliably deliver enter/leave to a non-activating panel of an app that isn't active —
         seen live: clicks arrived, hover never did. Same fix as the notch's _poll_hover."""
-        if self.isVisible():
-            self._set_hovered(self.frameGeometry().contains(_cursor_pos()))
+        if not self.isVisible():
+            return
+        inside = self.frameGeometry().contains(_cursor_pos())
+        self._set_hovered(inside)
+        if not inside and self._expanded and not self._pinned and not self._close_timer.isActive():
+            self._close_timer.start()    # open but the mouse isn't on it (e.g. opened from a row/notch)
 
     def enterEvent(self, e):
         self._set_hovered(True)
@@ -440,22 +572,26 @@ class ConversationRail(QWidget):
         self._poll_hover()            # Qt also sends a leave when the cursor crosses onto a child
 
     def mousePressEvent(self, e):
-        # A click on the rail body (not a row — rows consume their own click) TOGGLES it: opens+pins,
-        # or closes if it's already open. Independent of the notch — clicking the rail never opens it.
-        logger.info(f"[rail] click → {'close' if self._pinned else 'open'}")
-        if self._pinned:
+        # A click on the tab / an empty part of the drawer (rows consume their own click) TOGGLES it.
+        # Independent of the notch — clicking the rail never opens it.
+        logger.info(f"[rail] click → {'close' if self._expanded else 'open'}")
+        if self._expanded:
             self.collapse()
         else:
             self.open_full()
         super().mousePressEvent(e)
 
     def open_full(self):
-        """Pin the rail open (its own click action — the notch is not affected)."""
-        self._pinned = True
+        """Open the drawer (its own click action — the notch is not affected). It stays open while the
+        mouse is on it; the lock keeps it open after you leave."""
+        self._close_timer.stop()
         self._set_expanded(True)
 
     def collapse(self):
-        self._pinned = False
+        self._close_timer.stop()
+        if self._pinned:
+            self._pinned = False
+            self._sync_lock()
         self._set_expanded(False)
 
     def _configure(self):

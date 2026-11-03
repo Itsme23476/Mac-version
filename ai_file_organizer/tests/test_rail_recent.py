@@ -165,14 +165,14 @@ def test_search():
     top, full_h = rail.y(), rail.height()
 
     rail._search.setText("plant shop"); pump(100)
-    titles = [r.findChildren(QLabel)[1].text() for r in rail._rows]     # [dot, title, sub]
+    titles = [r.findChildren(QLabel)[1].text() for r in rail._rows]     # [icon, title]
     assert rail._groups[0] == ("RUNNING", 1), "a running chat matching by its prompt stays visible"
     d = datetime.fromtimestamp(now - 60 * 86400)
     month = d.strftime("%B").upper() + ("" if d.year == datetime.fromtimestamp(now).year else f" {d.year}")
     assert (month, 1) in rail._groups, f"a 60-day-old match sits in its month group: {rail._groups}"
     assert len(rail._rows) == 1 + 3 + 1 and all("Plant shop" in t or "Ancient" in t or t == "Deploy"
                                                 for t in titles), titles
-    assert rail.height() < full_h and rail.height() == rail.sizeHint().height(), "rail shrinks to results"
+    assert rail.height() == full_h, "fixed-height drawer (VoiceOS): results scroll inside it, no resizing"
     assert rail.y() == top, "top stays put while typing — the search box doesn't jump"
 
     rail._search.setText("PREVIEW 3"); pump(100)                     # case-insensitive, matches preview
@@ -362,6 +362,46 @@ def test_hover_cues_click_opens():
     print("rail: hover = cue only, click opens, nudge = cue  OK")
 
 
+def test_drawer_leave_lock_and_search():
+    """VoiceOS drawer: opened by a click, it tucks away shortly after the mouse leaves — unless the lock
+    is on, or you're typing in the search box."""
+    from PySide6.QtCore import QPoint
+    from app.ui import conversation_rail as cr
+    rail = ConversationRail()
+    rail.update_sessions([], None, _history(5, time.time()))
+    pump(200)
+    real_pos = cr._cursor_pos
+    try:
+        rail.open_full(); pump(300)
+        g = rail.frameGeometry()                                # the OPEN drawer
+        on, away = QPoint(g.left() + 40, g.center().y()), QPoint(g.right() + 400, g.center().y())
+        cr._cursor_pos = lambda: on
+        pump(100)
+        assert rail._expanded and rail.x() == rail._x_open
+        cr._cursor_pos = lambda: away
+        pump(800)
+        assert not rail._expanded, "unlocked drawer should tuck away after the mouse leaves"
+        cr._cursor_pos = lambda: on
+        rail.open_full(); pump(200)
+        rail._toggle_lock()                                     # lock it open
+        cr._cursor_pos = lambda: away
+        pump(800)
+        assert rail._expanded and rail._pinned, "locked drawer stays open"
+        rail._toggle_lock()                                     # unlock while away → tucks away
+        pump(800)
+        assert not rail._expanded
+        cr._cursor_pos = lambda: on
+        rail.open_full(); pump(200)
+        rail._search.setText("essay")                           # typing a search
+        cr._cursor_pos = lambda: away
+        pump(800)
+        assert rail._expanded, "mid-search the drawer must not vanish"
+    finally:
+        cr._cursor_pos = real_pos
+    rail.hide()
+    print("drawer: tucks away on leave, lock keeps it open, search keeps it open  OK")
+
+
 def test_new_chat_opens_blank_notch():
     """'＋ New chat' must DO something visible: forget the focused chat and open the notch on a blank
     Ready card with the type box focused."""
@@ -408,6 +448,7 @@ if __name__ == "__main__":
     test_continued_chats_survive_restart()
     test_idle_rail_shown_before_any_request()
     test_hover_cues_click_opens()
+    test_drawer_leave_lock_and_search()
     test_new_chat_opens_blank_notch()
     test_quit_mid_task_stops_threads()
     print("test_rail_recent OK")
