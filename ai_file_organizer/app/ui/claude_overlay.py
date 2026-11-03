@@ -311,6 +311,107 @@ class _SendButton(QPushButton):
         p.end()
 
 
+HOVER_BODY_H = 48       # idle hover bar: height below the notch band (the input row + the fade)
+HOVER_SHOULDER = 12     # its top corners curve into the screen edge
+HOVER_DWELL_MS = 220    # rest the cursor on the notch this long before it grows (VoiceOS ~0.3s)
+HOVER_GRACE_MS = 280    # after the cursor leaves, wait this long before tucking back
+
+
+def _orb_pixmap(px: int):
+    """The small lavender orb VoiceOS shows beside the notch (painted, no asset)."""
+    from PySide6.QtGui import QPixmap, QRadialGradient
+    pm = QPixmap(px * 2, px * 2)
+    pm.setDevicePixelRatio(2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    g = QRadialGradient(px * .35, px * .3, px * .85)
+    g.setColorAt(0, QColor(248, 244, 255))
+    g.setColorAt(.55, QColor(214, 200, 255))
+    g.setColorAt(1, QColor(170, 150, 235))
+    p.setPen(Qt.NoPen)
+    p.setBrush(g)
+    p.drawEllipse(QRectF(.5, .5, px - 1, px - 1))
+    p.end()
+    return pm
+
+
+class _HoverBar(QWidget):
+    """Idle hover, VoiceOS-style: the notch grows into a wider black bar — a lavender orb beside the
+    notch and a "Type or hold fn ⌃ to speak" input under it — fading to see-through at the bottom.
+    Enter submits like the card's type field. A press anywhere else is IGNORED so it reaches the
+    overlay, whose own click handling opens the full card — the notch's behaviour is unchanged."""
+    submitted = Signal(str)
+
+    def __init__(self, on_field_click, parent=None):
+        super().__init__(parent)
+        self.field_clicked = False           # clicked into the input → stay a bit longer on leave
+
+        def _click():
+            self.field_clicked = True
+            on_field_click()                  # key the panel so it can take typing
+        self._orb = QLabel(self)
+        self._orb.setFixedSize(14, 14)
+        self._orb.setPixmap(_orb_pixmap(14))
+        self.field = _TypeField(_click, self)
+        self.field.setStyleSheet("QLineEdit{background:transparent;border:none;color:#F2F2F4;"
+                                 "font-size:13px;padding:0;}")
+        self.field.returnPressed.connect(self._submit)
+        chip = "background-color:#2A2A2E; color:#A3A3AB; font-size:10px;"
+        self._hint = QLabel(self)
+        self._hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._hint.setTextFormat(Qt.RichText)
+        self._hint.setText(f"Type or hold <span style='{chip}'>&nbsp;fn&nbsp;</span> "
+                           f"<span style='{chip}'>&nbsp;⌃ control&nbsp;</span> to speak")
+        self._hint.setStyleSheet("background:transparent;color:#8E8E96;font-size:13px;")
+        self.field.textChanged.connect(lambda t: self._hint.setVisible(not t))
+
+    def place(self, notch_band: int) -> None:
+        """Orb in the notch band beside the notch (left); the input row just below the band."""
+        s = HOVER_SHOULDER
+        self._orb.move(s + 14, max(4, (notch_band - 14) // 2))
+        row = (s + 14, notch_band + 6, max(40, self.width() - 2 * s - 28), 26)
+        self.field.setGeometry(*row)
+        self._hint.setGeometry(*row)
+
+    def reset(self) -> None:
+        self.field.clear()
+        self.field.clearFocus()
+        self.field_clicked = False
+
+    def _submit(self) -> None:
+        text = self.field.text().strip()
+        if text:
+            self.field.clear()
+            self.submitted.emit(text)
+
+    def paintEvent(self, _e) -> None:
+        from PySide6.QtGui import QPainterPath, QLinearGradient
+        w, h, s, r = self.width(), self.height(), HOVER_SHOULDER, 18
+        path = QPainterPath()
+        path.moveTo(0, 0)
+        path.lineTo(w, 0)
+        path.cubicTo(w - s * .45, 0, w - s, s * .45, w - s, s)     # top-right: curves into the edge
+        path.lineTo(w - s, h - r)
+        path.quadTo(w - s, h, w - s - r, h)
+        path.lineTo(s + r, h)
+        path.quadTo(s, h, s, h - r)
+        path.lineTo(s, s)
+        path.cubicTo(s, s * .45, s * .45, 0, 0, 0)                 # top-left: curves into the edge
+        path.closeSubpath()
+        g = QLinearGradient(0, 0, 0, h)                            # solid black, fading at the bottom
+        g.setColorAt(0, QColor(0, 0, 0, 255))
+        g.setColorAt(.6, QColor(0, 0, 0, 255))
+        g.setColorAt(1, QColor(0, 0, 0, 95))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.fillPath(path, g)
+        p.end()
+
+    def mousePressEvent(self, e) -> None:
+        e.ignore()                            # → ClaudeOverlay.mousePressEvent (opens the full card)
+
+
 class ClaudeOverlay(QWidget):
     """Ambient Assistant notch. Rests as a handle; hover expands; never auto-drops."""
 
@@ -366,8 +467,19 @@ class ClaudeOverlay(QWidget):
         self._hover_poll = QTimer(self)       # resting hover = cursor poll (see _poll_hover)
         self._hover_poll.setInterval(60)
         self._hover_poll.timeout.connect(self._poll_hover)
+        self._hover_bar_on = False            # idle hover bar showing (see _show_hover_bar)
 
         self._build_ui()
+        self._hover_bar = _HoverBar(self._key_for_typing, self)
+        self._hover_bar.hide()
+        self._hover_bar.submitted.connect(self._on_hover_submit)
+        self._dwell_timer = QTimer(self)      # cursor must rest on the notch briefly before it grows
+        self._dwell_timer.setSingleShot(True)
+        self._dwell_timer.setInterval(HOVER_DWELL_MS)
+        self._dwell_timer.timeout.connect(self._show_hover_bar)
+        self._bar_grace = QTimer(self)        # after the cursor leaves the bar
+        self._bar_grace.setSingleShot(True)
+        self._bar_grace.timeout.connect(self._maybe_hide_hover_bar)
 
     # -- construction ----------------------------------------------------------
     def _build_ui(self) -> None:
@@ -1136,6 +1248,8 @@ class ClaudeOverlay(QWidget):
             self._timer_label.setText(f"{s // 60}:{s % 60:02d}" if s is not None else "")
 
     def set_state(self, state: str) -> None:
+        if state != "idle" and self._hover_bar_on:
+            self._hide_hover_bar()            # a task started (e.g. by voice) while hovering
         self._state = state
         self._handle.set_state(state)
         self._update_primary()
@@ -1261,8 +1375,68 @@ class ClaudeOverlay(QWidget):
         inside = self.frameGeometry().contains(QCursor.pos())
         if inside != self._hover_in:
             self._hover_in = inside
-            self._handle.reveal(inside)
             logger.info("[notch] hover %s", "in" if inside else "out")
+            if self._state != "idle":
+                self._handle.reveal(inside)       # a task is live: the status pill, as before
+            elif inside:
+                self._bar_grace.stop()
+                if not self._hover_bar_on:
+                    self._dwell_timer.start()     # idle: grow into the VoiceOS-style bar
+            else:
+                self._dwell_timer.stop()
+                if self._hover_bar_on:            # clicked into the input → give it longer
+                    self._bar_grace.start(4000 if self._hover_bar.field_clicked else HOVER_GRACE_MS)
+
+    # -- idle hover bar (VoiceOS-style) ------------------------------------------
+    def _hover_w(self) -> int:
+        nw = notch_panel.notch_width() or STRIP_W
+        return max(300, min(400, int(nw * 1.9)))
+
+    def _show_hover_bar(self) -> None:
+        if (self._state != "idle" or not self._minimized or not self.isVisible()
+                or not self._hover_in or self._hover_bar_on):
+            return
+        self._hover_bar_on = True
+        nb = notch_panel.notch_inset_top()
+        w, h = self._hover_w(), nb + HOVER_BODY_H
+        self._handle.setVisible(False)
+        self.setFixedWidth(w)
+        self.setMinimumHeight(0)
+        self.resize(w, h)
+        self._hover_bar.setGeometry(0, 0, w, h)
+        self._hover_bar.place(nb)
+        self._hover_bar.show()
+        self._hover_bar.raise_()
+        self._reanchor()
+        self._reassert()
+        logger.info("[notch] hover bar shown")
+
+    def _maybe_hide_hover_bar(self) -> None:
+        if self._hover_in or self._hover_bar.field.text():
+            return                                # back on it, or mid-typing: keep it
+        self._hide_hover_bar()
+
+    def _hide_hover_bar(self, resize: bool = True) -> None:
+        self._dwell_timer.stop()
+        self._bar_grace.stop()
+        if not self._hover_bar_on:
+            return
+        self._hover_bar_on = False
+        self._hover_bar.hide()
+        self._hover_bar.reset()
+        self._handle.setVisible(self._minimized)
+        if resize and self._minimized:            # back to the resting notch-sized strip
+            sw = self._strip_w()
+            self.setFixedWidth(sw)
+            self.setMinimumHeight(0)
+            self.resize(sw, self._min_h())
+            self._reanchor()
+            self._reassert()
+        logger.info("[notch] hover bar hidden")
+
+    def _on_hover_submit(self, text: str) -> None:
+        self._hide_hover_bar()
+        self.submit_text.emit(text)               # same as the card's type field → run_voice_task
 
     def mousePressEvent(self, e) -> None:
         # Resting hotspot click → open (and pin). Click on the OPEN card's body → close it again
@@ -1345,6 +1519,8 @@ class ClaudeOverlay(QWidget):
         """Show just the handle (minimized) or the full card (expanded). When minimized we also
         collapse the margins so the resting window is ~20px tall — a tiny transparent strip that
         hugs the notch, instead of a tall invisible box that would eat clicks at top-centre."""
+        if getattr(self, "_hover_bar_on", False):
+            self._hide_hover_bar(resize=False)    # the caller sizes the window for the new state
         self._topbar.setVisible(not minimized)
         self._stack.setVisible(not minimized)
         self._ctrl_row.setVisible(not minimized)
@@ -1443,7 +1619,10 @@ class ClaudeOverlay(QWidget):
         geo = notch_panel.screen_geo()
         if geo is None:
             return
-        w = self._strip_w() if self._minimized else WIDGET_W
+        if self._hover_bar_on:
+            w = self._hover_w()
+        else:
+            w = self._strip_w() if self._minimized else WIDGET_W
         x = geo.x() + (geo.width() - w) // 2
         self.move(x, self._rest_y(geo))
 
@@ -1493,6 +1672,9 @@ class ClaudeOverlay(QWidget):
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key_Escape:
+            if self._hover_bar_on:                # Esc in the hover bar just tucks it away
+                self._hide_hover_bar()
+                return
             self._on_dismiss()
             return
         super().keyPressEvent(event)

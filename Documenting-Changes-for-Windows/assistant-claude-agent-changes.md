@@ -348,3 +348,16 @@ These follow Damianos' calls after comparing against VoiceOS. The behavior is pl
   hidden Assistant-tab state, so nothing visible happened.
 - Tests: `tests/test_rail_recent.py`: `test_hover_cues_click_opens`, `test_drawer_leave_lock_and_search`,
   `test_new_chat_opens_blank_notch`, `test_idle_rail_shown_before_any_request`.
+
+### 7e. Notch idle hover = VoiceOS-style bar (Mac, 2026-11-04). Mac notch only; Windows uses its own top widget
+- This is the idle state only, with no task running. Rest the cursor on the notch for 220ms and it grows
+  into a black bar 1.9× the notch's width. The bar has shoulders curving into the top edge, rounded
+  bottom corners, and fades to alpha 95 at the bottom. It holds a lavender orb beside the notch and a
+  "Type or hold fn ⌃ control to speak" input under it.
+- `_HoverBar` is a separate child widget layered over the resting strip. The card and its layout are
+  untouched. Enter → `submit_text` (same path as the card's type field). A press elsewhere is ignored so
+  it reaches the overlay's `mousePressEvent`, which opens the full card as before. Leaving tucks it back
+  after 280ms, or 4s if you clicked into the input; it stays while text is typed. Esc tucks it away.
+  `set_state(non-idle)` and `_apply_minimized_chrome` close it.
+- A live task (working/needs_you/done/error) keeps the old status-pill hover.
+- If the Windows app has a top-center widget, the same widget + rules port as-is. Test: `tests/test_notch_hover.py`.
