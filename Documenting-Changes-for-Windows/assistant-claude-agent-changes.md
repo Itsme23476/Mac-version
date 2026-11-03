@@ -322,3 +322,29 @@ yourself; the Mac side can't see it.
 - Windows: the transcript store is the same format (`%USERPROFILE%\.claude\projects`), so this
   ports as-is. Only the app data dir differs.
 - Test: `tests/test_rail_recent.py::test_continued_chats_survive_restart`.
+
+### 7d. Left rail: VoiceOS-style drawer + hover cue + New chat (Mac, 2026-11-04) — **design applies to BOTH**
+These follow Damianos' calls after comparing against VoiceOS. The behavior is platform-neutral Qt.
+- **At rest:** a slim dark see-through sliver on the left edge (4px wide, ~58% of the drawer height,
+  black alpha 115, white hairline alpha 28). **Hover:** it slides out a little (7 → 16px) and the sliver
+  grows (8px, 66%, alpha 150). **Hover never opens it; only a click does.** A chat that starts running
+  shows the same cue for 2.6s. It never opens by itself.
+- **Hover detection = cursor POLL** (`QCursor.pos()` vs `frameGeometry()` every 60ms), not enter/leave.
+  macOS never delivered enter/leave to the inactive app's panel. On Windows, enter/leave may work,
+  but the poll is harmless and consistent.
+- **Drawer:**
+  - Size and position: ~224px wide, fixed height 50% of the screen, vertically centered.
+  - Colour and shape: near-black (#0B0B0D, alpha 248), painted with a QPainterPath. Corners curve INTO
+    the screen edge (top-left/bottom-left, radius 18), right corners rounded 20.
+  - Contents: a pill search with a magnifier, a round **lock** button, and a "New chat" row. Group
+    headers are sentence case and grey. Rows are one line: an 18px round icon (Claude logo if
+    bundled, else lavender) plus the title. Status is a small badge on the icon; detail is in the
+    tooltip.
+- **Close rules:** click an empty part to close. Unlocked, it tucks away 0.45s after the mouse leaves,
+  but not while the search box has TEXT. Don't use focus for this: Qt focuses the search as soon as the
+  drawer shows. The lock keeps it open.
+- **"＋ New chat":** `_on_rail_new_chat` calls `_clear_resume()`, then `ClaudeOverlay.show_new_chat()`,
+  which opens the notch on the blank Ready card with the type box focused. Before this it only reset
+  hidden Assistant-tab state, so nothing visible happened.
+- Tests: `tests/test_rail_recent.py`: `test_hover_cues_click_opens`, `test_drawer_leave_lock_and_search`,
+  `test_new_chat_opens_blank_notch`, `test_idle_rail_shown_before_any_request`.
