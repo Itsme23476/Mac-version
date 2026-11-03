@@ -14,6 +14,7 @@ import app.core.agent_runner as ar
 from app.ui import assistant_page as ap
 ap._play_chime = lambda ok=True: None
 ap._notify = lambda *a, **k: None
+ap.AssistantPage._show_idle_overlays = lambda self: None   # don't spawn notch/rail during the test
 
 
 class _FakeRunner:
@@ -21,7 +22,7 @@ class _FakeRunner:
     def __init__(self, cwd, on_step, on_approval, on_result):
         self.on_step, self.on_result = on_step, on_result
 
-    async def run(self, prompt, resume=None, max_turns=40, bypass=False, model=None, effort=None):
+    async def run(self, prompt, resume=None, max_turns=40, bypass=False, model=None, effort=None, images=None):
         self.on_step(ar.Step("text", text="hello from the worker"))
         self.on_result("sidFAKE", 0.01)
         return "sidFAKE"

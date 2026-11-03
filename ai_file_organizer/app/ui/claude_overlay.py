@@ -24,6 +24,7 @@ Headless self-check:
       QT_QPA_PLATFORM=offscreen venv311/bin/python \
       ai_file_organizer/app/ui/claude_overlay.py
 """
+import html
 import logging
 import math
 import sys
@@ -31,18 +32,18 @@ import sys
 logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import (
-    Qt, QTimer, QPointF, QRectF, QSize, QPropertyAnimation, QEasingCurve, Signal,
+    Qt, QTimer, QPointF, QRectF, QSize, QPropertyAnimation, QEasingCurve, Signal, QUrl,
 )
-from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QCursor
+from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextEdit, QSlider, QLineEdit,
+    QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextBrowser, QSlider, QLineEdit,
 )
-
 try:
-    from . import notch_panel
+    from . import notch_panel, details_view
 except ImportError:                      # running this file directly (self-check)
     import notch_panel
+    import details_view
 
 # --- palette (VoiceOS-style: soft near-black card, muted greys, Claude-orange accent) ----
 C = {
@@ -67,7 +68,7 @@ STRIP_W = 150               # width of the resting handle
 TOPBAR_H = 24
 FOOTER_H = 22               # keycap shortcut hint row
 TYPEFIELD_H = 40            # the "type a task" input row at the bottom
-MIN_H = 16                  # pill strip height BELOW the notch band (window = notch band + this)
+PEEK_H = 34                 # strip below the notch band: invisible at rest, shows the hover tab (click target)
 WIN_TITLE = "Filect Assistant"   # unique — notch_panel finds the NSWindow by this
 
 # State -> handle colour. working/needs_you also breathe (animated alpha).
@@ -79,7 +80,7 @@ _STATE_COLOR = {
     "error":     QColor(RED),
 }
 # Deterministic content heights per state (no runtime layout measuring — that raced in organize).
-_STACK_H = {"working": 22, "needs_you": 116, "done": 118, "error": 56}
+_STACK_H = {"working": 22, "needs_you": 116, "done": 118, "error": 56, "idle": 34}
 DETAILS_H = 166      # height of the live "Details" feed when expanded
 TRANSCRIPT_H = 56    # the "what you said" bubble at the top of the card
 CTRL_H = 32          # persistent control row (model pill · Details · primary action)
@@ -123,7 +124,10 @@ class _Handle(QWidget):
         self._state = "idle"
         self._hovered = False
         self._phase = 0.0
-        self.setFixedHeight(MIN_H)
+        # Always tall enough to draw the hover tab below the notch — the window never resizes on hover
+        # (resizing a non-activating panel mid-hover drops its style and the tab never renders). The
+        # strip is invisible at rest; the tab is painted only while hovered.
+        self.setFixedHeight(PEEK_H)
         self.setCursor(Qt.PointingHandCursor)
         self._timer = QTimer(self)
         self._timer.setInterval(40)
@@ -136,8 +140,8 @@ class _Handle(QWidget):
 
     def set_state(self, state: str) -> None:
         self._state = state
-        # Breathe while a task is live (working) or blocked on you (needs_you) — both show at rest
-        # so you always know something's running, even before the first step or an approval.
+        # Breathe only while a task is live (working) or blocked on you (needs_you). At idle the notch
+        # is fully hidden (nothing drawn, no timer) until you hover it.
         if state in ("working", "needs_you"):
             if not self._timer.isActive():
                 self._timer.start()
@@ -150,19 +154,14 @@ class _Handle(QWidget):
             self._hovered = hovered
             self.update()
 
-    def enterEvent(self, e) -> None:
-        self.set_hovered(True)
-        self._reveal_target = 1.0
+    def reveal(self, on: bool) -> None:
+        """Grow the hover tab in (on) / fade it out (off). Driven by the overlay's cursor poll — not by
+        this widget's own enter/leave: the handle sits BELOW the notch band, so hovering the notch
+        itself never entered it, and the tab never showed."""
+        self.set_hovered(on)
+        self._reveal_target = 1.0 if on else 0.0
         if not self._reveal_timer.isActive():
             self._reveal_timer.start()
-        super().enterEvent(e)
-
-    def leaveEvent(self, e) -> None:
-        self.set_hovered(False)
-        self._reveal_target = 0.0
-        if not self._reveal_timer.isActive():
-            self._reveal_timer.start()
-        super().leaveEvent(e)
 
     def _reveal_step(self) -> None:
         d = self._reveal_target - self._reveal
@@ -193,18 +192,41 @@ class _Handle(QWidget):
 
     def paintEvent(self, _e) -> None:
         base = self._shows_at_rest()
+        # At rest the notch is COMPLETELY hidden — nothing is drawn until you hover it (reveal > 0),
+        # or a task is live/blocked/finished (base). No idle hint, no resting pill.
         if not base and self._reveal < 0.02:
-            return                                   # truly idle: invisible, nothing to see
-        r = max(self._reveal, 0.45) if base else self._reveal   # states keep a visible baseline
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        pill_w = 30.0 + 34.0 * r                     # "relax": grows a bit on hover
-        pill_h = 5.0
+        if not base:
+            # IDLE hover → a clearly VISIBLE pull-tab that grows in, so you can see there's something
+            # to click. Nothing at rest; on hover a solid rounded bar + a downward chevron appear just
+            # below the notch, in the strip that actually receives the click.
+            r = self._reveal
+            tab_w = 56.0 + 86.0 * r
+            tab_h = 6.0 + 10.0 * r
+            x = (self.width() - tab_w) / 2.0
+            y = 4.0
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(236, 236, 240, int(70 + 185 * r)))
+            p.drawRoundedRect(QRectF(x, y, tab_w, tab_h), tab_h / 2.0, tab_h / 2.0)
+            if r > 0.45:                             # chevron: "click to open"
+                cx = self.width() / 2.0
+                cy = y + tab_h + 7.0
+                pen = QPen(QColor(236, 236, 240, int(210 * r)))
+                pen.setWidthF(2.0); pen.setCapStyle(Qt.RoundCap)
+                p.setPen(pen)
+                p.drawLine(QPointF(cx - 5, cy - 3), QPointF(cx, cy + 2))
+                p.drawLine(QPointF(cx, cy + 2), QPointF(cx + 5, cy - 3))
+            p.end()
+            return
+        # Live states (working / needs_you / done / error): the small status pill, as before.
+        r = max(self._reveal, 0.45)
+        pill_w = 46.0 + 54.0 * r
+        pill_h = 4.0 + 3.0 * r
         x = (self.width() - pill_w) / 2.0
-        y = 2.0                                      # hug the notch's bottom edge
+        y = 2.0
         col = self._color()
-        if not base:                                 # fade the hover pill in with the reveal
-            col = QColor(col.red(), col.green(), col.blue(), int(col.alpha() * min(1.0, 0.4 + r)))
         p.setPen(Qt.NoPen)
         p.setBrush(col)
         p.drawRoundedRect(QRectF(x, y, pill_w, pill_h), pill_h / 2.0, pill_h / 2.0)
@@ -319,6 +341,9 @@ class ClaudeOverlay(QWidget):
         self._result_text = ""        # what Claude generated — shown on the done page
         self._details_open = False    # is the live "Details" feed expanded?
         self._detail_last = ""        # last line appended to the feed (dedup)
+        self._entries = []            # rich Details: the conversation's entries (see details_view)
+        self._rich = False            # True once entries drive Details (plain status lines stop)
+        self._expanded = set()        # entry ids whose "Show full" is open
         self._model = "opus"          # a real model is always chosen: opus/sonnet/haiku
         self._effort = "high"         # a real effort is always chosen: low/medium/high/xhigh/max
         self._model_open = False      # is the inline "Model & effort" panel expanded?
@@ -337,6 +362,10 @@ class ClaudeOverlay(QWidget):
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._tick_elapsed)
         self._task_started = None
+        self._hover_in = False                # is the cursor over the resting notch strip?
+        self._hover_poll = QTimer(self)       # resting hover = cursor poll (see _poll_hover)
+        self._hover_poll.setInterval(60)
+        self._hover_poll.timeout.connect(self._poll_hover)
 
         self._build_ui()
 
@@ -433,18 +462,30 @@ class ClaudeOverlay(QWidget):
         self._page_needs = self._make_needs_page()         # 1
         self._page_done = self._make_message_page("done")  # 2
         self._page_error = self._make_message_page("error")  # 3
-        for pg in (self._page_working, self._page_needs, self._page_done, self._page_error):
+        self._page_idle = self._make_idle_page()            # 4
+        for pg in (self._page_working, self._page_needs, self._page_done, self._page_error, self._page_idle):
             self._stack.addWidget(pg)
         col.addWidget(self._stack)
 
-        # Collapsible live feed — card-level so Details works in any state.
-        self._details_feed = QTextEdit()
+        # Collapsible live feed — card-level so Details works in any state. A QTextBrowser so the rich
+        # feed's links work: Open a file / page, Show full on a preview (handled in _on_details_link).
+        self._details_feed = QTextBrowser()
         self._details_feed.setReadOnly(True)
+        self._details_feed.setOpenLinks(False)
+        self._details_feed.anchorClicked.connect(self._on_details_link)
+        self._details_feed.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # content wraps instead
+        # The markdown fragments rely on Qt's own "p, li { white-space: pre-wrap }" (kept spaces in code).
+        self._details_feed.document().setDefaultStyleSheet("p, li { white-space: pre-wrap; }")
         self._details_feed.setFixedHeight(DETAILS_H - 6)
         self._details_feed.setVisible(False)
         self._details_feed.setStyleSheet(
             f"QTextEdit {{ background: {C['surface']}; border: 1px solid {C['border']}; border-radius: 10px; "
-            f"color: {C['text_2']}; font-size: 11.5px; padding: 8px; }}")
+            f"color: {C['text_2']}; font-size: 11.5px; padding: 8px; }}"
+            # Dark scrollbar: unstyled, its track fell back to the app's LIGHT palette (a white strip).
+            "QScrollBar:vertical { background: transparent; width: 6px; margin: 2px; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,0.18); border-radius: 3px; min-height: 24px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
         col.addWidget(self._details_feed)
 
         # Persistent control row: [model·effort pill]   [Details]  [primary action]
@@ -637,6 +678,18 @@ class ClaudeOverlay(QWidget):
             f"color: {C['text_muted']}; font-size: 12px; border-radius: 11px; }}"
             f"QPushButton:hover {{ background: {C['surface']}; color: {C['text']}; }}")
 
+    def _make_idle_page(self) -> QWidget:
+        """Shown when the notch is opened at idle (no task): a prompt to type or speak."""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 2, 0, 0)
+        lbl = QLabel("Ready — type a task below, or hold fn ⌃ to speak.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color:{C['text_muted']}; font-size:12px; background:transparent; border:none;")
+        lay.addWidget(lbl)
+        lay.addStretch(1)
+        return w
+
     def _make_working_page(self) -> QWidget:
         pg = QWidget()
         pg.setStyleSheet("background: transparent;")
@@ -719,6 +772,9 @@ class ClaudeOverlay(QWidget):
         lay.addLayout(row)
         if kind == "done":
             self._done_label = label          # "Open in Claude" is the persistent primary button now
+            label.setTextFormat(Qt.RichText)  # carries the deliverable's Open link
+            label.setOpenExternalLinks(False)
+            label.linkActivated.connect(self._on_details_link)
         else:
             self._error_label = label
         lay.addStretch(1)
@@ -726,11 +782,12 @@ class ClaudeOverlay(QWidget):
 
     # -- public API (called from the UI thread via AssistantPage slots) --------
     def present(self) -> None:
-        """Start a task: drop the panel under the notch. It then expands (via flash) and STAYS up
-        for the whole task — pinned, so it doesn't tuck to a pill or collapse when the mouse leaves
-        (you asked for it constantly up). You tuck it via the ⇣ button or dismiss with ✕."""
+        """Start a task: rest the panel tucked into the physical notch (a slim status nub), peek it
+        open briefly via flash, then tuck back. HOVER the notch to slide it open (VoiceOS-style, like
+        the left rail); click the ⇣ pin to keep it open while you watch a task. Dismiss with ✕."""
         self._done_timer.stop()
-        self._pinned = True          # stay open through routing → working → approval → done
+        # Default = NOT pinned → tucked at rest, revealed on hover. (Keeps whatever the user pinned;
+        # present never force-pins anymore — that was the old 'constantly up' behaviour.)
         self._sync_pin_btn()
         self.set_state("working")
         self._set_status("Working", C["text_muted"])
@@ -744,20 +801,54 @@ class ClaudeOverlay(QWidget):
             return
         self._minimized = True
         self._apply_minimized_chrome(True)
-        self.setFixedWidth(STRIP_W)          # rest as the narrow strip, not full card width
+        sw = self._strip_w()                 # rest as a strip spanning the whole notch, not full card
+        self.setFixedWidth(sw)
         geo = notch_panel.screen_geo()
         if geo is None:
             if not self.isVisible():
                 self.show()
             self._configure_macos_deferred()
             return
-        self.resize(STRIP_W, self._min_h())
-        x = geo.x() + (geo.width() - STRIP_W) // 2
+        self.resize(sw, self._min_h())
+        x = geo.x() + (geo.width() - sw) // 2
         self.move(x, geo.y() - self._min_h())    # start just above the top edge, then slide down
         if not self.isVisible():
             self.show()
         self._configure_macos_deferred()
         self._slide_to(x, self._rest_y(geo))
+
+    def rest_idle(self) -> None:
+        """Keep the notch present at idle (no task) as a hoverable nub, so you can hover/click to open
+        it and type or speak a task without having run anything first. Shows only a faint hint at the
+        notch until you hover. No-op while a task is live or blocked."""
+        if self._state in ("working", "needs_you"):
+            return
+        self._done_timer.stop()
+        self.set_state("idle")
+        self._set_status("", C["text_muted"])
+        self._transcript.setVisible(False)
+        self._reset_details()
+        self._stack.setCurrentWidget(self._page_idle)
+        self._pinned = False
+        self._sync_pin_btn()
+        if self.isVisible() and not self._minimized:
+            return                               # already open (you're hovering) — leave it be
+        self._minimized = True
+        self._apply_minimized_chrome(True)
+        sw = self._strip_w()
+        self.setFixedWidth(sw)
+        geo = notch_panel.screen_geo()
+        if geo is None:
+            if not self.isVisible():
+                self.show()
+            self._configure_macos_deferred()
+            return
+        self.resize(sw, self._min_h())
+        x = geo.x() + (geo.width() - sw) // 2
+        self.move(x, self._rest_y(geo))
+        if not self.isVisible():
+            self.show()
+        self._configure_macos_deferred()
 
     def set_title(self, title: str) -> None:
         """Sets the transcript bubble ("what you said"). That IS the task display — there is no
@@ -790,6 +881,8 @@ class ClaudeOverlay(QWidget):
 
     # -- live "Details" feed (collapsible) -------------------------------------
     def _append_detail(self, line: str) -> None:
+        if self._rich:                             # entries drive Details — status lines stay in the chip
+            return
         line = (line or "").strip()
         if not line or line == self._detail_last:
             return
@@ -801,9 +894,34 @@ class ClaudeOverlay(QWidget):
     def _reset_details(self) -> None:
         self._details_open = False
         self._detail_last = ""
+        self._entries, self._rich, self._expanded = [], False, set()
         self._details_feed.clear()
         self._details_feed.setVisible(False)
         self._details_btn.setText("Details  ⌄")
+
+    def set_details(self, entries) -> None:
+        """Show the conversation's structured entries as the rich Details feed (see details_view):
+        replies formatted, and every action with its substance — previews, Show full, Open, diffs,
+        command output, failures."""
+        self._entries, self._rich = entries, True
+        self._render_details(follow=True)
+
+    def _render_details(self, follow: bool) -> None:
+        sb = self._details_feed.verticalScrollBar()
+        at_bottom, pos = sb.value() >= sb.maximum() - 4, sb.value()
+        self._details_feed.setHtml(details_view.render_html(self._entries, self._expanded))
+        # Live updates follow the newest activity only if you were already at the bottom; a Show-full
+        # toggle keeps your place.
+        sb.setValue(sb.maximum() if (follow and at_bottom) else pos)
+
+    def _on_details_link(self, url) -> None:
+        """A link in Details or on the done card: Show full/less on a preview, or open a file/page."""
+        url = QUrl(url) if isinstance(url, str) else url
+        if url.scheme() == "full":
+            self._expanded ^= {url.path()}
+            self._render_details(follow=False)
+        elif url.isLocalFile() or url.scheme() in ("http", "https"):
+            QDesktopServices.openUrl(url)
 
     def _toggle_details(self) -> None:
         self._details_open = not self._details_open
@@ -933,11 +1051,17 @@ class ClaudeOverlay(QWidget):
             meta += f"  ·  saved {sid}…"
         # No $ figure: on the Claude subscription you're not charged per task — a dollar amount would
         # falsely imply a bill. (The token value is still in the [asst] trace if we need it.)
-        # Lead with what Claude GENERATED (the result), not just "Finished" — that's what you want
-        # to glance at. Full output is behind "View task →". Fall back to the prompt if no text.
-        shown = self._result_text.strip() or self._task_text.strip()
-        body = (shown[:240] + ("…\n\n" if len(shown) > 240 else "\n\n")) if shown else ""
-        self._done_label.setText(body + meta)
+        # Lead with what Claude GENERATED: its closing summary (first paragraph, cut at a word — not a
+        # hard 240-char chop), then the file the turn produced, one click from opening. Full output is
+        # in Details. Falls back to the prompt if there's no text.
+        reply = details_view.final_reply(self._entries) if self._rich else ""
+        shown = details_view.summary(reply or self._result_text or self._task_text)
+        parts = [html.escape(shown)] if shown else []
+        made = details_view.deliverable_html(self._entries) if self._rich else ""
+        if made:
+            parts.append(made)
+        parts.append(html.escape(meta))
+        self._done_label.setText("<br><br>".join(parts))
         self._stack.setCurrentWidget(self._page_done)
         # Stay up showing the result (pinned since the task started) — dismiss with ✕, or tuck it to
         # a reopenable green pill with the ⇣ button. (If already tucked, it rests as the green pill.)
@@ -957,7 +1081,8 @@ class ClaudeOverlay(QWidget):
 
     def load_state(self, title: str, feed_lines=None, status: str = "working", action: str = "",
                    approval_req=None, result: str = "", cost: float = 0.0,
-                   session_id: str = "", task: str = "") -> None:
+                   session_id: str = "", task: str = "", started_at: float = 0.0,
+                   duration=None, entries=None) -> None:
         """Repaint the notch to show a DIFFERENT conversation's stored state — the left rail swapping
         focus between concurrent agents. Rebuilds the bubble + Details feed from the snapshot, then
         sets the status page. ponytail: reuses the existing show_* methods, no parallel render path.
@@ -966,8 +1091,11 @@ class ClaudeOverlay(QWidget):
         title = (title or "").strip()
         self._transcript.setText(title[:300])
         self._transcript.setVisible(bool(title) and not self._minimized)
-        for ln in (feed_lines or []):
-            self._append_detail(ln)
+        if entries:
+            self.set_details(entries)              # rich Details (turns + actions with substance)
+        else:
+            for ln in (feed_lines or []):
+                self._append_detail(ln)
         if status == "needs_you":
             tool = getattr(approval_req, "tool", "") if approval_req else ""
             tin = getattr(approval_req, "tool_input", None) if approval_req else None
@@ -980,6 +1108,17 @@ class ClaudeOverlay(QWidget):
             self.show_error(result or "Something went wrong.")
         else:
             self.show_working(action or "Working…", "")
+        # The header timer: present() restarted it at 0:00, which made every re-focused finished chat
+        # read "Done · 0:00". Live → count from when this turn started; finished → its real duration,
+        # or nothing if unknown.
+        import time
+        if status in ("working", "needs_you") and started_at:
+            self._task_started = time.monotonic() - max(0.0, time.time() - started_at)
+            self._tick_elapsed()
+        else:
+            self._stop_elapsed()
+            s = int(duration) if duration else None
+            self._timer_label.setText(f"{s // 60}:{s % 60:02d}" if s is not None else "")
 
     def set_state(self, state: str) -> None:
         self._state = state
@@ -1081,30 +1220,47 @@ class ClaudeOverlay(QWidget):
 
     # -- hover / expand / collapse --------------------------------------------
     def enterEvent(self, e) -> None:
-        # Hover only REVEALS the faint pill (so you can see where to click) — it does NOT open.
+        # Resting: hovering the notch reveals a visible tab below it (a click target). The cursor poll is
+        # the source of truth; enter/leave only trigger an immediate check so it's instant when macOS
+        # does deliver them. A CLICK opens the full card.
         self._collapse_timer.stop()
         if self._minimized:
-            self._handle.set_hovered(True)
+            self._poll_hover()
         super().enterEvent(e)
 
     def leaveEvent(self, e) -> None:
         if self._minimized:
-            self._handle.set_hovered(False)
+            self._poll_hover()                    # still "inside" if the cursor just crossed onto a child
         elif not self._pinned:
             self._collapse_timer.start(400)       # expanded: collapse shortly after you leave
         super().leaveEvent(e)
 
+    def _poll_hover(self) -> None:
+        """Resting-hover source of truth: is the global cursor anywhere over the notch strip, including
+        the notch band itself? Enter/leave alone can't do this — macOS doesn't reliably deliver them to
+        a non-activating accessory panel, and Qt sends the parent a leave when the cursor crosses onto
+        a child. QCursor.pos() works whether or not Filect is the active app.
+        ponytail: 60ms poll while resting; swap for an NSEvent mouse-moved monitor if CPU ever matters."""
+        if not self._minimized or not self.isVisible():
+            return
+        inside = self.frameGeometry().contains(QCursor.pos())
+        if inside != self._hover_in:
+            self._hover_in = inside
+            self._handle.reveal(inside)
+            logger.info("[notch] hover %s", "in" if inside else "out")
+
     def mousePressEvent(self, e) -> None:
-        # A click anywhere on the resting hotspot opens the panel (and pins it).
+        # Resting hotspot click → open (and pin). Click on the OPEN card's body → close it again
+        # (toggle), so a second click on the notch tucks it away. An approval (needs_you) is kept so
+        # you don't dismiss it by accident — use Approve/Deny or ✕. Clicks on the input/buttons are
+        # consumed by them first, so this only fires on the card body / top bar.
         if self._minimized:
             self._on_handle_clicked()
             e.accept()
             return
-        # Finished/errored: a click on the card body TUCKS it back into the notch (a small indicator
-        # stays there — click the notch to reopen and see the result). ✕ still fully dismisses. Clicks
-        # on the buttons (Open in Claude Code, ✕, ⇣) are consumed by them first, so this only fires
-        # on the card body.
-        if self._state in ("done", "error"):
+        if self._state != "needs_you":
+            self._pinned = False
+            self._sync_pin_btn()
             self.minimize_panel()
             e.accept()
             return
@@ -1112,6 +1268,10 @@ class ClaudeOverlay(QWidget):
 
     def _maybe_collapse(self) -> None:
         if self._pinned or self._minimized:
+            return
+        # Don't tuck away mid-interaction: while you're typing a task, or while an approval is pending.
+        if self._type_field.hasFocus() or self._state == "needs_you":
+            self._collapse_timer.start(500)
             return
         try:
             if self.frameGeometry().contains(QCursor.pos()):
@@ -1123,7 +1283,12 @@ class ClaudeOverlay(QWidget):
         self.minimize_panel()
 
     def _on_handle_clicked(self) -> None:
-        # Tapping the handle expands AND pins, so it stays put while you read/decide.
+        # Clicking the hidden notch hotspot opens the notch ONLY (and pins it so it stays while you
+        # read/decide). The left rail is independent — it opens on its own click.
+        self.open_full()
+
+    def open_full(self) -> None:
+        """Expand the card and pin it (the notch's own click action)."""
         self._pinned = True
         self._sync_pin_btn()
         if self._minimized:
@@ -1154,9 +1319,10 @@ class ClaudeOverlay(QWidget):
             return
         self._minimized = True
         self._apply_minimized_chrome(True)
-        self.setFixedWidth(STRIP_W)
+        sw = self._strip_w()
+        self.setFixedWidth(sw)
         self.setMinimumHeight(0)
-        self.resize(STRIP_W, self._min_h())
+        self.resize(sw, self._min_h())
         self._reanchor()
         self._reassert()
 
@@ -1182,14 +1348,20 @@ class ClaudeOverlay(QWidget):
         eff = self._card.graphicsEffect()
         nb = notch_panel.notch_inset_top()      # the notch/menu-bar band the card top sits behind
         if minimized:
-            # A small black nub that MERGES with the notch (black top band behind it) with the
-            # resting indicator hanging just below the notch's bottom edge.
-            self.layout().setContentsMargins(SHADOW_MARGIN, 0, SHADOW_MARGIN, 2)
+            # Full-width, invisible hit strip spanning the WHOLE notch (0 side margins) so the entire
+            # notch is hoverable/clickable — not a narrow sliver. The col top margin = the notch band,
+            # so the hover peek hangs just below the notch's bottom edge.
+            self.layout().setContentsMargins(0, 0, 0, 2)
             col.setContentsMargins(16, nb, 16, 1)
             self._card.setStyleSheet(self._nub_style())
             if eff is not None:
                 eff.setEnabled(False)
+            self._hover_in = False                # resting: watch the cursor for the hover tab
+            self._handle.reveal(False)
+            self._hover_poll.start()
         else:
+            self._hover_poll.stop()               # open card: normal enter/leave handles collapse
+            self._hover_in = False
             self.layout().setContentsMargins(SHADOW_MARGIN, 0, SHADOW_MARGIN, SHADOW_MARGIN)
             col.setContentsMargins(16, nb + 8, 16, 12)    # content starts BELOW the notch band
             self._card.setStyleSheet(self._card_style)
@@ -1197,11 +1369,12 @@ class ClaudeOverlay(QWidget):
                 eff.setEnabled(True)
 
     def _nub_style(self) -> str:
-        # The resting nub: same near-black as the card (merges with the notch), rounded only at the
-        # bottom so it looks like a small tongue hanging from the notch.
-        return (f"QFrame#claudeCard {{ background-color: {CARD_BG}; border: none; "
-                "border-top-left-radius: 0px; border-top-right-radius: 0px; "
-                "border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }")
+        # At rest the nub is visually NOTHING, but it must stay a CLICK TARGET. A non-activating
+        # translucent panel only receives mouse events where it has painted pixels — a fully
+        # transparent nub is click-through, which is why the idle notch couldn't be opened until a
+        # task had painted it once. An alpha≈2/255 fill is imperceptible yet gives the whole
+        # notch-wide strip a hit region, so hover and click work at idle too.
+        return "QFrame#claudeCard { background-color: rgba(0,0,0,0.008); border: none; }"
 
     # -- sizing / anchoring ----------------------------------------------------
     def _content_height(self) -> int:
@@ -1235,8 +1408,15 @@ class ClaudeOverlay(QWidget):
         return geo.y() + TOP_MARGIN
 
     def _min_h(self) -> int:
-        # Minimized window height: the notch band + a small strip for the resting indicator.
-        return notch_panel.notch_inset_top() + MIN_H
+        # Minimized window height: the notch band + the (invisible) hover-tab strip. Kept permanent so
+        # the hover tab has room to paint WITHOUT a resize (the resize-on-hover broke the tab).
+        return notch_panel.notch_inset_top() + PEEK_H
+
+    def _strip_w(self) -> int:
+        # The resting hotspot spans the WHOLE physical notch so the entire notch is hoverable/clickable
+        # (not a 1-2px sliver). +6 for a comfortable edge; falls back to STRIP_W on non-notch displays.
+        nw = notch_panel.notch_width()
+        return max(STRIP_W, nw + 6) if nw else STRIP_W
 
     def _reanchor(self) -> None:
         # Cancel any in-flight present() slide first — it ends at the pill-width centre and would
@@ -1248,7 +1428,7 @@ class ClaudeOverlay(QWidget):
         geo = notch_panel.screen_geo()
         if geo is None:
             return
-        w = STRIP_W if self._minimized else WIDGET_W
+        w = self._strip_w() if self._minimized else WIDGET_W
         x = geo.x() + (geo.width() - w) // 2
         self.move(x, self._rest_y(geo))
 
@@ -1294,7 +1474,7 @@ class ClaudeOverlay(QWidget):
 
     def _on_dismiss(self) -> None:
         self.dismissed.emit()
-        self.dismiss()
+        self.rest_idle()        # ✕ ends the conversation but keeps the notch summonable (idle nub)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key_Escape:
@@ -1365,21 +1545,23 @@ if __name__ == "__main__":
     ov._on_deny()
     assert fired["deny"] == 1
 
-    ov.present()                            # a task starts pinned/up (constantly visible)
-    ov.restore_panel()
+    # New behaviour: present() does NOT force-pin — the card tucks to the notch and reveals on hover.
+    ov._pinned = False
+    ov.present()
+    assert ov._pinned is False, "present() must not force-pin (default = tucked, hover to reveal)"
+    ov.restore_panel()                      # what a hover does
     ov.show_done("cc7618c9abcd", 0.1234, task="Build a site",
                  result="Subject: Partnership — Here is a short intro email you can send to brands.")
     assert ov._stack.currentWidget() is ov._page_done
     assert not ov._done_timer.isActive(), "done must NOT auto-hide — it stays reopenable"
     assert ov._handle._state == "done"
-    assert ov._handle._shows_at_rest(), "done handle must be visible at rest (a click target)"
+    assert ov._handle._shows_at_rest(), "done nub visible at rest (the status sliver / hover target)"
     assert "intro email" in ov._done_label.text(), "done card must show what Claude GENERATED"
-    assert ov._pinned is True, "done stays UP (pinned) — user wants it constantly up, not auto-tucked"
-    # The user can still tuck it to a reopenable pill: minimize + click -> expands back to the result.
+    # Click the nub still pins it open (watch-this-task mode).
     ov.minimize_panel()
     assert ov._minimized is True
     ov._on_handle_clicked()
-    assert ov._minimized is False and ov._stack.currentWidget() is ov._page_done
+    assert ov._minimized is False and ov._pinned is True and ov._stack.currentWidget() is ov._page_done
 
     ov.show_error("Couldn't reach the agent.")
     assert ov._stack.currentWidget() is ov._page_error

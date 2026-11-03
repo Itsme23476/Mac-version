@@ -172,6 +172,208 @@ Windows' quick-search widget needs the same tiny decouple.
 - Shared backend (do NOT redeploy from Windows): `distill-query` function, `voice_search_usage`
   table, `increment_voice_search` RPC, `OPENAI_API_KEY` secret.
 
+## 7. "Voice randomly stops working until restart" — two fixes (Mac, 2026-11-04)
+
+**What happened on Mac.** About once every ~500 Fn presses, one recording froze. After that,
+every press hung and showed "Transcription timed out — tap to try again" until Filect was
+restarted. While fixing it, a second bug showed up: a crash during fast tapping. Both are
+fixed on Mac. Neither has been checked against the Windows code from the Mac side, so
+**check the Windows code and logs yourself, using the steps below.**
+
+### Step 1 — does Windows have it? Check these
+1. **Code.** Does any voice capture use an in-process `sounddevice` stream (`sd.InputStream` /
+   `RawInputStream`, `with sd.InputStream(...)`), started and stopped for every recording?
+   Check `StreamingTranscriber` / `VoiceRecorder` in `app/core/transcription.py`, and
+   `VoiceRecordWorker` in `app/ui/organize_page.py`. If yes, the app is exposed to the same
+   class of hang, so apply **7a**.
+2. **Logs.** This is the Mac freeze signature in the app log: a recording logs
+   `mode decided: …` but never `[STREAM] FINAL …`, and every later press logs `Fn press …` but
+   never `[STREAM] connected …`, then `transcription watchdog fired`. Search the Windows log for
+   the same pattern (the watchdog line especially).
+3. **Any capture that's a QThread subclass** (`StreamingTranscriber`, `VoiceRecordWorker`):
+   apply **7b**. It's a Qt/PySide bug, not an OS one.
+
+### 7a. Mic stop deadlock → move the mic into a helper process
+- **Mac cause** (proven with a stack sample of the frozen app): `Pa_StopStream →
+  AudioOutputUnitStop` and CoreAudio's IO thread (PortAudio's `startStopCallback`) deadlock
+  on each other. That's PortAudio's macOS backend. The process's audio device stays locked,
+  so every later `Pa_OpenStream` blocks forever, and nothing short of a restart recovers it.
+  sounddevice 0.5.6 is the latest; there's no upstream fix.
+- Windows PortAudio uses different backends (WASAPI/MME/DirectSound), so that exact deadlock
+  is Mac-specific. It's unverified whether Windows can hang on stop in some other way. The fix
+  below is plain cross-platform Python, and it makes **any** stop hang harmless, so apply it if
+  Step 1 shows in-process capture.
+- **How it works:** the mic lives in a throwaway child process (the app's own exe started with
+  `FILECT_MODE=mic-helper`). It streams raw int16 PCM over stdout, never calls stop, and exits
+  with `os._exit`. Process death can't hang. The parent kills a child that doesn't exit within
+  1.5s. A spare child is pre-loaded (sounddevice imported, mic NOT open), so recording starts as
+  fast as before (~0.2s).
+- **New file `app/core/mic_helper.py`** (Mac version, verbatim):
+```python
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+SAMPLE_RATE = 16000
+CHUNK = 1600           # samples per block (100 ms) — same block size the in-process stream used
+
+_spare = None
+_spare_lock = threading.Lock()
+
+
+def serve():
+    """Child (FILECT_MODE=mic-helper): wait for 'go', then write mic PCM to stdout until 'stop'/EOF."""
+    import sounddevice as sd
+    out = sys.stdout.buffer
+    if not sys.stdin.readline().startswith("go"):    # parent gone / spare discarded
+        os._exit(0)
+    lock, done = threading.Lock(), [False]
+
+    def cb(indata, frames, time_info, status):
+        with lock:
+            if done[0]:
+                return
+            try:
+                out.write(bytes(indata))
+                out.flush()
+            except Exception:
+                os._exit(0)
+
+    try:
+        sd.RawInputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+                          blocksize=CHUNK, callback=cb).start()
+    except Exception:
+        os._exit(3)                                  # no mic → parent sees EOF with no audio
+    sys.stdin.readline()                             # "stop", or EOF if the parent died
+    with lock:                                       # no half-written block after this
+        done[0] = True
+    os._exit(0)                                      # never Pa_StopStream: that's the call that deadlocks
+
+
+def _spawn():
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable]                       # .app/Contents/MacOS/Filect
+    else:
+        cmd = [sys.executable, str(Path(__file__).resolve().parents[2] / "main.py")]
+    return subprocess.Popen(cmd, env={**os.environ, "FILECT_MODE": "mic-helper"},
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
+
+
+def warm():
+    """Make sure a loaded helper is waiting, so the next capture starts with no delay."""
+    global _spare
+    with _spare_lock:
+        if _spare is None or _spare.poll() is not None:
+            _spare = _spawn()
+
+
+def open_mic(on_chunk):
+    """Start capturing. on_chunk(bytes) runs on a reader thread for every block.
+    Returns stop(): ends the capture after every block already captured has been delivered."""
+    global _spare
+    with _spare_lock:
+        p, _spare = _spare, None
+    if p is None or p.poll() is not None:
+        p = _spawn()
+    p.stdin.write(b"go\n")
+    p.stdin.flush()
+
+    def pump():
+        while True:
+            b = p.stdout.read(CHUNK * 2)             # buffered: a whole block, or the tail at EOF
+            if not b:
+                return
+            on_chunk(b)
+
+    t = threading.Thread(target=pump, daemon=True, name="mic-pump")
+    t.start()
+    warm()                                           # the next capture's helper loads meanwhile
+
+    def stop():
+        try:
+            p.stdin.write(b"stop\n")
+            p.stdin.flush()
+        except Exception:
+            pass
+        t.join(1.5)
+        if p.poll() is None:
+            p.kill()
+        p.wait()
+        t.join(0.5)                                  # pump sees EOF once the child is gone
+        for f in (p.stdin, p.stdout):
+            try:
+                f.close()
+            except Exception:
+                pass
+
+    return stop
+```
+- **Windows deltas** (Mac-side Claude can't test these, so verify them):
+  - Add `creationflags=subprocess.CREATE_NO_WINDOW` to the `Popen` in `_spawn()`, or a console
+    window may flash on every recording.
+  - In a `--windowed` PyInstaller exe, `sys.stdout` can be `None`. With the parent passing
+    pipes it should be set, but check it. If it's `None` in the child, write to
+    `os.fdopen(1, "wb")` instead of `sys.stdout.buffer`.
+  - `parents[2] / "main.py"` assumes `ai_file_organizer/app/core/mic_helper.py`; adjust if the
+    Windows layout differs.
+- **`main.py`**: add this right after the `sys.path.insert(...)` line, BEFORE the PySide6/GUI
+  imports, so the child stays small:
+  ```python
+  # Mic helper child (see app/core/mic_helper.py): branch before the GUI imports so it stays tiny.
+  if os.environ.get("FILECT_MODE") == "mic-helper":
+      from app.core.mic_helper import serve
+      serve()
+  ```
+- **`StreamingTranscriber._session`**: replace the `sd.InputStream(...)` +
+  `self._stream.start()` with `self._stream = mic_helper.open_mic(cb)`. `cb(data: bytes)` does
+  `chunk = np.frombuffer(data, dtype=np.int16)` → `self._chunks.append(chunk)`,
+  `self._outbox.append(data)`, `self.level.emit(_rms_level(chunk))`. Drop the old
+  `if self._mic_stopped: return` check: stop() delivers the tail and joins the reader, so nothing
+  arrives after it. `_stop_mic()` calls `self._stream()` (the returned stop function) instead of
+  `.stop()/.close()`.
+- **`VoiceRecordWorker.run`** (Organize page mic button): `stop = mic_helper.open_mic(lambda d:
+  self.audio_data.append(np.frombuffer(d, dtype=np.int16)))`, then `while self.is_recording:
+  time.sleep(0.1)` inside `try/finally: stop()`.
+- **Warm-up**: call `mic_helper.warm()` once at startup (Mac does it in the dictation
+  controller's `__init__`, regardless of whether dictation is enabled).
+- **Test** `tests/test_mic_helper.py`: fake children, no mic. It checks that every block
+  arrives, that a hung child is killed in under 3s, and that the spare is reused. It's
+  platform-independent.
+- Mac live results: two bursts of 44 rapid presses with no hang; 60 rapid open/stop cycles,
+  slowest stop 0.06s; worked in the packaged app too.
+
+### 7b. Crash: "QThread: Destroyed while thread '' is still running" → keep captures alive
+- **Cause:** when a quick tap is cancelled (or the mic button is re-clicked mid-transcription),
+  the app drops the last reference to a still-running capture QThread. When its `run()`
+  returns, PySide deletes the QThread from inside its own thread, and Qt aborts the whole app
+  (exit 134).
+- The old code only survived by accident: a reference cycle
+  (`self._stream (sd.InputStream) → callback closure → self`) kept the object alive. 7a removes
+  that cycle, so **7a without 7b crashes.** ❌ pitfall: don't rely on that cycle.
+- **Fix** (in `app/core/transcription.py`, verbatim):
+  ```python
+  _RUNNING = []   # capture QThreads kept alive until their thread has fully finished
+
+
+  def keep_until_finished(thread):
+      _RUNNING[:] = [t for t in _RUNNING if not t.isFinished()]   # pruned on the UI thread
+      _RUNNING.append(thread)
+  ```
+  Then call `keep_until_finished(self)` as the first line of `StreamingTranscriber.start()`, and
+  add the same `start()` override to `VoiceRecordWorker`:
+  ```python
+  def start(self):
+      from app.core.transcription import keep_until_finished
+      keep_until_finished(self)
+      super().start()
+  ```
+- **Test** `tests/test_transcriber_lifetime.py`: 20 captures, each reference dropped mid-run,
+  asserts no abort. It's pure Qt, so it runs on Windows unchanged. Without the fix it prints the
+  exact abort message.
+
 ## Test
 One readable script proves the logic offline (mic/network/permissions faked):
 `voice_dictation_check.py` — 9 checks incl. hold-to-talk and quick-tap-latch. Run headless:

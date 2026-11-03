@@ -142,13 +142,16 @@ def test_empty_transcript_does_not_insert(qapp):
 
 def test_settings_persist_and_normalize(qapp):
     from app.core.settings import settings
-    settings.set_dictation_shortcut("  CMD+Shift+K ")
-    assert settings.dictation_shortcut == "cmd+shift+k"     # trimmed + lowercased
-    settings.set_dictation_enabled(False)
-    assert settings.dictation_enabled is False
-    # restore sane defaults so we don't leave the app disabled
-    settings.set_dictation_enabled(True)
-    settings.set_dictation_shortcut("ctrl+shift+d")
+    # Never write the REAL settings.json: this test used to "restore" ctrl+shift+d onto disk, which
+    # silently replaced the user's fn shortcut every time the suite ran.
+    orig = (settings.dictation_shortcut, settings.dictation_enabled)
+    with patch.object(settings, "_save_config") as save:
+        settings.set_dictation_shortcut("  CMD+Shift+K ")
+        assert settings.dictation_shortcut == "cmd+shift+k"     # trimmed + lowercased
+        settings.set_dictation_enabled(False)
+        assert settings.dictation_enabled is False
+        assert save.called                                      # it does try to persist
+    settings.dictation_shortcut, settings.dictation_enabled = orig
 
 
 def test_transcribe_audio_result_mapping(qapp, tmp_path):

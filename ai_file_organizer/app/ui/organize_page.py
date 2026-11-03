@@ -188,29 +188,37 @@ class VoiceRecordWorker(QThread):
         self.sample_rate = sample_rate
         self.is_recording = False
         self.audio_data = []
-    
+
+    def start(self):
+        from app.core.transcription import keep_until_finished
+        keep_until_finished(self)   # a re-click mid-transcription must not delete a running QThread
+        super().start()
+
     def run(self):
         try:
-            import sounddevice as sd
+            import time
             import numpy as np
             from scipy.io import wavfile
             import tempfile
             import os
             from app.core.vision import transcribe_audio_proxy
-            
+            from app.core import mic_helper
+
             self.is_recording = True
             self.audio_data = []
-            
-            def audio_callback(indata, frames, time, status):
-                if self.is_recording:
-                    self.audio_data.append(indata.copy())
-            
-            # Start recording
-            with sd.InputStream(samplerate=self.sample_rate, channels=1, 
-                              dtype='int16', callback=audio_callback):
+
+            def audio_callback(data):
+                self.audio_data.append(np.frombuffer(data, dtype=np.int16))
+
+            # Start recording. The mic runs in a helper process: an in-process PortAudio
+            # stop can deadlock and leave the mic dead until restart (see mic_helper).
+            stop = mic_helper.open_mic(audio_callback)   # 16 kHz mono int16 = self.sample_rate default
+            try:
                 while self.is_recording:
-                    sd.sleep(100)  # Check every 100ms
-            
+                    time.sleep(0.1)  # Check every 100ms
+            finally:
+                stop()
+
             self.recording_stopped.emit()
             
             if not self.audio_data:

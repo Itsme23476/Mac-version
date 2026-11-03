@@ -110,6 +110,34 @@ def notch_inset_top() -> int:
         return 0
 
 
+def notch_width() -> int:
+    """Width (logical pts) of the physical notch cutout on the notch display, else 0. The notch is the
+    gap between the two menu-bar areas beside it, so a hotspot this wide covers the whole notch."""
+    if sys.platform != "darwin":
+        return 0
+    try:
+        from AppKit import NSScreen
+    except Exception:
+        return 0
+    try:
+        for s in NSScreen.screens():
+            try:
+                if s.safeAreaInsets().top <= 0:
+                    continue
+            except Exception:
+                continue
+            fr = s.frame()
+            try:
+                la, ra = s.auxiliaryTopLeftArea(), s.auxiliaryTopRightArea()
+                w = fr.size.width - la.size.width - ra.size.width
+                return int(round(w)) if w > 0 else 0
+            except Exception:
+                return 0
+    except Exception:
+        return 0
+    return 0
+
+
 def screen_geo():
     """Where the panel should anchor: the notch display, else the cursor's screen, else primary."""
     geo = notch_screen_geo()

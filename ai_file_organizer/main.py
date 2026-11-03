@@ -22,6 +22,11 @@ else:
 # Add the project root to Python path for consistent imports
 sys.path.insert(0, str(project_root))
 
+# Mic helper child (see app/core/mic_helper.py): branch before the GUI imports so it stays tiny.
+if os.environ.get("FILECT_MODE") == "mic-helper":
+    from app.core.mic_helper import serve
+    serve()
+
 from urllib.parse import urlparse, parse_qs
 
 from PySide6.QtWidgets import QApplication, QMessageBox

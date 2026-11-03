@@ -37,6 +37,11 @@ try:
 except Exception as e:  # pragma: no cover - only in envs without the native deps
     logger.warning(f"Dictation hotkey helpers unavailable: {e}")
     _HOTKEY_OK = False
+try:                     # receive mode's hands-free Space/Shift/Esc (macOS tap; Windows: not yet)
+    from app.ui.win_hotkey import set_screen_keys
+except Exception:
+    def set_screen_keys(hotkey, on):
+        pass
 
 # macOS Accessibility permission helpers (re-exported from mac_hotkey via win_hotkey).
 # Without this permission, pynput typing / paste silently posts nothing.
@@ -105,6 +110,22 @@ class DictationIndicator(QWidget):
         pass
 
 
+def _with_markers(text: str, shots) -> str:
+    """'change this [screenshot 1] … also this [screenshot 2]': each screenshot goes after the words
+    you'd said when you took it (shots = (path, had_marks, words_so_far|None); None → the end)."""
+    words = text.split()
+    at = {}
+    for i, s in enumerate(shots, 1):
+        n = s[2] if len(s) > 2 and s[2] is not None else len(words)
+        at.setdefault(min(n, len(words)), []).append(f"[screenshot {i}]")
+    out = []
+    for k in range(len(words) + 1):
+        out += at.get(k, [])
+        if k < len(words):
+            out.append(words[k])
+    return " ".join(out)
+
+
 class VoiceDictationController(QObject):
     """Owns the dictation hotkey, the recorder, and text insertion."""
 
@@ -113,6 +134,9 @@ class VoiceDictationController(QObject):
     # Fn+Option = organize.
     _press_sig = Signal(bool, bool)
     _release_sig = Signal()
+    _space_sig = Signal(bool)         # fn + ⌃ + Space down/up → draw on the screen / snapshot it
+    _esc_sig = Signal()               # fn + ⌃ + Esc → cancel the capture
+    _ctrl_sig = Signal(str)           # "press": ⌃ while fn held (⌃⌃ = receive) · "tap": lone ⌃ = send
     _search_ready = Signal(str, str)  # (spoken text, distilled query) -> open popup (UI thread)
     _final_ready = Signal(str)        # final dictation text (after optional AI cleanup) -> paste
     dictation_saved = Signal()        # a dictation was saved to History -> refresh the card
@@ -140,15 +164,30 @@ class VoiceDictationController(QObject):
         self._mods_seen = {"shift": False, "option": False, "control": False}  # mods seen during capture
         self._mod_timer = None            # QTimer that polls modifiers while recording
         self._tx_watchdog = None          # QTimer: auto-recovers a stuck "transcribing" state
+        self._ink = None                  # ScreenInk (lazy) — fn + ⌃ + Space draws on the screen
+        self._inking = False              # drawing on the screen right now
+        self._ink_down_at = 0.0           # when the draw key (Space/Shift) went down
+        self._ink_tapped_at = None        # set when a TAP turned drawing on (it stays on till the next tap)
+        self._receive = False             # receive mode (fn + ⌃⌃): hands-free, collecting words + shots
+        self._ctrl_at = None              # last ⌃ press while fn was held (to spot the double-tap)
+        self._shots = []                  # [(png path, had_marks)] taken during this hold
         self._indicator = DictationOverlay() if _OVERLAY_OK else DictationIndicator()
         # Hotkey callbacks fire on the native event thread; emit -> queued slots run on
         # the UI thread (same pattern as setup_quick_search).
         self._press_sig.connect(self._on_press, Qt.QueuedConnection)
         self._release_sig.connect(self._on_release, Qt.QueuedConnection)
+        self._space_sig.connect(self._on_space, Qt.QueuedConnection)
+        self._esc_sig.connect(self._on_escape, Qt.QueuedConnection)
+        self._ctrl_sig.connect(self._on_control, Qt.QueuedConnection)
         self._search_ready.connect(self._open_search, Qt.QueuedConnection)
         self._final_ready.connect(self._on_final, Qt.QueuedConnection)
         if settings.dictation_enabled:
             self.register_hotkey()
+        try:
+            from app.core import mic_helper
+            mic_helper.warm()              # mic child loaded ahead of time → Fn or any mic button starts instantly
+        except Exception as e:
+            logger.warning(f"mic helper warm-up failed: {e}")
 
     # ---- hotkey lifecycle ----
     def register_hotkey(self):
@@ -160,6 +199,9 @@ class VoiceDictationController(QObject):
                 self._mw, seq,
                 lambda shift=False, option=False: self._press_sig.emit(bool(shift), bool(option)),
                 on_released=lambda: self._release_sig.emit(),
+                on_space=lambda down: self._space_sig.emit(bool(down)),
+                on_escape=lambda: self._esc_sig.emit(),
+                on_control=lambda kind="press": self._ctrl_sig.emit(kind),
             )
             if self._hotkey:
                 handle = self._hotkey[1] if isinstance(self._hotkey[1], dict) else {}
@@ -271,6 +313,8 @@ class VoiceDictationController(QObject):
             except Exception:
                 pass
             return
+        if self._latched:
+            return                           # receive mode (fn + ⌃⌃): letting go of fn keeps it on
         held = time.monotonic() - (self._press_time or 0.0)
         if held >= self.HOLD_SEC:
             self._stop()                     # push-to-talk: transcribe on release
@@ -286,8 +330,132 @@ class VoiceDictationController(QObject):
                 and not self._got_second_tap and not self._key_down):
             self._cancel_recording()
 
+    # ---- fn + ⌃ + Space (or Shift): draw on the screen, snapshot it for Claude ---------
+    TAP_SEC = 0.35      # draw key released sooner than this = a TAP: drawing stays on
+    REGRIP_SEC = 0.3    # pressed again this soon after that tap = a re-grip, not "snapshot"
+
+    def _on_space(self, down: bool):
+        """While talking to Claude (fn + ⌃ held), Space or Shift draws in red on the live screen:
+        TAP it → drawing stays on, tap again → snapshot (screen + marks) · HOLD it → draw while held,
+        release → snapshot. Letting go of fn while drawing snapshots too."""
+        now = time.monotonic()
+        if down:
+            if self._state != "recording":
+                return
+            if self._inking:
+                if self._ink_tapped_at is not None and now - self._ink_tapped_at < self.REGRIP_SEC:
+                    # too soon to have drawn anything: you're re-gripping the key (seen live — a 0.2s
+                    # press, 0.1s gap, then a 12s hold), so this press starts a hold instead
+                    self._ink_tapped_at, self._ink_down_at = None, now
+                    return
+                self._take_shot()                      # the second tap: snapshot now (drawing ends, so
+                return                                 # its release is a no-op)
+            self._mods_seen["control"] = True          # a screen gesture is always an assistant one
+            ink = self._ensure_ink()
+            if ink is None:
+                return
+            if not ink.isVisible():
+                ink.begin()
+            ink.set_drawing(True)
+            self._inking, self._ink_down_at, self._ink_tapped_at = True, now, None
+        elif self._inking and self._ink_tapped_at is None:
+            if now - self._ink_down_at < self.TAP_SEC:
+                self._ink_tapped_at = now              # a tap: keep drawing until the next tap
+                self._ink.set_drawing(True, "tap again to snapshot · Esc cancels")
+            else:
+                self._take_shot()                      # a hold: release = snapshot
+
+    # ---- receive mode: hold fn, double-tap ⌃ → hands-free; talk, scroll, snapshot; tap ⌃ = send --
+    RECEIVE_TAP_SEC = 0.45   # two ⌃ presses this close together (while fn is held) = receive mode
+
+    def _on_control(self, kind: str = "press"):
+        """"press" = ⌃ while fn is held: a second one in quick succession enters receive mode.
+        "tap" = a clean lone ⌃ tap in receive mode: send it all (you came in with ⌃, you leave with ⌃)."""
+        if kind == "tap":
+            if self._receive and self._state == "recording":
+                logger.info("[voice] ⌃ tap → sending the receive-mode message")
+                self._latched = False
+                self._stop()
+            return
+        now = time.monotonic()
+        prev, self._ctrl_at = self._ctrl_at, now
+        if (self._state == "recording" and not self._latched and prev is not None
+                and now - prev < self.RECEIVE_TAP_SEC):
+            self._enter_receive()
+
+    def _enter_receive(self):
+        """Stay on after fn is let go: everything you say + every snapshot (tap Space/Shift — no other
+        key needed now) builds ONE message for Claude; tap ⌃ (or fn) to send it, Esc to drop it."""
+        logger.info("[voice] receive mode ON (fn + ⌃⌃)")
+        self._latched = self._receive = True
+        self._mods_seen["control"] = True          # it's a message for Claude
+        set_screen_keys(self._hotkey, True)
+        try:
+            self._indicator.set_latched(True)
+        except Exception:
+            pass
+        ink = self._ensure_ink()
+        if ink is not None:
+            if not ink.isVisible():
+                ink.begin()
+            self._receive_banner()
+
+    def _receive_banner(self):
+        if self._receive and self._ink is not None:
+            n = len(self._shots)
+            count = f" · {n} screenshot{'s' if n != 1 else ''}" if n else ""
+            self._ink.set_banner(f"●  Receiving{count} — tap Space or ⇧ to draw · tap ⌃ to send · Esc cancels")
+
+    def _exit_receive(self):
+        if self._receive:
+            logger.info("[voice] receive mode OFF")
+        self._receive = False
+        self._ctrl_at = None
+        set_screen_keys(self._hotkey, False)
+
+    def _on_escape(self):
+        """fn + ⌃ + Esc: drop the whole capture — nothing is sent."""
+        if self._state == "recording":
+            logger.info("[screen] cancelled with Esc")
+            self._cancel_recording()
+            self._status("Cancelled.")
+
+    def _ensure_ink(self):
+        if self._ink is None:
+            try:
+                from app.ui.screen_ink import ScreenInk
+                self._ink = ScreenInk()
+            except Exception as e:
+                logger.error(f"[screen] ink unavailable: {e}")
+                return None
+        return self._ink
+
+    def _take_shot(self):
+        self._inking, self._ink_tapped_at = False, None
+        ink = self._ink
+        if ink is None:
+            return
+        shot = ink.snapshot()
+        ink.set_drawing(False)
+        if shot:
+            # + how many words you'd said by then, so it lands at that point in your message
+            at = getattr(self._recorder, "words_so_far", lambda: None)()
+            self._shots.append((*shot, at))
+            self._receive_banner()
+        else:
+            self._status("Couldn't capture the screen — allow Screen Recording for Filect "
+                         "in System Settings → Privacy & Security.")
+
+    def _end_ink(self):
+        self._inking, self._ink_tapped_at = False, None
+        if self._ink is not None:
+            self._ink.end()
+
     def _cancel_recording(self):
         """Stop the recorder and drop its result (used for a discarded lone tap)."""
+        self._exit_receive()
+        self._end_ink()
+        self._shots = []
         r = self._recorder
         self._recorder = None
         self._state = "idle"
@@ -401,6 +569,12 @@ class VoiceDictationController(QObject):
         if self._mod_timer is not None:
             self._mod_timer.stop()
             self._mod_timer = None
+        if self._inking:                           # let go of fn while still drawing → that's a snapshot too
+            self._take_shot()
+        if self._shots:                            # the screen gesture → this goes to Claude
+            self._mods_seen["control"] = True
+        self._exit_receive()
+        self._end_ink()
         # Decide the mode from whatever modifier was held at ANY point during the hold:
         # Control -> assistant, else Option -> organize, else Shift -> search, else dictate.
         if self._mods_seen.get("control"):
@@ -430,16 +604,23 @@ class VoiceDictationController(QObject):
         self._latched = False
         self._ignore_next_release = False
         self._got_second_tap = False
+        shots, self._shots = self._shots, []
+        if not text and shots:                     # drew / snapped but said nothing
+            text = ("Look at what I've marked in red." if any(s[1] for s in shots)
+                    else "Take a look at this screenshot.")
+        elif len(shots) > 1:
+            text = _with_markers(text, shots)      # which "this" goes with which screenshot
         if not text:
             self._indicator.hide()
             self._status("No speech detected.")
             return
         if self._mode == "assistant":
             # Fn+Control: route the spoken command — it may name an existing conversation to
-            # CONTINUE ("use my sponsorship conversation and …") or be a fresh task.
+            # CONTINUE ("use my sponsorship conversation and …") or be a fresh task. Screenshots
+            # from fn + ⌃ + Space ride along with it.
             self._indicator.hide()
             try:
-                self._mw.assistant_page.run_voice_task(text)
+                self._mw.assistant_page.run_voice_task(text, images=[s[0] for s in shots])
             except Exception as e:
                 logger.error(f"voice assistant start failed: {e}")
                 self._status("Assistant unavailable.")
@@ -554,6 +735,9 @@ class VoiceDictationController(QObject):
         self._stop_watchdog()
         logger.warning(f"Dictation error: {msg}")
         self._indicator.hide()
+        self._exit_receive()
+        self._end_ink()
+        self._shots = []                     # don't send screenshots without what you said
         self._state = "idle"
         self._latched = False
         self._ignore_next_release = False
@@ -566,6 +750,10 @@ class VoiceDictationController(QObject):
         this just tells the user why recording stopped and that nothing was lost. Shown as
         a macOS banner because the user is typically dictating into another app."""
         logger.info("[voice] max-duration cap reached; notifying user (text is still saved)")
+        if self._state == "recording":
+            # Same as letting go: decides the mode and ends the ink/receive mode — otherwise a long
+            # receive-mode message (fn + ⌃⌃) would be pasted as dictation instead of sent to Claude.
+            self._stop()
         self._status("10-minute voice limit reached — your text was saved.")
 
         def _notify():

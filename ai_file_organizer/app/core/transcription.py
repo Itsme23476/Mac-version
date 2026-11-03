@@ -252,6 +252,22 @@ def _pick_text(ev: dict) -> str:
     return ""
 
 
+def _assemble(utterances, cur) -> str:
+    """The transcript so far: finalized utterances + the trailing in-progress one (if the last
+    utterance didn't get speech_final before we stopped waiting). Guards against a cumulative
+    trailing interim that restates everything already committed, which would otherwise duplicate
+    earlier utterances."""
+    parts = list(utterances)
+    tail = cur["t"].strip()
+    if tail:
+        joined = " ".join(parts).strip()
+        if joined and tail.startswith(joined):
+            parts = [tail]                       # cumulative → it already contains all of it
+        elif not parts or tail != parts[-1]:     # skip an exact-duplicate restatement
+            parts.append(tail)
+    return " ".join(parts).strip()
+
+
 def _output_muted():
     """Current macOS system-output muted state (True/False), or None if it can't be read."""
     try:
@@ -398,6 +414,19 @@ class VoiceRecorder(QThread):
                     pass
 
 
+_RUNNING = []   # capture QThreads kept alive until their thread has fully finished
+
+
+def keep_until_finished(thread):
+    """Hold a reference to a capture QThread until it has FULLY finished. A caller dropping its
+    reference (a cancelled quick tap) otherwise leaves run()'s own frame as the last one, and when
+    run() returns PySide deletes the QThread from inside itself → "QThread: Destroyed while thread
+    is still running" → abort (seen live in a rapid Fn burst). Call from the UI thread before
+    start(); finished ones are pruned here, so a QThread is never deleted while it runs."""
+    _RUNNING[:] = [t for t in _RUNNING if not t.isFinished()]
+    _RUNNING.append(thread)
+
+
 class StreamingTranscriber(QThread):
     """Drop-in replacement for VoiceRecorder that STREAMS audio to the
     `transcribe-stream` edge function while you speak, so the final transcript is
@@ -433,12 +462,13 @@ class StreamingTranscriber(QThread):
         self.is_recording = False
         self._chunks = []            # full int16 audio (for the batch fallback)
         self._outbox = []            # raw PCM byte chunks queued for streaming
-        self._stream = None          # sounddevice InputStream
+        self._stream = None          # mic_helper stop() for the running capture
         self._mic_stopped = False
         self._stopped_emitted = False
         self._prior_muted = None
 
     def start(self):
+        keep_until_finished(self)
         # Set the flag BEFORE the thread runs (same start/stop race guard as
         # VoiceRecorder — rapid back-to-back dictations).
         self.is_recording = True
@@ -446,6 +476,12 @@ class StreamingTranscriber(QThread):
 
     def stop_recording(self):
         self.is_recording = False
+
+    def words_so_far(self) -> int:
+        """Words heard so far (finished sentences + the one in progress) — a screenshot taken
+        mid-message records this so it can be placed at that point in the final transcript."""
+        live = getattr(self, "_live", None)
+        return len(_assemble(*live).split()) if live else 0
 
     # --- system-output mute while recording (mirrors VoiceRecorder) -----------
     def _mute_output_if_enabled(self):
@@ -479,8 +515,7 @@ class StreamingTranscriber(QThread):
         self._mic_stopped = True
         try:
             if self._stream is not None:
-                self._stream.stop()
-                self._stream.close()
+                self._stream()   # mic_helper stop(): delivers the last blocks, then ends the child
         except Exception:
             pass
 
@@ -498,7 +533,6 @@ class StreamingTranscriber(QThread):
 
     def run(self):
         try:
-            import sounddevice as sd  # noqa: F401
             import numpy as np        # noqa: F401
         except ImportError as e:
             self.error.emit(f"Missing audio library: {e}")
@@ -529,31 +563,29 @@ class StreamingTranscriber(QThread):
         """Returns (final_text, ok). ok=False means 'use the batch fallback'.
         Keeps the mic buffering in every failure mode so no speech is lost."""
         import asyncio
-        import sounddevice as sd
+        import numpy as np
+        from app.core import mic_helper
 
-        def cb(indata, frames, time_info, status):
+        def cb(data: bytes):
             # Capture until the mic is actually STOPPED, not the instant the key is
-            # released. At release ~100ms of already-spoken audio is still buffered in
-            # PortAudio; dropping it would clip the tail of the last word. This is the
-            # symmetric counterpart to starting the mic first for the opening words.
-            if self._mic_stopped:
-                return
-            self._chunks.append(indata.copy())     # for the batch fallback
-            self._outbox.append(indata.tobytes())  # for streaming
+            # released. At release ~100ms of already-spoken audio is still in flight;
+            # dropping it would clip the tail of the last word. This is the symmetric
+            # counterpart to starting the mic first for the opening words.
+            chunk = np.frombuffer(data, dtype=np.int16)
+            self._chunks.append(chunk)             # for the batch fallback
+            self._outbox.append(data)              # for streaming
             try:
-                self.level.emit(_rms_level(indata))
+                self.level.emit(_rms_level(chunk))
             except Exception:
                 pass
 
         # Start the mic FIRST — before muting, auth, or connecting — so not one opening
-        # word is lost. The mic runs on PortAudio's own thread, so it keeps capturing into
+        # word is lost. The mic runs in a helper process (mic_helper: an in-process PortAudio
+        # stop can deadlock and kill voice until restart), so it keeps capturing into
         # _outbox/_chunks while the (slow) mute + auth + WS connect happen below; the
         # backlog is flushed to xAI the instant it opens.
         try:
-            self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                          dtype="int16", blocksize=1600,
-                                          device=self.device, callback=cb)
-            self._stream.start()
+            self._stream = mic_helper.open_mic(cb)   # ponytail: default input only (self.device unused — no caller sets it)
         except Exception as e:
             logger.error(f"[STREAM] mic start failed: {e}")
             self.error.emit("Could not access the microphone.")
@@ -615,6 +647,7 @@ class StreamingTranscriber(QThread):
         # texts concatenated, in order, + any still-interim trailing utterance.
         utterances = []                # finalized utterance texts (speech_final=true)
         cur = {"t": ""}                # current in-progress utterance (latest interim/chunk-final)
+        self._live = (utterances, cur)  # read by words_so_far() from the UI thread
         got_event = {"v": False}
         done_flag = {"v": False}       # transcript.done terminal marker seen
         n_part = {"v": 0}
@@ -730,19 +763,7 @@ class StreamingTranscriber(QThread):
             pass
 
         audio_s = cursor * 1600 / SAMPLE_RATE  # 1600-sample (100ms) chunks
-        # Assemble: finalized utterances + the trailing in-progress one (if the last
-        # utterance didn't get speech_final before we stopped waiting). Guard against a
-        # cumulative trailing interim that restates everything already committed, which
-        # would otherwise duplicate earlier utterances.
-        parts = list(utterances)
-        tail = cur["t"].strip()
-        if tail:
-            joined = " ".join(parts).strip()
-            if joined and tail.startswith(joined):
-                parts = [tail]                       # cumulative → it already contains all of it
-            elif not parts or tail != parts[-1]:     # skip an exact-duplicate restatement
-                parts.append(tail)
-        final = " ".join(parts).strip()
+        final = _assemble(utterances, cur)
         logger.info(f"[STREAM] FINAL via streaming: sent={cursor}/{len(self._outbox)} (~{audio_s:.1f}s), "
                     f"utterances={len(utterances)}, partials={n_part['v']}, done={done_flag['v']}, chars={len(final)}")
         if _DEV:

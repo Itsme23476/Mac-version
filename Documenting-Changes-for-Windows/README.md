@@ -39,8 +39,9 @@ So for a feature whose backend is shared, the Windows work is **client-side only
 
 | # | Feature | Guide | Mac status |
 |---|---------|-------|------------|
-| 1 | Voice dictation + voice search (Grok Voice Transcribe 2.0) | [voice-dictation.md](voice-dictation.md) | Done on Mac |
+| 1 | Voice dictation + voice search (Grok Voice Transcribe 2.0) | [voice-dictation.md](voice-dictation.md) | Done on Mac. **§7: "voice stops working until restart" + fast-tap crash: fixed on Mac (2026-11-04). Windows: run the §7 checks, then apply 7a (mic helper process) + 7b (QThread keep-alive)** |
 | 2 | Auth session + sign-out fixes (bugs we hit & fixed) | [session-auth-and-signout-fixes.md](session-auth-and-signout-fixes.md) | Done on Mac |
+| 3 | Assistant: voice-driven Claude Code agents (notch, left rail, rich Details, screen capture + red ink) | [assistant-claude-agent-changes.md](assistant-claude-agent-changes.md) | Built on Mac (`feat/agent-runner`), unshipped |
 
 ---
 

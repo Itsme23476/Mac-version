@@ -8,6 +8,7 @@ This module provides macOS-native functionality for:
 """
 
 import sys
+import time
 import logging
 import subprocess
 from typing import Optional, Tuple, Callable, Any, List, Dict
@@ -402,35 +403,86 @@ def _register_hotkey_nsevent(sequence: str, on_activated: Callable[[], None]
     return (hotkey_id, handle, 0)
 
 
-def _register_fn_tap(on_pressed: Callable[[], None],
-                     on_released: Optional[Callable[[], None]] = None,
-                     override: bool = True) -> Optional[Tuple[int, Any, int]]:
-    """Capture the Fn / Globe key via a CGEventTap so dictation can use it for
-    hold-to-talk. With override=True the Fn key event is CONSUMED, so it overrides
-    macOS's default Globe action (emoji / dictation / input-switch) and every other app.
+FN_KEYCODE = 63                 # the Globe / fn key
+SPACE_KEYCODE = 49
+ESC_KEYCODE = 53
+SHIFT_KEYCODES = (56, 60)       # left / right Shift
+CONTROL_KEYCODES = (59, 62)     # left / right Control
+COMMAND_FLAG = 0x100000         # kCGEventFlagMaskCommand
+CTRL_TAP_SEC = 0.4              # receive mode: ⌃ pressed + released alone within this = send
+FN_FLAG = 0x800000              # kCGEventFlagMaskSecondaryFn
+SHIFT_FLAG = 0x20000            # kCGEventFlagMaskShift
+CONTROL_FLAG = 0x40000          # kCGEventFlagMaskControl
+OPTION_FLAG = 0x80000           # kCGEventFlagMaskAlternate (Option / ⌥)
 
-    The Fn key is a special modifier that Carbon's RegisterEventHotKey can't bind, so we
-    watch flagsChanged events for keycode 63 (the Globe key) toggling the secondary-fn
-    flag. Needs the app trusted for Accessibility / Input Monitoring, or CGEventTapCreate
-    returns NULL. Runs its own CFRunLoop on a daemon thread and uses only pure CGEvent
-    getters (never NSEvent.eventWithCGEvent_, which crashes on CapsLock on recent macOS).
-    """
-    import threading
+
+def set_screen_keys(hotkey, on: bool) -> None:
+    """Receive mode: while on, Space / Shift / Esc reach on_space / on_escape WITHOUT holding fn + ⌃
+    (you're hands-free, so nothing is held). `hotkey` is what register_global_hotkey returned."""
+    try:
+        hotkey[1]['_st']['receive'] = bool(on)
+    except Exception:
+        pass
+
+
+def _make_fn_callback(st, on_pressed, on_released=None, override=True, on_space=None, on_escape=None,
+                      on_control=None):
+    """The Fn tap's event callback (factored out so tests can drive it with real CGEvents).
+
+    flagsChanged on the fn key → on_pressed(shift, option) / on_released(). With on_space set it also
+    sees key presses: while fn + ⌃ are held — or anytime in receive mode (st['receive']) — Space or
+    Shift → on_space(True/False) (the screen-drawing key: DictationController decides tap vs hold) and
+    Esc → on_escape(). Space/Esc are SWALLOWED so no stray space/Esc reaches your app; Shift is a
+    modifier, so it always passes through (swallowing a modifier can leave apps thinking it's stuck
+    down). on_control("press") fires on each ⌃ press while fn is held (fn + ⌃⌃ = receive mode), and
+    on_control("tap") on a clean lone ⌃ tap in receive mode (= send; ⌃ + any other key doesn't count).
+    Every other keystroke passes through untouched."""
     from Quartz import (
-        CGEventTapCreate, CGEventTapEnable, CGEventMaskBit,
-        CGEventGetFlags, CGEventGetIntegerValueField,
-        CFMachPortCreateRunLoopSource, CFRunLoopAddSource, CFRunLoopGetCurrent,
-        CFRunLoopRun, CFRunLoopStop, kCFRunLoopCommonModes,
-        kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
-        kCGEventFlagsChanged, kCGEventTapDisabledByTimeout,
-        kCGEventTapDisabledByUserInput, kCGKeyboardEventKeycode,
+        CGEventTapEnable, CGEventGetFlags, CGEventGetIntegerValueField,
+        kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput, kCGKeyboardEventKeycode,
+        kCGKeyboardEventAutorepeat, kCGEventKeyDown, kCGEventKeyUp,
         CGEventSourceFlagsState, kCGEventSourceStateCombinedSessionState,
     )
-    FN_KEYCODE = 63                 # the Globe / fn key
-    FN_FLAG = 0x800000              # kCGEventFlagMaskSecondaryFn
-    SHIFT_FLAG = 0x20000            # kCGEventFlagMaskShift
-    OPTION_FLAG = 0x80000           # kCGEventFlagMaskAlternate (Option / ⌥)
-    st = {'down': False, 'tap': None, 'runloop': None, 'thread': None}
+
+    def _key(etype, event):
+        kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+        if kc == SPACE_KEYCODE and etype == kCGEventKeyUp and st.get('space'):
+            st['space'] = False            # end the stroke even if fn/⌃ were let go first
+            logger.info("[screen] space up")
+            on_space(False)
+            return None
+        if kc not in (SPACE_KEYCODE, ESC_KEYCODE):
+            return event
+        flags = CGEventGetFlags(event)
+        if st.get('receive'):
+            if flags & (COMMAND_FLAG | OPTION_FLAG):
+                return event               # ⌘Space (Spotlight), ⌥Space… stay the system's
+        elif not st['down'] or not (flags & CONTROL_FLAG):
+            return event                   # fn + Space without ⌃ isn't ours
+        if kc == SPACE_KEYCODE:
+            if (etype == kCGEventKeyDown and not st.get('space')
+                    and not CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat)):
+                st['space'] = True
+                logger.info("[screen] space down")
+                on_space(True)
+            return None                    # swallowed (incl. key auto-repeat while held)
+        if etype == kCGEventKeyDown and on_escape is not None:
+            logger.info("[screen] escape")
+            on_escape()
+        return None
+
+    def _shift(event):
+        # Shift is a modifier: it arrives as flagsChanged, and its bit says whether it's down now.
+        flags = CGEventGetFlags(event)
+        if flags & SHIFT_FLAG:
+            if not st.get('shift') and (st.get('receive') or (st['down'] and flags & CONTROL_FLAG)):
+                st['shift'] = True
+                logger.info("[screen] shift down")
+                on_space(True)
+        elif st.get('shift'):
+            st['shift'] = False            # end the stroke even if fn/⌃ were let go first
+            logger.info("[screen] shift up")
+            on_space(False)
 
     def _cb(proxy, etype, event, refcon):
         try:
@@ -438,7 +490,33 @@ def _register_fn_tap(on_pressed: Callable[[], None],
                 if st['tap'] is not None:
                     CGEventTapEnable(st['tap'], True)   # system disabled us -> re-arm
                 return event
-            if CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) != FN_KEYCODE:
+            if etype in (kCGEventKeyDown, kCGEventKeyUp):
+                if etype == kCGEventKeyDown:
+                    st['ctrl_t'] = None                 # ⌃ + a key (⌃C, ⌃→ …) is a shortcut, not a tap
+                return _key(etype, event) if on_space is not None else event
+            kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+            if kc not in CONTROL_KEYCODES:
+                st['ctrl_t'] = None                     # ⌃ + another modifier isn't a lone tap either
+            if kc in SHIFT_KEYCODES and on_space is not None:
+                _shift(event)
+                return event                            # watched, never swallowed
+            if kc in CONTROL_KEYCODES and on_control is not None:
+                ctrl_now = bool(CGEventGetFlags(event) & CONTROL_FLAG)
+                if ctrl_now and not st.get('ctrl'):
+                    if st['down']:
+                        logger.info("[voice] ⌃ press while fn held")
+                        on_control("press")
+                    # receive mode, nothing else held: this may be the "send" tap
+                    st['ctrl_t'] = time.monotonic() if st.get('receive') and not st['down'] else None
+                elif not ctrl_now and st.get('ctrl'):
+                    t = st.get('ctrl_t')
+                    if t is not None and st.get('receive') and time.monotonic() - t < CTRL_TAP_SEC:
+                        logger.info("[voice] ⌃ tap in receive mode")
+                        on_control("tap")
+                    st['ctrl_t'] = None
+                st['ctrl'] = ctrl_now
+                return event                            # watched, never swallowed
+            if kc != FN_KEYCODE:
                 return event                            # another modifier -> never touch it
             flags = CGEventGetFlags(event)
             fn_now = bool(flags & FN_FLAG)   # from the event only (keeps release detection exact)
@@ -472,10 +550,44 @@ def _register_fn_tap(on_pressed: Callable[[], None],
             logger.error(f"Fn tap callback error: {e}")
             return event
 
+    return _cb
+
+
+def _register_fn_tap(on_pressed: Callable[[], None],
+                     on_released: Optional[Callable[[], None]] = None,
+                     override: bool = True,
+                     on_space: Optional[Callable[[bool], None]] = None,
+                     on_escape: Optional[Callable[[], None]] = None,
+                     on_control: Optional[Callable[[], None]] = None) -> Optional[Tuple[int, Any, int]]:
+    """Capture the Fn / Globe key via a CGEventTap so dictation can use it for
+    hold-to-talk. With override=True the Fn key event is CONSUMED, so it overrides
+    macOS's default Globe action (emoji / dictation / input-switch) and every other app.
+
+    The Fn key is a special modifier that Carbon's RegisterEventHotKey can't bind, so we
+    watch flagsChanged events for keycode 63 (the Globe key) toggling the secondary-fn
+    flag. Needs the app trusted for Accessibility / Input Monitoring, or CGEventTapCreate
+    returns NULL. Runs its own CFRunLoop on a daemon thread and uses only pure CGEvent
+    getters (never NSEvent.eventWithCGEvent_, which crashes on CapsLock on recent macOS).
+    """
+    import threading
+    from Quartz import (
+        CGEventTapCreate, CGEventTapEnable, CGEventMaskBit,
+        CFMachPortCreateRunLoopSource, CFRunLoopAddSource, CFRunLoopGetCurrent,
+        CFRunLoopRun, kCFRunLoopCommonModes,
+        kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
+        kCGEventFlagsChanged, kCGEventKeyDown, kCGEventKeyUp,
+    )
+    st = {'down': False, 'space': False, 'shift': False, 'ctrl': False, 'receive': False,
+          'tap': None, 'runloop': None, 'thread': None}
+    _cb = _make_fn_callback(st, on_pressed, on_released, override, on_space, on_escape, on_control)
+    mask = CGEventMaskBit(kCGEventFlagsChanged)
+    if on_space is not None:          # only then do key presses pass through this tap at all
+        mask |= CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
+
     def _run():
         tap = CGEventTapCreate(
             kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
-            CGEventMaskBit(kCGEventFlagsChanged), _cb, None)
+            mask, _cb, None)
         if not tap:
             logger.error("Fn tap: CGEventTapCreate returned NULL — grant Accessibility / "
                          "Input Monitoring to Filect, then relaunch")
@@ -502,6 +614,9 @@ def register_global_hotkey(
     sequence: str,
     on_activated: Callable[[], None],
     on_released: Optional[Callable[[], None]] = None,
+    on_space: Optional[Callable[[bool], None]] = None,
+    on_escape: Optional[Callable[[], None]] = None,
+    on_control: Optional[Callable[[], None]] = None,
 ) -> Optional[Tuple[int, Any, int]]:
     """
     Register a global hotkey on macOS.
@@ -524,7 +639,8 @@ def register_global_hotkey(
     # CONSUMES it so it overrides the system Globe action and other apps.
     if (sequence or '').strip().lower() in ('fn', 'globe', 'function'):
         try:
-            result = _register_fn_tap(on_activated, on_released, override=True)
+            result = _register_fn_tap(on_activated, on_released, override=True,
+                                      on_space=on_space, on_escape=on_escape, on_control=on_control)
             if result:
                 return result
         except Exception as e:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,6 +141,13 @@ def list_sessions(limit: int = 100, cwd: Optional[str] = None) -> List[SessionIn
         projects = list(root.iterdir())
     except Exception:
         return []
+    if want:
+        # Fast path: Claude Code names a cwd's folder by swapping every non-alphanumeric for '-', so
+        # read just that folder instead of parsing every session on disk (hundreds). The cwd check
+        # below still applies, since the encoding is lossy; full scan if the folder isn't there.
+        enc = root / re.sub(r"[^A-Za-z0-9]", "-", want)
+        if enc.is_dir():
+            projects = [enc]
     for proj in projects:
         if not proj.is_dir():
             continue
@@ -156,6 +164,89 @@ def list_sessions(limit: int = 100, cwd: Optional[str] = None) -> List[SessionIn
             out.append(info)
     out.sort(key=lambda s: s.mtime, reverse=True)
     return out[:limit]
+
+
+def tool_result_text(content) -> str:
+    """Plain text of a tool result's content (a str, or a list of text/image blocks)."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for b in content:
+        if isinstance(b, dict):
+            if b.get("type") == "text":
+                parts.append(b.get("text") or "")
+            elif b.get("type") == "image":
+                parts.append("[image]")
+        elif isinstance(b, str):
+            parts.append(b)
+    return "\n".join(p for p in parts if p)
+
+
+def _parse_ts(s) -> Optional[float]:
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _session_file(session_id: str, cwd: Optional[str]) -> Optional[Path]:
+    root = _projects_root()
+    if cwd:                                      # same folder encoding as list_sessions' fast path
+        p = root / re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(cwd)) / f"{session_id}.jsonl"
+        if p.exists():
+            return p
+    return next(iter(root.glob(f"*/{session_id}.jsonl")), None)
+
+
+def load_transcript(session_id: str, cwd: Optional[str] = None) -> Optional[dict]:
+    """What happened in a saved conversation, for showing it in the notch: `steps` in order —
+    ("user", text) what you said, ("text", text) Claude's replies, ("tool", name, input, id) its
+    actions, ("result", tool_id, text, is_error) what each action returned — plus `duration`, the LAST
+    turn's length in seconds (None if unknown). Thinking and injected stubs are skipped. Reads the
+    whole file, so call it off the UI thread."""
+    path = _session_file(session_id, cwd)
+    if path is None:
+        return None
+    steps, turn_start, last_ts = [], None, None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                t = obj.get("type")
+                if t not in ("user", "assistant") or obj.get("isSidechain"):   # sidechain = a subagent's own chat
+                    continue
+                ts = _parse_ts(obj.get("timestamp"))
+                meta = bool(obj.get("isMeta"))       # injected notes ("[Image: original 390x3000…]")
+                content = (obj.get("message") or {}).get("content")
+                blocks = [{"type": "text", "text": content}] if isinstance(content, str) else (content or [])
+                for b in blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    bt = b.get("type")
+                    text = (b.get("text") or "").strip() if bt == "text" else ""
+                    if t == "user" and text and not meta and not text.startswith("<") \
+                            and not text.startswith("This session is being continued"):
+                        steps.append(("user", text))
+                        turn_start = ts                  # duration = the last turn
+                    elif t == "assistant" and text:
+                        steps.append(("text", text))
+                    elif t == "assistant" and bt == "tool_use":
+                        steps.append(("tool", b.get("name") or "", b.get("input") or {}, b.get("id") or ""))
+                    elif t == "user" and bt == "tool_result":
+                        steps.append(("result", b.get("tool_use_id") or "",
+                                      tool_result_text(b.get("content")), bool(b.get("is_error"))))
+                if ts:
+                    last_ts = ts
+    except Exception:
+        return None
+    dur = last_ts - turn_start if (turn_start and last_ts and last_ts >= turn_start) else None
+    return {"steps": steps, "duration": dur}
 
 
 def find_by_name(query: str, limit: int = 5) -> List[SessionInfo]:
@@ -266,7 +357,7 @@ def generate_title(prompt: str, max_words: int = 5) -> str:
     "hi go build me a small one page website" -> "Build Small One Page Website".
     """
     import re
-    text = (prompt or "").strip()
+    text = re.sub(r"\[screenshot \d+\]", " ", prompt or "").strip()   # receive-mode markers
     if not text:
         return ""
     head = re.split(r"[.!?\n]", text, 1)[0]

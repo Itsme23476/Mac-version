@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QPushButton, QFrame, QScrollArea, QCheckBox,
     QLineEdit, QListWidget, QListWidgetItem,
@@ -147,11 +147,12 @@ class AgentWorker(QObject):
     done = Signal(str)                       # key
 
     def __init__(self, key: str, cwd: str, prompt: str, resume: str | None = None, bypass: bool = False,
-                 model: str | None = None, effort: str | None = None):
+                 model: str | None = None, effort: str | None = None, images: list | None = None):
         super().__init__()
         self.key = key
         self._cwd = cwd
         self._prompt = prompt
+        self._images = list(images or [])     # fn + ⌃ + Space screenshots for this turn
         self._resume = resume
         self._bypass = bypass
         self._model = model
@@ -213,7 +214,7 @@ class AgentWorker(QObject):
         )
         self._runner = runner            # exposed so stop() can interrupt the live turn
         await runner.run(self._prompt, resume=self._resume, bypass=self._bypass,
-                         model=self._model, effort=self._effort)
+                         model=self._model, effort=self._effort, images=self._images)
 
 
 class _SessionLoader(QObject):
@@ -276,16 +277,20 @@ class AgentSession:
         self.resume = resume                 # claude session id being resumed, or None for a new chat
         self.session_id = resume or ""       # real claude id (known for sure after the first result)
         self.status = "working"              # working | needs_you | done | error | stopped
-        self.feed_lines: list[str] = []      # Details feed text, accumulated (to re-render on focus)
+        self.feed_lines: list[str] = []      # plain activity lines (the in-tab feed)
+        self.entries: list[dict] = []        # the notch's rich Details: turns + actions (details_view)
         self.last_action = ""                # latest step label (for show_working on focus)
         self.result_text = ""                # what Claude generated (for the done card)
         self.cost = 0.0
         self.approval_req = None             # pending ApprovalRequest while status == needs_you
         self.pending_followup = None         # a follow-up spoken while this one was still running
+        self.images: list[str] = []          # this turn's screenshots (fn + ⌃ + Space)
+        self.pending_images: list[str] = []  # …and the queued follow-up's
         self.stopping = False                # user hit Stop on THIS session
         self.thread = None
         self.worker = None
-        self.started_at = time.time()
+        self.started_at = time.time()        # when this turn started (or, for a picked-up past chat, its last activity)
+        self.duration = None                 # the finished turn's length in seconds (notch header timer)
 
     @property
     def running(self) -> bool:
@@ -295,6 +300,8 @@ class AgentSession:
 class AssistantPage(QWidget):
     _voice_routed = Signal(object, str)   # (SessionInfo|None, task) — legacy route_speech path
     _voice_decided = Signal(object)       # {intent, idx, task, candidates, focused_key} from the router
+    _recent_loaded = Signal(object)       # [SessionInfo] — past voice-agent chats for the rail
+    _transcript_loaded = Signal(str, object)   # (session id, load_transcript() dict|None)
 
     def __init__(self, main_window):
         super().__init__()
@@ -308,6 +315,7 @@ class AssistantPage(QWidget):
         self._overlay = None         # ambient notch (lazy; see _ensure_notch)
         self._rail = None            # left conversation rail (lazy; see _ensure_rail)
         self._resume_target = None   # {id, cwd, title} selected in the browser to continue
+        self._recent = []            # past voice-agent chats on disk (rail history); see _load_recent
         self._all_sessions = []      # cached list for in-memory search filtering
         self._loader_thread = None
         try:                           # model + reasoning effort (picked on the notch card, persisted)
@@ -320,6 +328,30 @@ class AssistantPage(QWidget):
         self._load_sessions()
         self._voice_routed.connect(self._on_voice_routed)
         self._voice_decided.connect(self._on_voice_decided)
+        self._recent_loaded.connect(self._on_recent_loaded)
+        self._transcript_loaded.connect(self._on_transcript_loaded)
+        self._load_recent()
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance().aboutToQuit.connect(self.shutdown)
+        except Exception:
+            pass
+
+    def shutdown(self):
+        """App quit: end every running agent and wait for its thread. Without this, quitting mid-task
+        (or in the first second, while past chats load) destroys a running QThread → Qt aborts with
+        "QThread: Destroyed while thread is still running" → a "Filect quit unexpectedly" crash."""
+        for sess in self._sessions.values():
+            if sess.worker is not None:
+                try:
+                    sess.worker.cancel()            # exits the SDK client → kills the claude subprocess
+                except Exception:
+                    pass
+        threads = [s.thread for s in self._sessions.values()] + [getattr(self, "_loader_thread", None)]
+        for t in threads:
+            if t is not None and t.isRunning():
+                t.quit()
+                t.wait(3000)                        # ponytail: a run that ignores cancel >3s still aborts
         self._last_notified_key = None   # which session the latest notification was about (click → focus)
         _tray = _get_or_create_tray()    # permanent Filect menu-bar icon + branded-notification channel
         if _tray is not None:
@@ -327,6 +359,20 @@ class AssistantPage(QWidget):
                 _tray.messageClicked.connect(self._on_notification_clicked)
             except Exception:
                 pass
+        # Keep the notch (top) + rail (left) present at idle so they're summonable without a task first.
+        QTimer.singleShot(1500, self._show_idle_overlays)
+
+    def _show_idle_overlays(self):
+        """When the app is open, show the notch nub (top) and rail strip (left) at idle — hover/click
+        either to open it and start a task, without having run anything first."""
+        try:
+            self._refresh_rail()             # rail strip (empty → 'No active chats' + New chat)
+        except Exception:
+            pass
+        try:
+            self._notch("rest_idle")         # notch idle nub (faint hint; hover/click opens it)
+        except Exception:
+            pass
 
     # ---- session registry helpers ----
     @property
@@ -649,7 +695,7 @@ class AssistantPage(QWidget):
         self._loader.moveToThread(self._loader_thread)
         self._loader_thread.started.connect(self._loader.run)
         self._loader.loaded.connect(self._on_sessions_loaded)
-        self._loader.loaded.connect(self._loader_thread.quit)
+        self._loader.loaded.connect(self._loader_thread.quit, Qt.DirectConnection)  # ends the thread the moment it's loaded, no UI round-trip
         self._loader_thread.start()
 
     def _on_sessions_loaded(self, sessions):
@@ -773,7 +819,7 @@ class AssistantPage(QWidget):
             _add("saved", None, ss.id, ss.cwd, ss.title)
         return cands
 
-    def run_voice_task(self, text: str, source: str = "voice"):
+    def run_voice_task(self, text: str, source: str = "voice", images=None):
         """Fn+Control entry. Route the spoken command to a NEW or RESUMED conversation via one
         quick LLM call (off the UI thread), then run it. The notch shows "Routing…" meanwhile, then
         names the one it picked. Falls back to a new conversation on any routing failure."""
@@ -786,7 +832,8 @@ class AssistantPage(QWidget):
         focused = self._focused
         focused_title = focused.title if focused else None
         candidates = self._build_voice_candidates(text)
-        _trace(f"{source} heard: {text!r} | focused={focused_title!r} | "
+        images = list(images or [])
+        _trace(f"{source} heard: {text!r} | focused={focused_title!r} | screenshots={len(images)} | "
                f"candidates={[c['title'] for c in candidates]}")
         self._notch("present")
         self._notch("set_title", "Routing…")
@@ -804,7 +851,7 @@ class AssistantPage(QWidget):
                 intent, idx, task = ("FOLLOW_UP" if focused_title else "NEW"), None, text
                 _trace(f"router FAILED ({e}) -> fallback {intent}")
             self._voice_decided.emit({"intent": intent, "idx": idx, "task": task,
-                                      "candidates": candidates,
+                                      "candidates": candidates, "images": images,
                                       "focused_key": focused.key if focused else None})
         threading.Thread(target=worker, daemon=True, name="filect-assistant-route").start()
 
@@ -812,19 +859,20 @@ class AssistantPage(QWidget):
         """Router decision (UI thread): continue the focused chat, resume a named one, or start new."""
         intent, idx, task = result["intent"], result["idx"], result["task"]
         cands, fkey = result["candidates"], result["focused_key"]
+        images = result.get("images") or []
         _trace(f"decided: {intent} idx={idx} task={task!r}")
 
         def _continue(sess, title):
             self._focus(sess.key)
             self._notch("set_title", f"↳ continuing “{title}”")   # visible cue (correctable)
             if sess.running:
-                sess.pending_followup = task
+                sess.pending_followup, sess.pending_images = task, images
                 _trace(f"  -> queue follow-up on {sess.key} '{title}' (running)")
                 self._notch("show_working", "Queued — will continue when this step finishes")
                 self._notch("flash")
             else:
                 _trace(f"  -> continue {sess.key} '{title}' (was idle)")
-                self.run_task(task, resume=sess.session_id or sess.resume, cwd=sess.cwd)
+                self.run_task(task, resume=sess.session_id or sess.resume, cwd=sess.cwd, images=images)
 
         if intent == "FOLLOW_UP" and fkey and fkey in self._sessions:
             _continue(self._sessions[fkey], self._sessions[fkey].title)
@@ -837,12 +885,12 @@ class AssistantPage(QWidget):
                 self._resume_target = {"id": c["id"], "cwd": c["cwd"], "title": c["title"]}
                 _trace(f"  -> resume saved '{c['title']}' id={(c['id'] or '')[:8]}")
                 self._notch("set_title", f"↳ continuing “{c['title']}”")
-                self.run_task(task, resume=c["id"], cwd=c["cwd"])
+                self.run_task(task, resume=c["id"], cwd=c["cwd"], images=images)
             return
         # NEW (or anything unresolved) → a fresh conversation.
         _trace("  -> NEW conversation")
         self._resume_target = None
-        self.run_task(task)
+        self.run_task(task, images=images)
 
     def _on_voice_routed(self, session, task):
         """Routing finished (UI thread): resume the matched conversation, or start a new one."""
@@ -861,7 +909,7 @@ class AssistantPage(QWidget):
         self.run_task(self.task_input.toPlainText(), self.bypass_check.isChecked())
 
     def run_task(self, prompt: str, bypass: bool | None = None,
-                 resume: str | None = None, cwd: str | None = None):
+                 resume: str | None = None, cwd: str | None = None, images=None):
         """Start a NEW agent conversation, or continue an existing one. New tasks each get their own
         AgentSession and run CONCURRENTLY. Resuming REUSES that conversation's AgentSession: queued as
         a follow-up if it's still running, or a fresh turn on the same claude session if it's idle — so
@@ -877,14 +925,14 @@ class AssistantPage(QWidget):
         if resume:
             existing = self._session_by_claude_id(resume)
             if existing is not None and existing.running:  # still working → queue a follow-up on it
-                existing.pending_followup = prompt
+                existing.pending_followup, existing.pending_images = prompt, list(images or [])
                 _trace(f"run_task: queue follow-up on {existing.key} '{existing.title}' (running)")
                 self._focus(existing.key)
                 self._notch("show_working", "Queued — will continue when this step finishes")
                 self._notch("flash")
                 return
             if existing is not None:                       # idle/finished → new turn, same session
-                self._restart_session(existing, prompt, bypass)
+                self._restart_session(existing, prompt, bypass, images)
                 return
         import os
         workdir = cwd or DEFAULT_WORKSPACE
@@ -896,16 +944,17 @@ class AssistantPage(QWidget):
         key = f"s{next(_session_keys)}"
         sess = AgentSession(key, workdir, prompt, display, bypass,
                             self._model or None, self._effort or None, resume=resume)
+        sess.images = list(images or [])
         self._sessions[key] = sess
         self._start_worker(sess, resume)
 
-    def _restart_session(self, sess, prompt, bypass):
+    def _restart_session(self, sess, prompt, bypass, images=None):
         """Continue a finished conversation with a new turn, REUSING its AgentSession (one conversation
         = one entry over its whole life — no duplicate rail slot)."""
         import time
-        sess.prompt, sess.bypass = prompt, bypass
+        sess.prompt, sess.bypass, sess.images = prompt, bypass, list(images or [])
         sess.status, sess.result_text, sess.cost, sess.approval_req = "working", "", 0.0, None
-        sess.started_at = time.time()
+        sess.started_at, sess.duration = time.time(), None
         _trace(f"restart {sess.key} '{sess.title}' (new turn, resume={sess.session_id or sess.resume})")
         self._start_worker(sess, sess.session_id or sess.resume)
 
@@ -917,7 +966,7 @@ class AssistantPage(QWidget):
         self.status_label.setText("Running…")
         sess.thread = QThread(self)
         sess.worker = AgentWorker(sess.key, sess.cwd, sess.prompt, resume=resume_id, bypass=sess.bypass,
-                                  model=sess.model, effort=sess.effort)
+                                  model=sess.model, effort=sess.effort, images=sess.images)
         sess.worker.moveToThread(sess.thread)
         sess.thread.started.connect(sess.worker.run)
         # BOUND methods, never lambdas: Qt queues a bound-method slot to its receiver's (main) thread,
@@ -948,6 +997,8 @@ class AssistantPage(QWidget):
             if sess.session_id or sess.resume:
                 self._append(f"↻ continuing session {(sess.session_id or sess.resume)[:8]}…\n")
             self._append(f"▶ {sess.prompt}\n")
+            if sess.images:
+                self._append(f"🖼 {len(sess.images)} screenshot(s) attached\n")
             if sess.bypass:
                 self._append("⚡ Bypass mode: running without approval prompts.\n")
             self._notch("present")                  # resets the notch Details feed
@@ -956,6 +1007,10 @@ class AssistantPage(QWidget):
             self._notch("show_working", "Starting…", "")
             self._notch("flash")                    # brief 'receipt' so the trigger is visibly confirmed
             sess.feed_lines = [f"▸ {sess.prompt}"]  # mirror what the notch feed now holds
+            # Rich Details keep the whole conversation: a continued chat shows its earlier turns too.
+            from app.ui import details_view
+            details_view.add_step(sess.entries, "user", text=sess.prompt, images=sess.images)
+            self._notch("set_details", sess.entries)
         else:
             self._render_focused()
         self._refresh_rail()
@@ -968,7 +1023,7 @@ class AssistantPage(QWidget):
         self._notch("present")
         self._notch("load_state", sess.title, list(sess.feed_lines), sess.status,
                     sess.last_action, sess.approval_req, sess.result_text, sess.cost,
-                    sess.session_id, sess.prompt)
+                    sess.session_id, sess.prompt, sess.started_at, sess.duration, sess.entries)
         self.feed.clear()
         self._append(f"▶ {sess.prompt}\n")
         for ln in sess.feed_lines[1:]:              # [0] is the "▸ prompt" seed, already shown above
@@ -984,26 +1039,137 @@ class AssistantPage(QWidget):
             rail = ConversationRail()
             rail.session_clicked.connect(self._on_rail_clicked)
             rail.new_requested.connect(self._clear_resume)
+            rail.recent_clicked.connect(self._on_recent_clicked)
             self._rail = rail
         except Exception:
             pass
         return self._rail
 
     def _on_rail_clicked(self, key):
-        """A rail row — focus that conversation (it becomes the pointer + the resume target)."""
-        sess = self._sessions.get(key)
-        if sess is None:
+        """A rail row from this run — show that conversation in the notch (live if it's running)."""
+        if self._sessions.get(key) is None:
             return
-        _trace(f"rail click -> focus {key} '{sess.title}'")
+        _trace(f"rail click -> show {key} '{self._sessions[key].title}'")
+        self._show_in_notch(key)
+
+    def _show_in_notch(self, key):
+        """Selecting a conversation drops the notch down showing it (VoiceOS behaviour): it becomes the
+        focus pointer + resume target, and the notch opens on it. Only a conversation SELECT does this —
+        clicking the rail strip or the notch itself never opens the other."""
+        sess = self._sessions[key]
         self._focus(key)
+        self._notch("open_full")
         self._resume_target = {"id": sess.session_id or sess.resume, "cwd": sess.cwd, "title": sess.title}
+
+    def _on_recent_clicked(self, sid):
+        """A past chat from disk — load its transcript off the UI thread (_on_transcript_loaded shows it).
+        Already picked up this run → just show it."""
+        live = self._session_by_claude_id(sid)
+        if live is not None:
+            self._show_in_notch(live.key)
+            return
+        info = next((r for r in self._recent if r.id == sid), None)
+        if info is None:
+            return
+        import threading
+
+        def worker():
+            try:
+                from app.core.agent_sessions import load_transcript
+                data = load_transcript(sid, info.cwd)
+            except Exception:
+                data = None
+            try:
+                self._transcript_loaded.emit(sid, data)
+            except RuntimeError:                    # page torn down before the read finished (quit)
+                pass
+        threading.Thread(target=worker, daemon=True, name="filect-assistant-transcript").start()
+
+    def _on_transcript_loaded(self, sid, data):
+        """Pick a past chat back up and show it: it becomes a finished (not running) conversation with its
+        real transcript, and the focus pointer — so your next spoken or typed command continues THIS
+        chat (the router follows the focused session → FOLLOW_UP → run_task resumes the same Claude
+        session). Its time stays its last activity, so just viewing it doesn't bump it to Today."""
+        live = self._session_by_claude_id(sid)       # a double-click loads twice — show, don't duplicate
+        if live is not None:
+            self._show_in_notch(live.key)
+            return
+        info = next((r for r in self._recent if r.id == sid), None)
+        if info is None:
+            return
+        lines, prompt, result, entries = self._transcript_view(data) if data else ([], "", "", [])
+        prompt = prompt or info.preview or info.title
+        sess = AgentSession(f"s{next(_session_keys)}", info.cwd, prompt, info.title,
+                            self.bypass_check.isChecked(), self._model or None, self._effort or None,
+                            resume=sid)
+        sess.status, sess.result_text = "done", result
+        sess.feed_lines = lines or [f"▸ {prompt}"]
+        sess.entries = entries or [{"id": "0", "kind": "user", "text": prompt}]
+        sess.started_at, sess.duration = info.mtime, (data or {}).get("duration")
+        self._sessions[sess.key] = sess
+        _trace(f"recent click -> show {sess.key} '{sess.title}' id={sid[:8]} ({len(sess.feed_lines)} lines)")
+        self._show_in_notch(sess.key)
+
+    def _transcript_view(self, data):
+        """(feed lines, last prompt, last turn's replies, rich entries) for a saved conversation, in the
+        SAME format live tasks use — '▸ what you said', readable tool labels ('Writing index.html'),
+        Claude's text as-is; the entries carry each action's input + result for the rich Details — so a
+        past chat reads exactly like one you watched run."""
+        from app.core.agent_runner import _tool_detail
+        from app.ui import details_view
+        lines, prompt, result, entries = [], "", [], []
+        for st in data.get("steps", []):
+            if st[0] == "result":                    # ✓/✗ + output for its action (entries only)
+                details_view.add_step(entries, "result", tool_id=st[1], text=st[2], is_error=st[3])
+            elif st[0] == "user":
+                prompt, result = st[1], []           # result = the LAST turn's replies, like live
+                lines.append(f"▸ {st[1]}")
+                details_view.add_step(entries, "user", text=st[1])
+            elif st[0] == "text":
+                result.append(st[1])
+                lines.append(st[1])
+                details_view.add_step(entries, "text", text=st[1])
+            else:
+                label = self._tool_label(st[1], _tool_detail(st[1], st[2]))
+                if not lines or lines[-1] != label:
+                    lines.append(label)
+                details_view.add_step(entries, "tool", tool=st[1], input=st[2],
+                                      tool_id=st[3] if len(st) > 3 else "")
+        return lines[-300:], prompt, " ".join(result), entries   # ponytail: in-tab feed keeps the last 300 lines
+
+    def _load_recent(self):
+        """Read past voice-agent chats (the agent's workspace folder) off the UI thread — it touches
+        disk — and hand them back through a signal to a bound method, so the rail updates on the main
+        thread."""
+        import threading
+
+        def worker():
+            try:
+                from app.core.agent_sessions import list_sessions
+                items = [s for s in list_sessions(limit=300, cwd=DEFAULT_WORKSPACE)
+                         if not self._junk_session(s)]          # the rail keeps the last 30 days
+            except Exception:
+                items = []
+            try:
+                self._recent_loaded.emit(items)
+            except RuntimeError:                    # page torn down before the read finished (quit)
+                pass
+        threading.Thread(target=worker, daemon=True, name="filect-assistant-recent").start()
+
+    def _on_recent_loaded(self, items):
+        self._recent = list(items or [])
+        if self._rail is not None:          # else the idle overlays (or the first task) will show it
+            self._refresh_rail()
 
     def _refresh_rail(self, key: str | None = None):
         rail = self._ensure_rail()
         if rail is None:
             return
+        # Past chats not already in this run's sessions (a picked-up or resumed chat is shown once).
+        live_ids = {s.session_id or s.resume for s in self._sessions.values()} - {None, ""}
+        recent = [r for r in self._recent if r.id not in live_ids]
         try:
-            rail.update_sessions(list(self._sessions.values()), self._focused_key)
+            rail.update_sessions(list(self._sessions.values()), self._focused_key, recent)
         except Exception:
             pass
 
@@ -1068,23 +1234,36 @@ class AssistantPage(QWidget):
         if sess is None:
             return
         focused = (key == self._focused_key)
+        from app.ui import details_view
         if step.kind == "tool":
             label = self._tool_label(step.tool, getattr(step, "detail", ""))
             sess.last_action, sess.status = label, "working"
             _trace(f"{key} · {label}")
             if not sess.feed_lines or sess.feed_lines[-1] != label:
                 sess.feed_lines.append(label)
+            details_view.add_step(sess.entries, "tool", tool=step.tool, input=getattr(step, "input", None),
+                                  tool_id=getattr(step, "tool_id", ""))
             if focused:
                 self._append(f"  → {label}")
-                self._notch("show_working", label, "")    # readable action, also into the Details feed
+                self._notch("set_details", sess.entries)
+                self._notch("show_working", label, "")    # the readable action line
         elif step.kind == "text" and step.text:
             sess.result_text = (sess.result_text + " " + step.text).strip()
             sess.status = "working"
             if not sess.feed_lines or sess.feed_lines[-1] != step.text:
                 sess.feed_lines.append(step.text)
+            details_view.add_step(sess.entries, "text", text=step.text)
             if focused:
                 self._append(step.text)
+                self._notch("set_details", sess.entries)
                 self._notch("show_working", step.text, "")
+        elif step.kind == "result":                  # attaches ✓/✗ + output to its action
+            details_view.add_step(sess.entries, "result", text=step.text, tool_id=step.tool_id,
+                                  is_error=getattr(step, "is_error", False))
+            if getattr(step, "is_error", False):
+                _trace(f"{key} ✗ {step.text[:120]!r}")
+            if focused:
+                self._notch("set_details", sess.entries)
         self._refresh_rail(key)
 
     def _on_approval(self, key, req):
@@ -1123,6 +1302,8 @@ class AssistantPage(QWidget):
         if session_id:                              # real claude id — so a follow-up continues it
             sess.session_id = session_id
         sess.cost, sess.status = float(cost or 0.0), "done"
+        import time
+        sess.duration = time.time() - sess.started_at
         _trace(f"{key} DONE '{sess.title}' sid={session_id or '(none)'} cost=${float(cost or 0):.4f} "
                f"focused={key == self._focused_key}")
         if key == self._focused_key:
@@ -1181,7 +1362,8 @@ class AssistantPage(QWidget):
         # A follow-up was spoken while this was running — send it now, continuing the SAME chat.
         if sess.pending_followup:
             text, sess.pending_followup = sess.pending_followup, None
-            self.run_task(text, resume=sess.session_id or sess.resume, cwd=sess.cwd)
+            imgs, sess.pending_images = sess.pending_images, []
+            self.run_task(text, resume=sess.session_id or sess.resume, cwd=sess.cwd, images=imgs)
             return
         if key == self._focused_key:
             self.card.setVisible(False)
