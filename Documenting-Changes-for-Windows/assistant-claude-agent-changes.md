@@ -273,3 +273,35 @@ Live-verified on Mac:
 - A real Claude correctly named the red-circled "Share" button, which proves the images and marks reach the model.
 
 Not yet live-verified: the fn+⌃+Space key path on the user's own machine, and notch hover (parked).
+
+## 7. Release fixes (Mac v14.10.0, 2026-11-04)
+
+These were found while testing the first packaged build. Check each one against the Windows code
+yourself; the Mac side can't see it.
+
+### 7a. Crash on quit while an agent runs — **BOTH platforms (Qt)**
+- Bug: quitting mid-task (or in the first second after launch, while past chats load) destroyed a
+  running QThread. Qt aborts with `QThread: Destroyed while thread '' is still running`, and the
+  user sees an "app quit unexpectedly" crash.
+- Fix in `assistant_page.py`:
+  - `AssistantPage.shutdown()` is connected to `QApplication.aboutToQuit`. It calls
+    `worker.cancel()` on every live session (that kills the claude subprocess), then
+    `quit()` + `wait(3000)` on every session thread and on `_loader_thread`.
+  - The session loader's `loaded → thread.quit` connection is now `Qt.DirectConnection`, so the
+    loader thread ends as soon as loading finishes instead of waiting on the UI event loop.
+- Test: `tests/test_rail_recent.py::test_quit_mid_task_stops_threads`.
+
+### 7b. Agent couldn't start from a Finder-launched app — **Mac-only cause; check the Windows equivalent**
+- Bug: a Finder-launched app only gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and the PyInstaller
+  build doesn't bundle the SDK's own `claude` binary. The SDK picked an old npm `claude`
+  (`#!/usr/bin/env node`) that couldn't find node → exit 127 on every task. The agent's Bash tool
+  also couldn't see Homebrew/npm tools.
+- Mac fix: `agent_runner.use_login_path()`. Once, before launching claude (`AgentRunner.run`
+  and `intent_router._open`), it merges the login-shell PATH (`$SHELL -ilc`) plus
+  `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` into `os.environ["PATH"]`.
+- **Windows:** the login-shell part doesn't apply, but the same failure can happen if the
+  packaged app can't find `claude.exe`. Launch the packaged app from the Start menu (not a
+  terminal) and run one agent task. If it fails with CLINotFoundError or a ProcessError, add the
+  Claude install dir (e.g. `%USERPROFILE%\.local\bin`) to PATH the same way, or pass `cli_path`
+  in `ClaudeAgentOptions`.
+- Test: `tests/test_agent_path.py`.

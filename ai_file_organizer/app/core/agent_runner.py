@@ -25,6 +25,39 @@ DEFAULT_AUTO_ALLOW: Set[str] = {
     "Read", "Glob", "Grep", "NotebookRead", "TodoWrite", "WebFetch", "WebSearch",
 }
 
+_login_path_done = False
+
+
+def use_login_path():
+    """Adopt the user's login-shell PATH, once, before launching `claude`. A Finder-launched app
+    only gets PATH=/usr/bin:/bin:/usr/sbin:/sbin: the SDK then picked an old npm `claude`
+    (`#!/usr/bin/env node`) that can't find node → exit 127 → every task failed, and the agent's own
+    commands couldn't see Homebrew/npm tools. With the login PATH it uses the same `claude` (and
+    tools) Terminal would."""
+    global _login_path_done
+    if _login_path_done:
+        return
+    _login_path_done = True
+    import pwd
+    import subprocess
+    home = os.path.expanduser("~")
+    entries = []
+    try:
+        shell = pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
+        out = subprocess.run([shell, "-ilc", 'printf "\\n__FILECT_PATH__%s\\n" "$PATH"'],
+                             capture_output=True, text=True, timeout=5,
+                             stdin=subprocess.DEVNULL).stdout
+        line = next((l for l in out.splitlines() if l.startswith("__FILECT_PATH__")), "")
+        entries = line[len("__FILECT_PATH__"):].split(":") if line else []
+    except Exception as e:
+        logger.warning(f"[agent] login PATH unavailable ({e}); using common locations")
+    # where `claude` / Homebrew / npm usually live, in case the shell gave us nothing
+    entries += [f"{home}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+    current = os.environ.get("PATH", "").split(":")
+    merged = list(dict.fromkeys(p for p in entries + current if p))
+    os.environ["PATH"] = ":".join(merged)
+    logger.info(f"[agent] PATH for claude: {len(merged)} dirs (login shell gave {len(entries) - 3})")
+
 
 @dataclass
 class Step:
@@ -187,6 +220,7 @@ class AgentRunner:
         mode, the agent edits files and runs commands on its own. Use only for trusted tasks.
         """
         from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, ResultMessage
+        use_login_path()
         # setting_sources=[] isolates from the user's global ~/.claude permissions in both modes.
         common = dict(cwd=self.cwd, setting_sources=[], resume=resume, max_turns=max_turns)
         if model:            # '' / None -> let Claude Code use its default model

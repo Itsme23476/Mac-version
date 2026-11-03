@@ -95,6 +95,8 @@ class IntentRouter:
 
     async def _open(self):
         from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+        from app.core.agent_runner import use_login_path
+        use_login_path()
         opts = ClaudeAgentOptions(model=self._model, setting_sources=[], max_turns=1,
                                   system_prompt=_SYS, allowed_tools=[])
         self._client = ClaudeSDKClient(options=opts)
