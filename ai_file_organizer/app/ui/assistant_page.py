@@ -331,6 +331,15 @@ class AssistantPage(QWidget):
         self._recent_loaded.connect(self._on_recent_loaded)
         self._transcript_loaded.connect(self._on_transcript_loaded)
         self._load_recent()
+        self._last_notified_key = None   # which session the latest notification was about (click → focus)
+        _tray = _get_or_create_tray()    # permanent Filect menu-bar icon + branded-notification channel
+        if _tray is not None:
+            try:
+                _tray.messageClicked.connect(self._on_notification_clicked)
+            except Exception:
+                pass
+        # Keep the notch (top) + rail (left) present at idle so they're summonable without a task first.
+        QTimer.singleShot(1500, self._show_idle_overlays)
         try:
             from PySide6.QtWidgets import QApplication
             QApplication.instance().aboutToQuit.connect(self.shutdown)
@@ -352,15 +361,6 @@ class AssistantPage(QWidget):
             if t is not None and t.isRunning():
                 t.quit()
                 t.wait(3000)                        # ponytail: a run that ignores cancel >3s still aborts
-        self._last_notified_key = None   # which session the latest notification was about (click → focus)
-        _tray = _get_or_create_tray()    # permanent Filect menu-bar icon + branded-notification channel
-        if _tray is not None:
-            try:
-                _tray.messageClicked.connect(self._on_notification_clicked)
-            except Exception:
-                pass
-        # Keep the notch (top) + rail (left) present at idle so they're summonable without a task first.
-        QTimer.singleShot(1500, self._show_idle_overlays)
 
     def _show_idle_overlays(self):
         """When the app is open, show the notch nub (top) and rail strip (left) at idle — hover/click

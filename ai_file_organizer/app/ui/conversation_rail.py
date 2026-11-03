@@ -18,8 +18,12 @@ from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QPoint, QEasi
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
                                QScrollArea)
 
+import logging
+
 from app.ui import notch_panel
 from app.ui.claude_overlay import _TypeField   # a QLineEdit that runs a callback on click (keys the panel)
+
+logger = logging.getLogger(__name__)
 
 RAIL_TITLE = "Filect Conversations"   # unique — notch_panel finds the NSWindow by this
 RAIL_W = 272
@@ -190,6 +194,7 @@ class ConversationRail(QWidget):
             "border-radius:10px;padding:6px 10px;font-size:12px;}"
             "QLineEdit#railSearch:focus{border-color:rgba(217,119,87,0.6);}")
         self._search.textChanged.connect(lambda _t: self._render())
+        self._search.installEventFilter(self)
         col.addWidget(self._search)
         self._new_btn = QPushButton("＋  New chat")
         self._new_btn.setCursor(Qt.PointingHandCursor)
@@ -228,6 +233,7 @@ class ConversationRail(QWidget):
         if first_show:
             self.show()
             self._configure()
+            logger.info(f"[rail] shown at idle edge (x={self.x()}, y={self.y()}, h={self.height()})")
         if self._groups and self._groups[0][0] == "RUNNING":
             self._peek()            # something's running → slide open briefly, then auto-tuck
 
@@ -289,6 +295,33 @@ class ConversationRail(QWidget):
                 ns.makeKeyWindow()
         except Exception:
             pass
+        logger.info("[rail] search clicked")
+        QTimer.singleShot(250, self._log_search_focus)
+
+    def _log_search_focus(self):
+        """Diagnostic: after a click on the search box, did the panel take the keyboard?"""
+        try:
+            from AppKit import NSApp
+            from PySide6.QtWidgets import QApplication
+            ns = notch_panel._ns_window(RAIL_TITLE)
+            kw = NSApp.keyWindow()
+            fw = QApplication.focusWidget()
+            logger.info(f"[rail] search focus: panel_key={bool(ns and ns.isKeyWindow())} "
+                        f"nonactivating={bool(ns and ns.styleMask() & 128)} app_active={NSApp.isActive()} "
+                        f"key_window={kw.title() if kw else None!r} qt_focus={type(fw).__name__ if fw else None} "
+                        f"field_focused={self._search.hasFocus()}")
+        except Exception as e:
+            logger.info(f"[rail] search focus: n/a ({e})")
+
+    def eventFilter(self, obj, e):
+        """Diagnostic: do keystrokes reach the search box, and when/why does it lose focus?"""
+        from PySide6.QtCore import QEvent
+        if obj is self._search:
+            if e.type() == QEvent.KeyPress:
+                logger.info(f"[rail] search key: {e.text()!r}")
+            elif e.type() == QEvent.FocusOut:
+                logger.info(f"[rail] search lost focus (reason={int(e.reason())})")
+        return super().eventFilter(obj, e)
 
     # -- collapse / expand (slide flush against the left edge) -----------------
     def _reanchor(self):
@@ -329,10 +362,14 @@ class ConversationRail(QWidget):
         QTimer.singleShot(2600, lambda: self._set_expanded(False) if not self._hovered else None)
 
     def enterEvent(self, e):
+        if not self._hovered:
+            logger.info("[rail] hover in")
         self._hovered = True
         self._set_expanded(True)
 
     def leaveEvent(self, e):
+        if self._hovered:
+            logger.info(f"[rail] hover out (pinned={self._pinned})")
         self._hovered = False
         if not self._pinned:          # a click pins it open; otherwise tuck back when you leave
             self._set_expanded(False)
@@ -340,6 +377,7 @@ class ConversationRail(QWidget):
     def mousePressEvent(self, e):
         # A click on the rail body (not a row — rows consume their own click) TOGGLES it: opens+pins,
         # or closes if it's already open. Independent of the notch — clicking the rail never opens it.
+        logger.info(f"[rail] click → {'close' if self._pinned else 'open'}")
         if self._pinned:
             self.collapse()
         else:

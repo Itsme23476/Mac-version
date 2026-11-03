@@ -302,6 +302,29 @@ def test_continued_chats_survive_restart():
     print("continued chats: backfilled + remembered, back on the rail after a restart  OK")
 
 
+def test_idle_rail_shown_before_any_request():
+    """At launch, BEFORE any request, the rail (left) must exist so you can hover/click it open. A bad
+    edit once moved this startup code into shutdown(), so nothing appeared until the first task."""
+    calls = []
+    real_idle = ap.AssistantPage.__dict__.get("_show_idle_overlays")
+    ap.AssistantPage._show_idle_overlays = lambda self: calls.append(self)
+    try:
+        page = ap.AssistantPage(_MW())
+        assert page._last_notified_key is None              # the rest of __init__ ran too
+        deadline = time.time() + 3
+        while not calls and time.time() < deadline:
+            pump(50)
+        assert calls == [page], "idle overlays never scheduled at startup"
+    finally:
+        ap.AssistantPage._show_idle_overlays = real_idle
+    page._sessions, page._recent = {}, []
+    page._refresh_rail()                                    # what the idle timer does for the rail
+    assert page._rail is not None and page._rail.isVisible(), "no rail at idle"
+    page._rail.hide()
+    page.shutdown()
+    print("idle: rail scheduled + shown at launch, before any request  OK")
+
+
 def test_quit_mid_task_stops_threads():
     """Quitting while an agent runs must stop its thread first — else Qt aborts on quit
     ("QThread: Destroyed while thread is still running")."""
@@ -327,5 +350,6 @@ if __name__ == "__main__":
     test_select_past_chat_shows_it_in_notch()
     test_select_running_chat_opens_live_view()
     test_continued_chats_survive_restart()
+    test_idle_rail_shown_before_any_request()
     test_quit_mid_task_stops_threads()
     print("test_rail_recent OK")
