@@ -311,7 +311,7 @@ class _SendButton(QPushButton):
         p.end()
 
 
-HOVER_BODY_H = 48       # idle hover bar: height below the notch band (the input row + the fade)
+HOVER_BODY_H = 56       # idle hover bar: height below the notch band (the input row + the fade)
 HOVER_SHOULDER = 12     # its top corners curve into the screen edge
 HOVER_DWELL_MS = 220    # rest the cursor on the notch this long before it grows (VoiceOS ~0.3s)
 HOVER_GRACE_MS = 280    # after the cursor leaves, wait this long before tucking back
@@ -339,38 +339,39 @@ def _orb_pixmap(px: int):
 class _HoverBar(QWidget):
     """Idle hover, VoiceOS-style: the notch grows into a wider black bar — a lavender orb beside the
     notch and a "Type or hold fn ⌃ to speak" input under it — fading to see-through at the bottom.
-    Enter submits like the card's type field. A press anywhere else is IGNORED so it reaches the
-    overlay, whose own click handling opens the full card — the notch's behaviour is unchanged."""
+    Enter submits like the card's type field; a click anywhere on it puts the cursor in the input."""
     submitted = Signal(str)
 
     def __init__(self, on_field_click, parent=None):
         super().__init__(parent)
         self.field_clicked = False           # clicked into the input → stay a bit longer on leave
 
+        self._on_field_click = on_field_click  # keys the panel so it can take typing
+
         def _click():
             self.field_clicked = True
-            on_field_click()                  # key the panel so it can take typing
+            on_field_click()
         self._orb = QLabel(self)
-        self._orb.setFixedSize(14, 14)
-        self._orb.setPixmap(_orb_pixmap(14))
+        self._orb.setFixedSize(16, 16)
+        self._orb.setPixmap(_orb_pixmap(16))
         self.field = _TypeField(_click, self)
         self.field.setStyleSheet("QLineEdit{background:transparent;border:none;color:#F2F2F4;"
-                                 "font-size:13px;padding:0;}")
+                                 "font-size:14px;padding:0;}")
         self.field.returnPressed.connect(self._submit)
-        chip = "background-color:#2A2A2E; color:#A3A3AB; font-size:10px;"
+        chip = "background-color:#2A2A2E; color:#A3A3AB; font-size:11px;"
         self._hint = QLabel(self)
         self._hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._hint.setTextFormat(Qt.RichText)
         self._hint.setText(f"Type or hold <span style='{chip}'>&nbsp;fn&nbsp;</span> "
                            f"<span style='{chip}'>&nbsp;⌃ control&nbsp;</span> to speak")
-        self._hint.setStyleSheet("background:transparent;color:#8E8E96;font-size:13px;")
+        self._hint.setStyleSheet("background:transparent;color:#8E8E96;font-size:14px;")
         self.field.textChanged.connect(lambda t: self._hint.setVisible(not t))
 
     def place(self, notch_band: int) -> None:
         """Orb in the notch band beside the notch (left); the input row just below the band."""
         s = HOVER_SHOULDER
-        self._orb.move(s + 14, max(4, (notch_band - 14) // 2))
-        row = (s + 14, notch_band + 6, max(40, self.width() - 2 * s - 28), 26)
+        self._orb.move(s + 16, max(4, (notch_band - 16) // 2))
+        row = (s + 16, notch_band + 8, max(40, self.width() - 2 * s - 32), 30)
         self.field.setGeometry(*row)
         self._hint.setGeometry(*row)
 
@@ -409,7 +410,12 @@ class _HoverBar(QWidget):
         p.end()
 
     def mousePressEvent(self, e) -> None:
-        e.ignore()                            # → ClaudeOverlay.mousePressEvent (opens the full card)
+        # A click anywhere on the bar = "I want to type": put the cursor in the input — same look,
+        # no switch to a different card (Damianos: hover and click must be the same thing).
+        self.field_clicked = True
+        self._on_field_click()
+        self.field.setFocus()
+        e.accept()
 
 
 class ClaudeOverlay(QWidget):
@@ -422,6 +428,7 @@ class ClaudeOverlay(QWidget):
     model_changed = Signal(str, str)   # (model, effort) picked on the card's model pill
     stop_clicked = Signal()            # "Stop" pressed while a task is running
     submit_text = Signal(str)          # a typed task submitted from the bottom input field
+    collapsed = Signal()               # the open card tucked back into the notch
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1390,7 +1397,7 @@ class ClaudeOverlay(QWidget):
     # -- idle hover bar (VoiceOS-style) ------------------------------------------
     def _hover_w(self) -> int:
         nw = notch_panel.notch_width() or STRIP_W
-        return max(300, min(400, int(nw * 1.9)))
+        return max(330, min(420, int(nw * 2.1)))
 
     def _show_hover_bar(self) -> None:
         if (self._state != "idle" or not self._minimized or not self.isVisible()
@@ -1514,6 +1521,7 @@ class ClaudeOverlay(QWidget):
         self.resize(sw, self._min_h())
         self._reanchor()
         self._reassert()
+        self.collapsed.emit()
 
     def _apply_minimized_chrome(self, minimized: bool) -> None:
         """Show just the handle (minimized) or the full card (expanded). When minimized we also

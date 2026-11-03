@@ -60,22 +60,32 @@ def test_idle_hover_grows_and_tucks_back():
     print("idle hover: grows on rest, tucks back on leave, keeps a draft, Enter submits  OK")
 
 
-def test_click_on_bar_still_opens_full_card():
+def test_click_on_bar_types_in_place():
+    """Clicking the hover bar puts the cursor in ITS input — same look, no switch to the old card."""
     real = co.QCursor
     try:
         ov = _overlay()
         _cursor(ov, True); pump(450)
         assert ov._hover_bar_on
+        w = ov.width()
         click = QMouseEvent(QEvent.MouseButtonPress, QPointF(5, 5), QPointF(5, 5), Qt.LeftButton,
                             Qt.LeftButton, Qt.NoModifier)
-        ov.mousePressEvent(click)                          # what an (ignored) press on the bar reaches
+        ov._hover_bar.mousePressEvent(click)
         pump(50)
-        assert not ov._minimized and ov._pinned and not ov._hover_bar_on, "click opens the full card"
-        assert ov.width() == co.WIDGET_W
+        assert ov._hover_bar_on and ov._minimized and ov.width() == w, "stays the same bar"
+        assert ov._hover_bar.field_clicked
+        _cursor(ov, False); pump(500)
+        assert ov._hover_bar_on, "clicked into it → it waits longer before tucking away"
     finally:
         co.QCursor = real
     ov.hide()
-    print("click on the hover bar: opens the full card, as before  OK")
+    print("click on the hover bar: cursor in its input, same bar (no old card)  OK")
+
+
+def test_bigger_bar():
+    ov = _overlay()
+    assert ov._hover_w() >= 330 and co.HOVER_BODY_H == 56
+    ov.hide()
 
 
 def test_live_task_keeps_status_pill():
@@ -100,6 +110,7 @@ def test_live_task_keeps_status_pill():
 
 if __name__ == "__main__":
     test_idle_hover_grows_and_tucks_back()
-    test_click_on_bar_still_opens_full_card()
+    test_click_on_bar_types_in_place()
+    test_bigger_bar()
     test_live_task_keeps_status_pill()
     print("test_notch_hover OK")

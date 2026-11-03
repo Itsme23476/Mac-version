@@ -421,6 +421,41 @@ def test_new_chat_opens_blank_notch():
     print("new chat: focus cleared, notch open on a blank Ready card  OK")
 
 
+def test_notch_returns_to_last_sent_chat_or_default():
+    """Damianos' rule: nothing sent yet → view a past chat, close the notch → the blank default. After
+    you've SENT a request, closing a merely-viewed chat brings the notch back to that last chat."""
+    page = ap.AssistantPage(_MW())
+    page._sessions, page._recent = {}, []
+    ov = page._ensure_notch()
+
+    def chat(key, title):
+        s = ap.AgentSession(key, WS, title, title, True, "opus", "high", resume=f"sid-{key}")
+        s.status, s.feed_lines = "done", [f"▸ {title}"]
+        page._sessions[key] = s
+        return s
+
+    viewed = chat("s1", "Old essay chat")
+    page._show_in_notch("s1"); pump(50)                   # picked from the rail, nothing sent
+    assert page._focused_key == "s1"
+    ov.minimize_panel(); pump(50)                         # close the notch
+    assert page._focused_key is None and page._resume_target is None and ov._state == "idle"
+
+    chat("s2", "Fix the landing page")
+    page._last_sent_key = "s2"                            # you sent a request in s2 this session
+    page._focused_key = "s2"
+    page._show_in_notch("s1"); pump(50)                   # then just looked at s1 again
+    ov.minimize_panel(); pump(50)
+    assert page._focused_key == "s2", "closing returns the notch to your last chat"
+    assert ov._transcript.text() == "Fix the landing page"
+
+    page._show_in_notch("s2"); pump(50)
+    ov.minimize_panel(); pump(50)
+    assert page._focused_key == "s2", "your last chat itself stays put"
+    ov.hide()
+    page.shutdown()
+    print("notch close: default if nothing sent, else back to your last chat  OK")
+
+
 def test_quit_mid_task_stops_threads():
     """Quitting while an agent runs must stop its thread first — else Qt aborts on quit
     ("QThread: Destroyed while thread is still running")."""
@@ -450,5 +485,6 @@ if __name__ == "__main__":
     test_hover_cues_click_opens()
     test_drawer_leave_lock_and_search()
     test_new_chat_opens_blank_notch()
+    test_notch_returns_to_last_sent_chat_or_default()
     test_quit_mid_task_stops_threads()
     print("test_rail_recent OK")

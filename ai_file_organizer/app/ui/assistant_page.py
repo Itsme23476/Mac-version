@@ -332,6 +332,7 @@ class AssistantPage(QWidget):
         self._transcript_loaded.connect(self._on_transcript_loaded)
         self._load_recent()
         self._last_notified_key = None   # which session the latest notification was about (click → focus)
+        self._last_sent_key = None       # the chat you last SENT a request in (the notch returns to it)
         _tray = _get_or_create_tray()    # permanent Filect menu-bar icon + branded-notification channel
         if _tray is not None:
             try:
@@ -404,6 +405,7 @@ class AssistantPage(QWidget):
         ov.model_changed.connect(self._on_model_changed)
         ov.stop_clicked.connect(self._on_stop_task)
         ov.submit_text.connect(lambda t: self.run_voice_task(t, source="typed"))   # typed = same routing
+        ov.collapsed.connect(self._on_notch_collapsed)
         try:
             ov.set_model_effort(self._model, self._effort)   # reflect the saved choice on the pill
         except Exception:
@@ -415,6 +417,24 @@ class AssistantPage(QWidget):
         """✕ on the notch clears the focus pointer — the next voice command starts fresh. The
         conversation itself keeps running (and stays in the rail), reopenable by clicking its row."""
         self._focused_key = None
+
+    def _on_notch_collapsed(self):
+        """The notch tucked away. The chat you last SENT a request in stays — reopening the notch shows
+        it. A chat you only VIEWED (picked from the rail, nothing sent) doesn't: the notch goes back to
+        your last chat, or to the blank default if you haven't sent anything yet this session."""
+        sess = self._focused
+        if sess is None or sess.running or sess.key == self._last_sent_key:
+            return
+        last = self._last_sent_key if self._last_sent_key in self._sessions else None
+        _trace(f"notch closed on viewed {sess.key} '{sess.title}' -> {last or 'default'}")
+        self._resume_target = None
+        if last:
+            self._focused_key = last
+            self._render_focused()
+        else:
+            self._focused_key = None
+            self._notch("rest_idle")
+        self._refresh_rail()
 
     def _on_stop_task(self):
         """Stop on ONE click: interrupt the FOCUSED session's turn now, show immediate feedback, and
@@ -926,6 +946,7 @@ class AssistantPage(QWidget):
             existing = self._session_by_claude_id(resume)
             if existing is not None and existing.running:  # still working → queue a follow-up on it
                 existing.pending_followup, existing.pending_images = prompt, list(images or [])
+                self._last_sent_key = existing.key
                 _trace(f"run_task: queue follow-up on {existing.key} '{existing.title}' (running)")
                 self._focus(existing.key)
                 self._notch("show_working", "Queued — will continue when this step finishes")
@@ -981,6 +1002,7 @@ class AssistantPage(QWidget):
         _trace(f"spawn {sess.key} '{sess.title}' cwd={sess.cwd} resume={resume_id or '(new)'} "
                f"model={sess.model} bypass={sess.bypass} | live now: {sorted(self._sessions)}")
         sess.thread.start()
+        self._last_sent_key = sess.key           # a request was sent here → the notch's "last chat"
         self._focus(sess.key, fresh=True)
 
     # ---- focus: which conversation the notch shows (and voice follow-ups target) ----
