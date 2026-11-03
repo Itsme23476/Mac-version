@@ -328,18 +328,26 @@ def test_idle_rail_shown_before_any_request():
 def test_hover_cues_click_opens():
     """Hover = a small cue (the tab slides out EDGE → TAB_W), never opens. Only a click opens it.
     A running chat's nudge is the same cue."""
-    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtCore import QEvent, QPointF, QPoint, Qt
     from PySide6.QtGui import QMouseEvent
     from app.ui import conversation_rail as cr
     rail = ConversationRail()
     rail.update_sessions([], None, [])
     pump(300)
     assert rail.x() == rail._x_closed and not rail._cue
-    rail.enterEvent(None); pump(300)
-    assert rail._cue and not rail._expanded and rail.x() == rail._x_cue
-    assert rail._x_cue - rail._x_closed == cr.TAB_W - cr.EDGE
-    rail.leaveEvent(None); pump(300)
-    assert not rail._cue and rail.x() == rail._x_closed
+    assert rail._hover_timer.isActive(), "no cursor poll → hover never seen on a non-activating panel"
+    g = rail.frameGeometry()
+    real_pos = cr._cursor_pos
+    try:
+        cr._cursor_pos = lambda: QPoint(g.right() - 2, g.center().y())     # mouse ON the 7px edge strip
+        pump(300)                                                         # (no enter event — the poll sees it)
+        assert rail._hovered and rail._cue and not rail._expanded and rail.x() == rail._x_cue
+        assert rail._x_cue - rail._x_closed == cr.TAB_W - cr.EDGE
+        cr._cursor_pos = lambda: QPoint(g.right() + 300, g.center().y())   # mouse moved away
+        pump(300)
+        assert not rail._hovered and not rail._cue and rail.x() == rail._x_closed
+    finally:
+        cr._cursor_pos = real_pos
     rail.enterEvent(None); pump(50)
     click = QMouseEvent(QEvent.MouseButtonPress, QPointF(5, 5), QPointF(5, 5), Qt.LeftButton, Qt.LeftButton,
                         Qt.NoModifier)

@@ -25,6 +25,11 @@ from app.ui.claude_overlay import _TypeField   # a QLineEdit that runs a callbac
 
 logger = logging.getLogger(__name__)
 
+
+def _cursor_pos():
+    from PySide6.QtGui import QCursor
+    return QCursor.pos()
+
 RAIL_TITLE = "Filect Conversations"   # unique — notch_panel finds the NSWindow by this
 RAIL_W = 272
 EDGE = 7                              # px of the rail left peeking when collapsed (the hover strip)
@@ -195,6 +200,9 @@ class ConversationRail(QWidget):
         self._anim = QPropertyAnimation(self, b"pos")
         self._anim.setDuration(ANIM_MS)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setInterval(60)   # ponytail: 60ms cursor poll; an NSEvent mouse monitor if CPU ever matters
+        self._hover_timer.timeout.connect(self._poll_hover)
         self._build()
 
     def _build(self):
@@ -261,6 +269,7 @@ class ConversationRail(QWidget):
         if first_show:
             self.show()
             self._configure()
+            self._hover_timer.start()
             logger.info(f"[rail] shown at idle edge (x={self.x()}, y={self.y()}, h={self.height()})")
         if self._groups and self._groups[0][0] == "RUNNING":
             self._peek()            # something's running → slide open briefly, then auto-tuck
@@ -409,19 +418,27 @@ class ConversationRail(QWidget):
         self._set_cue(True)
         QTimer.singleShot(2600, lambda: self._set_cue(False) if not self._hovered else None)
 
+    def _set_hovered(self, inside: bool):
+        if inside == self._hovered:
+            return
+        self._hovered = inside
+        logger.info("[rail] hover in" if inside else f"[rail] hover out (pinned={self._pinned})")
+        self._set_cue(inside)
+        if not inside and self._expanded and not self._pinned:
+            self._set_expanded(False)
+
+    def _poll_hover(self):
+        """Hover source of truth: is the global cursor over the rail (incl. the 7 px edge strip)? macOS
+        doesn't reliably deliver enter/leave to a non-activating panel of an app that isn't active —
+        seen live: clicks arrived, hover never did. Same fix as the notch's _poll_hover."""
+        if self.isVisible():
+            self._set_hovered(self.frameGeometry().contains(_cursor_pos()))
+
     def enterEvent(self, e):
-        if not self._hovered:
-            logger.info("[rail] hover in")
-        self._hovered = True
-        self._set_cue(True)
+        self._set_hovered(True)
 
     def leaveEvent(self, e):
-        if self._hovered:
-            logger.info(f"[rail] hover out (pinned={self._pinned})")
-        self._hovered = False
-        self._set_cue(False)
-        if self._expanded and not self._pinned:
-            self._set_expanded(False)
+        self._poll_hover()            # Qt also sends a leave when the cursor crosses onto a child
 
     def mousePressEvent(self, e):
         # A click on the rail body (not a row — rows consume their own click) TOGGLES it: opens+pins,
