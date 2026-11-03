@@ -325,6 +325,54 @@ def test_idle_rail_shown_before_any_request():
     print("idle: rail scheduled + shown at launch, before any request  OK")
 
 
+def test_hover_cues_click_opens():
+    """Hover = a small cue (the tab slides out EDGE → TAB_W), never opens. Only a click opens it.
+    A running chat's nudge is the same cue."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from app.ui import conversation_rail as cr
+    rail = ConversationRail()
+    rail.update_sessions([], None, [])
+    pump(300)
+    assert rail.x() == rail._x_closed and not rail._cue
+    rail.enterEvent(None); pump(300)
+    assert rail._cue and not rail._expanded and rail.x() == rail._x_cue
+    assert rail._x_cue - rail._x_closed == cr.TAB_W - cr.EDGE
+    rail.leaveEvent(None); pump(300)
+    assert not rail._cue and rail.x() == rail._x_closed
+    rail.enterEvent(None); pump(50)
+    click = QMouseEvent(QEvent.MouseButtonPress, QPointF(5, 5), QPointF(5, 5), Qt.LeftButton, Qt.LeftButton,
+                        Qt.NoModifier)
+    rail.mousePressEvent(click); pump(300)
+    assert rail._expanded and not rail._cue and rail.x() == rail._x_open
+    rail._peek(); pump(50)
+    assert rail._expanded and not rail._cue                       # a nudge never disturbs an open rail
+    rail.collapse(); rail._hovered = False; pump(300)
+    rail._peek(); pump(300)
+    assert rail._cue and not rail._expanded and rail.x() == rail._x_cue   # nudge = cue, not open
+    rail.hide()
+    print("rail: hover = cue only, click opens, nudge = cue  OK")
+
+
+def test_new_chat_opens_blank_notch():
+    """'＋ New chat' must DO something visible: forget the focused chat and open the notch on a blank
+    Ready card with the type box focused."""
+    page = ap.AssistantPage(_MW())
+    page._sessions, page._recent = {}, []
+    page._focused_key, page._resume_target = "s9", "sid-old"
+    page._on_rail_new_chat()
+    pump(100)
+    ov = page._ensure_notch()
+    assert page._focused_key is None and page._resume_target is None
+    assert ov._stack.currentWidget() is ov._page_idle and not ov._minimized and ov._pinned
+    assert ov._type_field.hasFocus() or ov._type_field.isVisible()
+    ov.hide()
+    if page._rail:
+        page._rail.hide()
+    page.shutdown()
+    print("new chat: focus cleared, notch open on a blank Ready card  OK")
+
+
 def test_quit_mid_task_stops_threads():
     """Quitting while an agent runs must stop its thread first — else Qt aborts on quit
     ("QThread: Destroyed while thread is still running")."""
@@ -351,5 +399,7 @@ if __name__ == "__main__":
     test_select_running_chat_opens_live_view()
     test_continued_chats_survive_restart()
     test_idle_rail_shown_before_any_request()
+    test_hover_cues_click_opens()
+    test_new_chat_opens_blank_notch()
     test_quit_mid_task_stops_threads()
     print("test_rail_recent OK")

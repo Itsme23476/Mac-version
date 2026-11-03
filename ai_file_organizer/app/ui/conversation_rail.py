@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 RAIL_TITLE = "Filect Conversations"   # unique — notch_panel finds the NSWindow by this
 RAIL_W = 272
 EDGE = 7                              # px of the rail left peeking when collapsed (the hover strip)
+TAB_W = 16                            # the edge tab: hover slides it out this far (EDGE → TAB_W) + a grip
 ANIM_MS = 160
 _RUNNING = ("working", "needs_you")
 
@@ -101,6 +102,30 @@ def _matches(query: str, *fields) -> bool:
     return all(w in hay for w in query.lower().split())
 
 
+class _EdgeTab(QWidget):
+    """The rail's tab at the screen edge. At rest it's invisible (alpha-2 fill: still hit-testable, so
+    hover works — like VoiceOS, nothing shows). On hover the rail slides out a little and this paints a
+    small dark pill with an orange grip: the cue that a click opens it. Clicks fall through to the rail."""
+    def paintEvent(self, e):
+        from PySide6.QtGui import QPainter, QColor, QPen
+        rail = self.parent()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        if getattr(rail, "_expanded", False):
+            return                                   # open: the card is the UI, no tab
+        if not getattr(rail, "_cue", False):
+            p.fillRect(self.rect(), QColor(0, 0, 0, 2))
+            return
+        h = 112
+        y = (self.height() - h) // 2
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        p.setBrush(QColor(22, 22, 24, 240))
+        p.drawRoundedRect(-8, y, self.width() + 7, h, 8, 8)   # left side runs off-screen → a tab shape
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(217, 119, 87))
+        p.drawRoundedRect(self.width() // 2 - 2, y + h // 2 - 18, 3, 36, 1.5, 1.5)
+
+
 class _RailRow(QFrame):
     """One conversation: status dot + title + status/elapsed or how long ago. Clickable."""
     clicked = Signal()
@@ -162,8 +187,10 @@ class ConversationRail(QWidget):
         self._data = ([], None, [])   # (sessions, focused_key, recent) from the last update_sessions
         self._expanded = False
         self._hovered = False
+        self._cue = False             # hover cue: tab slid out a little with a grip (click opens)
         self._x_open = 0
         self._x_closed = 0
+        self._x_cue = 0
         self._y = 0
         self._anim = QPropertyAnimation(self, b"pos")
         self._anim.setDuration(ANIM_MS)
@@ -172,7 +199,8 @@ class ConversationRail(QWidget):
 
     def _build(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 10, 10, 10)        # left=0 so the card sits flush on the screen edge
+        outer.setContentsMargins(0, 10, TAB_W, 10)     # left=0: card flush on the screen edge; right: the tab
+        self._tab = _EdgeTab(self)
         self._card = QFrame()
         self._card.setObjectName("railCard")
         self._card.setStyleSheet(
@@ -320,7 +348,7 @@ class ConversationRail(QWidget):
             if e.type() == QEvent.KeyPress:
                 logger.info(f"[rail] search key: {e.text()!r}")
             elif e.type() == QEvent.FocusOut:
-                logger.info(f"[rail] search lost focus (reason={int(e.reason())})")
+                logger.info(f"[rail] search lost focus (reason={getattr(e.reason(), 'name', e.reason())})")
         return super().eventFilter(obj, e)
 
     # -- collapse / expand (slide flush against the left edge) -----------------
@@ -344,7 +372,13 @@ class ConversationRail(QWidget):
         self._y = geo.y() + (geo.height() - (cap + chrome)) // 2
         self._x_open = geo.x()                          # flush on the screen's left edge
         self._x_closed = geo.x() - (RAIL_W - EDGE)      # tucked left, only EDGE px peeking
-        self.move(self._x_open if self._expanded else self._x_closed, self._y)
+        self._x_cue = geo.x() - (RAIL_W - TAB_W)        # hovered: the whole tab shows
+        self.move(self._x_open if self._expanded else self._x_cue if self._cue else self._x_closed, self._y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._tab.setGeometry(self.width() - TAB_W, 0, TAB_W, self.height())
+        self._tab.raise_()
 
     def _slide_to(self, x: int):
         self._anim.stop()
@@ -354,24 +388,39 @@ class ConversationRail(QWidget):
 
     def _set_expanded(self, on: bool):
         self._expanded = on
-        self._slide_to(self._x_open if on else self._x_closed)
+        if on:
+            self._cue = False
+        self._tab.update()
+        self._slide_to(self._x_open if on else self._x_cue if self._cue else self._x_closed)
+
+    def _set_cue(self, on: bool):
+        """Hover cue: the resting tab slides out a little (EDGE → TAB_W) and shows its grip. Only a CLICK
+        opens the rail (Damianos' call: hovering must never pop it open)."""
+        on = on and not self._expanded
+        if on == self._cue:
+            return
+        self._cue = on
+        self._tab.update()
+        if not self._expanded:
+            self._slide_to(self._x_cue if on else self._x_closed)
 
     def _peek(self):
-        """Slide open momentarily (e.g. a new chat appeared), then tuck back unless you're hovering."""
-        self._set_expanded(True)
-        QTimer.singleShot(2600, lambda: self._set_expanded(False) if not self._hovered else None)
+        """A new chat started running: show the hover cue for a moment (never opens by itself)."""
+        self._set_cue(True)
+        QTimer.singleShot(2600, lambda: self._set_cue(False) if not self._hovered else None)
 
     def enterEvent(self, e):
         if not self._hovered:
             logger.info("[rail] hover in")
         self._hovered = True
-        self._set_expanded(True)
+        self._set_cue(True)
 
     def leaveEvent(self, e):
         if self._hovered:
             logger.info(f"[rail] hover out (pinned={self._pinned})")
         self._hovered = False
-        if not self._pinned:          # a click pins it open; otherwise tuck back when you leave
+        self._set_cue(False)
+        if self._expanded and not self._pinned:
             self._set_expanded(False)
 
     def mousePressEvent(self, e):

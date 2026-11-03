@@ -1038,12 +1038,25 @@ class AssistantPage(QWidget):
             from app.ui.conversation_rail import ConversationRail
             rail = ConversationRail()
             rail.session_clicked.connect(self._on_rail_clicked)
-            rail.new_requested.connect(self._clear_resume)
+            rail.new_requested.connect(self._on_rail_new_chat)
             rail.recent_clicked.connect(self._on_recent_clicked)
             self._rail = rail
         except Exception:
             pass
         return self._rail
+
+    def _on_rail_new_chat(self):
+        """Rail "＋ New chat": forget the current conversation (so the next task starts fresh) and drop
+        the notch open on a blank Ready card to type into or speak. Running chats keep running."""
+        _trace("rail new chat")
+        self._clear_resume()
+        self._refresh_rail()                     # no row highlighted any more
+        try:
+            ov = self._ensure_notch()
+            if ov is not None:
+                ov.show_new_chat()
+        except Exception as e:
+            _trace(f"new chat: notch unavailable ({e})")
 
     def _on_rail_clicked(self, key):
         """A rail row from this run — show that conversation in the notch (live if it's running)."""

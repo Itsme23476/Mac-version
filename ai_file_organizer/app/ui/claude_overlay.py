@@ -850,6 +850,21 @@ class ClaudeOverlay(QWidget):
             self.show()
         self._configure_macos_deferred()
 
+    def show_new_chat(self) -> None:
+        """Rail "New chat": the notch opens on a blank Ready card with the type box focused. Unlike
+        rest_idle this also leaves a working chat's view — that chat keeps running in the rail."""
+        self._done_timer.stop()
+        self.set_state("idle")
+        self._set_status("", C["text_muted"])
+        self._transcript.setVisible(False)
+        self._reset_details()
+        self._stack.setCurrentWidget(self._page_idle)
+        if not self.isVisible():
+            self.rest_idle()                     # create/position the resting nub first
+        self.open_full()
+        self._type_field.setFocus()
+        self._key_for_typing()
+
     def set_title(self, title: str) -> None:
         """Sets the transcript bubble ("what you said"). That IS the task display — there is no
         separate bold title in the card, so the prompt is never shown twice."""
