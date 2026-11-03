@@ -341,6 +341,7 @@ class _HoverBar(QWidget):
     notch and a "Type or hold fn ⌃ to speak" input under it — fading to see-through at the bottom.
     Enter submits like the card's type field; a click anywhere on it puts the cursor in the input."""
     submitted = Signal(str)
+    close_requested = Signal()               # clicked again while empty → tuck the bar away
 
     def __init__(self, on_field_click, parent=None):
         super().__init__(parent)
@@ -349,8 +350,7 @@ class _HoverBar(QWidget):
         self._on_field_click = on_field_click  # keys the panel so it can take typing
 
         def _click():
-            self.field_clicked = True
-            on_field_click()
+            self._toggle()
         self._orb = QLabel(self)
         self._orb.setFixedSize(16, 16)
         self._orb.setPixmap(_orb_pixmap(16))
@@ -409,12 +409,19 @@ class _HoverBar(QWidget):
         p.fillPath(path, g)
         p.end()
 
-    def mousePressEvent(self, e) -> None:
-        # A click anywhere on the bar = "I want to type": put the cursor in the input — same look,
-        # no switch to a different card (Damianos: hover and click must be the same thing).
+    def _toggle(self) -> None:
+        """Click = toggle, like the old card: the first click puts the cursor in the input (same look,
+        no switch to a different card); clicking again closes it — unless you've typed something, then
+        a click just places the cursor (Esc still closes)."""
+        if self.field_clicked and not self.field.text():
+            self.close_requested.emit()
+            return
         self.field_clicked = True
         self._on_field_click()
         self.field.setFocus()
+
+    def mousePressEvent(self, e) -> None:
+        self._toggle()
         e.accept()
 
 
@@ -480,6 +487,7 @@ class ClaudeOverlay(QWidget):
         self._hover_bar = _HoverBar(self._key_for_typing, self)
         self._hover_bar.hide()
         self._hover_bar.submitted.connect(self._on_hover_submit)
+        self._hover_bar.close_requested.connect(self._hide_hover_bar)
         self._dwell_timer = QTimer(self)      # cursor must rest on the notch briefly before it grows
         self._dwell_timer.setSingleShot(True)
         self._dwell_timer.setInterval(HOVER_DWELL_MS)
@@ -1633,6 +1641,13 @@ class ClaudeOverlay(QWidget):
             w = self._strip_w() if self._minimized else WIDGET_W
         x = geo.x() + (geo.width() - w) // 2
         self.move(x, self._rest_y(geo))
+        self._place_native()
+
+    def _place_native(self) -> None:
+        """Make the real (native) window sit where Qt thinks it is — at the very top, over the menu
+        bar, so the hover area and the card cover the physical notch (see notch_panel.place_native)."""
+        g = self.frameGeometry()
+        notch_panel.place_native(WIN_TITLE, g.x(), g.y(), g.width(), g.height())
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
@@ -1646,6 +1661,7 @@ class ClaudeOverlay(QWidget):
         anim.setDuration(170)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.setEndValue(QPointF(x, y).toPoint())
+        anim.finished.connect(self._place_native)
         if on_done is not None:
             anim.finished.connect(on_done)
         self._anim = anim
@@ -1661,9 +1677,12 @@ class ClaudeOverlay(QWidget):
     def _configure_macos_deferred(self) -> None:
         if sys.platform != "darwin":
             return
-        notch_panel.configure_macos_panel(WIN_TITLE)
-        QTimer.singleShot(10, lambda: notch_panel.configure_macos_panel(WIN_TITLE))
-        QTimer.singleShot(60, lambda: notch_panel.configure_macos_panel(WIN_TITLE))
+        def configure():
+            notch_panel.configure_macos_panel(WIN_TITLE)
+            self._place_native()          # level is high now → the window may sit over the menu bar
+        configure()
+        QTimer.singleShot(10, configure)
+        QTimer.singleShot(60, configure)
 
     # -- decisions / dismiss ---------------------------------------------------
     def _on_approve(self) -> None:

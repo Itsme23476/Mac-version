@@ -186,6 +186,10 @@ def configure_macos_panel(win_title: str) -> None:
                 ns.setStyleMask_(cur | _NONACTIVATING_PANEL)
         if hasattr(ns, "setFloatingPanel_"):
             ns.setFloatingPanel_(True)
+            # setFloatingPanel: silently RESETS the level to NSFloatingWindowLevel (3) — which put the
+            # notch under the menu bar's level, so AppKit kept it BELOW the menu bar (y=33): hovering
+            # the notch itself never reached it. Re-apply our level after it.
+            ns.setLevel_(_PANEL_LEVEL)
         if hasattr(ns, "setBecomesKeyOnlyIfNeeded_"):
             ns.setBecomesKeyOnlyIfNeeded_(True)
         try:
@@ -201,6 +205,26 @@ def configure_macos_panel(win_title: str) -> None:
             ns.orderFrontRegardless()
         except Exception:
             pass
+
+
+def place_native(win_title: str, x: int, y: int, w: int, h: int) -> None:
+    """Put the NSWindow exactly at this Qt rect (global, top-left origin). If AppKit placed the window
+    while its level was still low it constrained it below the menu bar, while Qt went on believing it
+    sat at y=0 — so later Qt moves to y=0 were no-ops. Once the level is high, re-apply natively."""
+    if sys.platform != "darwin":
+        return
+    ns = _ns_window(win_title)
+    if ns is None:
+        return
+    try:
+        from AppKit import NSScreen, NSMakeRect
+        primary_h = NSScreen.screens()[0].frame().size.height   # AppKit's origin = primary's bottom-left
+        target = NSMakeRect(x, primary_h - (y + h), w, h)
+        f = ns.frame()
+        if abs(f.origin.x - target.origin.x) > 0.5 or abs(f.origin.y - target.origin.y) > 0.5:
+            ns.setFrame_display_(target, True)
+    except Exception:
+        pass
 
 
 def reassert_panel_style(win_title: str) -> None:

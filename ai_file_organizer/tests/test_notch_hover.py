@@ -74,12 +74,20 @@ def test_click_on_bar_types_in_place():
         pump(50)
         assert ov._hover_bar_on and ov._minimized and ov.width() == w, "stays the same bar"
         assert ov._hover_bar.field_clicked
+        ov._hover_bar.mousePressEvent(click); pump(50)     # click AGAIN → closes (toggle)
+        assert not ov._hover_bar_on and ov.width() == ov._strip_w(), "second click closes it"
+        _cursor(ov, False); pump(100); _cursor(ov, True); pump(450)
+        assert ov._hover_bar_on, "comes back on the next hover"
+        ov._hover_bar.mousePressEvent(click); pump(50)
+        ov._hover_bar.field.setText("draft")
+        ov._hover_bar.mousePressEvent(click); pump(50)     # with a draft, a click only places the cursor
+        assert ov._hover_bar_on, "never throws away what you typed"
         _cursor(ov, False); pump(500)
-        assert ov._hover_bar_on, "clicked into it → it waits longer before tucking away"
+        assert ov._hover_bar_on, "and leaving keeps the draft too"
     finally:
         co.QCursor = real
     ov.hide()
-    print("click on the hover bar: cursor in its input, same bar (no old card)  OK")
+    print("click on the hover bar: 1st click types in place, 2nd click closes, a draft is kept  OK")
 
 
 def test_bigger_bar():
