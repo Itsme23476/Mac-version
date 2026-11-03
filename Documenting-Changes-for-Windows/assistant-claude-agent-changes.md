@@ -305,3 +305,20 @@ yourself; the Mac side can't see it.
   Claude install dir (e.g. `%USERPROFILE%\.local\bin`) to PATH the same way, or pass `cli_path`
   in `ClaudeAgentOptions`.
 - Test: `tests/test_agent_path.py`.
+
+### 7c. Continued chats dropped off the rail after a restart — **BOTH platforms**
+- Bug: the rail's history only lists chats in the agent workspace (`list_sessions(cwd=DEFAULT_WORKSPACE)`).
+  A chat CONTINUED in another project (e.g. the "Hyper3D MCP setup" chat in its own folder) lives
+  in that project's folder, so after a restart nothing pointed to it.
+- Fix in `agent_sessions.py`:
+  - `remember_session(id, cwd)` is called from `_on_result` when `sess.cwd` isn't the workspace.
+    It writes `[{id, cwd}]`, newest first and capped at 200, to `<app data dir>/assistant_sessions.json`.
+  - `remembered_sessions(workspace)` returns those that still exist, and `_load_recent` merges
+    them with the workspace list (deduped by id, newest first).
+  - **One-time backfill** when that file doesn't exist yet: scan every transcript once for chats
+    outside the workspace that have BOTH `"entrypoint":"sdk-py"` (written by Filect) AND
+    `cli`/`claude-desktop` lines (a real continued chat, not a router or test leftover). That's
+    ~1.3s per GB, off the UI thread. Match with `\s*` after the colon: real files are compact JSON.
+- Windows: the transcript store is the same format (`%USERPROFILE%\.claude\projects`), so this
+  ports as-is. Only the app data dir differs.
+- Test: `tests/test_rail_recent.py::test_continued_chats_survive_restart`.

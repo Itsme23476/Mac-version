@@ -166,6 +166,91 @@ def list_sessions(limit: int = 100, cwd: Optional[str] = None) -> List[SessionIn
     return out[:limit]
 
 
+# ---- chats the Assistant continued OUTSIDE its workspace ------------------------------------------
+# New tasks run in the workspace folder, which the rail lists. A chat CONTINUED elsewhere (a resumed
+# project chat) lives in that project's folder, so after a restart nothing pointed to it and it
+# dropped off the rail. Remember those ids here (app data dir, never ~/.claude).
+_TOUCHED_MAX = 200
+
+
+def _touched_path() -> Path:
+    from app.core.settings import settings
+    return settings.get_app_data_dir() / "assistant_sessions.json"
+
+
+def _read_touched() -> Optional[list]:
+    """The remembered [{id, cwd}], or None if the file was never written (→ run the backfill)."""
+    try:
+        data = json.loads(_touched_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return []
+
+
+def _write_touched(items: list) -> None:
+    try:
+        _touched_path().write_text(json.dumps(items[:_TOUCHED_MAX]), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def remember_session(session_id: str, cwd: str) -> None:
+    """Keep a chat continued outside the workspace on the rail after restarts. Never raises."""
+    if not session_id:
+        return
+    items = [e for e in (_read_touched() or []) if isinstance(e, dict) and e.get("id") != session_id]
+    _write_touched([{"id": session_id, "cwd": cwd}] + items)
+
+
+def _backfill(skip_dir: str) -> list:
+    """One-time catch-up for chats continued before remember_session existed: outside the workspace,
+    written to by the Python SDK (Filect) AND by Claude Code/Desktop — so a real continued chat, not
+    an intent-router or test leftover. Reads every transcript once (~1s per GB), off the UI thread."""
+    out = []
+    sdk_re = re.compile(rb'"entrypoint":\s*"sdk-py"')
+    other_re = re.compile(rb'"entrypoint":\s*"(?:cli|claude-desktop)"')
+    for f in _projects_root().glob("*/*.jsonl"):
+        if f.parent.name == skip_dir:
+            continue
+        sdk = other = False
+        try:
+            with f.open("rb") as fh:
+                for line in fh:
+                    if b'"entrypoint"' not in line:     # cheap pre-check; most lines skip the regex
+                        continue
+                    if sdk_re.search(line):
+                        sdk = True
+                    elif other_re.search(line):
+                        other = True
+                    if sdk and other:
+                        info = _parse_session(f)
+                        if info:
+                            out.append({"id": info.id, "cwd": info.cwd})
+                        break
+        except Exception:
+            continue
+    return out
+
+
+def remembered_sessions(workspace: str) -> List[SessionInfo]:
+    """The chats continued outside `workspace` that still exist on disk, newest first."""
+    items = _read_touched()
+    if items is None:                    # first run with this feature: find the ones from before it
+        items = _backfill(re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(workspace)))
+        _write_touched(items)
+    out = []
+    for e in items:
+        sid = e.get("id") if isinstance(e, dict) else None
+        f = _session_file(sid, e.get("cwd")) if sid else None
+        info = _parse_session(f) if f else None
+        if info:
+            out.append(info)
+    out.sort(key=lambda s: s.mtime, reverse=True)
+    return out
+
+
 def tool_result_text(content) -> str:
     """Plain text of a tool result's content (a str, or a list of text/image blocks)."""
     if content is None:

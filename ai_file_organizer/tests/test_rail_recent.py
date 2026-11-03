@@ -26,7 +26,9 @@ from app.ui.conversation_rail import ConversationRail, _group
 ap._play_chime = lambda *a, **k: None
 ap._notify = lambda *a, **k: None
 ap.AssistantPage._show_idle_overlays = lambda self: None   # don't spawn notch/rail on a timer
+_REAL_LOAD_RECENT = ap.AssistantPage._load_recent
 ap.AssistantPage._load_recent = lambda self: None          # tests feed _recent directly
+asess._touched_path = lambda: Path(tempfile.mkdtemp()) / "assistant_sessions.json"   # never the real app dir
 
 WS = "/tmp/ws/Filect Assistant"
 WS_DIR = "-tmp-ws-Filect-Assistant"
@@ -259,6 +261,47 @@ def test_select_running_chat_opens_live_view():
     print("running chat: row click → notch OPEN on the live view, timer from the turn's start  OK")
 
 
+def test_continued_chats_survive_restart():
+    """A chat continued in another project folder must still be on the rail after a restart: the
+    first run backfills the ones from before (SDK + Claude Code/Desktop turns, outside the workspace),
+    later ones are remembered when they finish. SDK-only leftovers (router/tests) stay hidden."""
+    root = Path(tempfile.mkdtemp())
+    store = root / "assistant_sessions.json"
+    asess._projects_root, asess._touched_path = (lambda: root), (lambda: store)
+    now = time.time()
+
+    def msg(cwd, entry, text, ts):
+        return {"type": "user", "cwd": cwd, "entrypoint": entry, "timestamp": _iso(ts),
+                "message": {"role": "user", "content": text}}
+    _write_lines(root / WS_DIR / "sid-ws.jsonl", [msg(WS, "sdk-py", "Write an essay", now - 7200)], now - 7200)
+    _write_lines(root / "-tmp-proj-crypto" / "sid-crypto.jsonl",
+                 [msg("/tmp/proj/crypto", "cli", "Build a trading bot", now - 3600),
+                  msg("/tmp/proj/crypto", "sdk-py", "also add stop-losses", now - 3500)], now - 3500)
+    _write_lines(root / "-tmp-dev" / "sid-router.jsonl",
+                 [msg("/tmp/dev", "sdk-py", "hello", now - 60)], now - 60)
+
+    assert [s.id for s in asess.remembered_sessions(WS)] == ["sid-crypto"] and store.exists()
+    _write_lines(root / "-tmp-proj-other" / "sid-other.jsonl",
+                 [msg("/tmp/proj/other", "claude-desktop", "Fix the site header", now - 30)], now - 30)
+    asess.remember_session("sid-other", "/tmp/proj/other")                 # a run just finished there
+    assert [s.id for s in asess.remembered_sessions(WS)] == ["sid-other", "sid-crypto"]
+
+    old_ws, ap.DEFAULT_WORKSPACE = ap.DEFAULT_WORKSPACE, WS
+    try:
+        page = ap.AssistantPage(_MW())                                      # = the app after a restart
+        page._recent = []
+        _REAL_LOAD_RECENT(page)
+        deadline = time.time() + 5
+        while not page._recent and time.time() < deadline:
+            pump(20)
+        ids = [r.id for r in page._recent]
+        assert ids == ["sid-other", "sid-crypto", "sid-ws"], ids            # newest first, no leftovers
+        page.shutdown()
+    finally:
+        ap.DEFAULT_WORKSPACE = old_ws
+    print("continued chats: backfilled + remembered, back on the rail after a restart  OK")
+
+
 def test_quit_mid_task_stops_threads():
     """Quitting while an agent runs must stop its thread first — else Qt aborts on quit
     ("QThread: Destroyed while thread is still running")."""
@@ -283,4 +326,6 @@ if __name__ == "__main__":
     test_search()
     test_select_past_chat_shows_it_in_notch()
     test_select_running_chat_opens_live_view()
+    test_continued_chats_survive_restart()
+    test_quit_mid_task_stops_threads()
     print("test_rail_recent OK")

@@ -1145,9 +1145,16 @@ class AssistantPage(QWidget):
 
         def worker():
             try:
-                from app.core.agent_sessions import list_sessions
-                items = [s for s in list_sessions(limit=300, cwd=DEFAULT_WORKSPACE)
-                         if not self._junk_session(s)]          # the rail keeps the last 30 days
+                from app.core.agent_sessions import list_sessions, remembered_sessions
+                # + chats continued outside the workspace (a resumed project chat), else they'd
+                # vanish from the rail after a restart
+                found = list_sessions(limit=300, cwd=DEFAULT_WORKSPACE) + remembered_sessions(DEFAULT_WORKSPACE)
+                seen, items = set(), []
+                for s in found:
+                    if s.id not in seen and not self._junk_session(s):   # the rail keeps the last 30 days
+                        seen.add(s.id)
+                        items.append(s)
+                items.sort(key=lambda s: s.mtime, reverse=True)
             except Exception:
                 items = []
             try:
@@ -1301,6 +1308,12 @@ class AssistantPage(QWidget):
             return
         if session_id:                              # real claude id — so a follow-up continues it
             sess.session_id = session_id
+            if sess.cwd and _os.path.normpath(sess.cwd) != _os.path.normpath(DEFAULT_WORKSPACE):
+                try:                                # a chat continued in another project: keep it
+                    from app.core.agent_sessions import remember_session   # on the rail after restarts
+                    remember_session(session_id, sess.cwd)
+                except Exception:
+                    pass
         sess.cost, sess.status = float(cost or 0.0), "done"
         import time
         sess.duration = time.time() - sess.started_at
