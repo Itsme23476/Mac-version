@@ -40,7 +40,7 @@ _RUNNING = ("working", "needs_you")
 # status -> (dot colour, label). Running states are coloured; finished history is neutral so viewing an
 # old chat doesn't change how it looks — only errors keep their colour.
 _STATUS = {
-    "working":   ("#D97757", "Working"),
+    "working":   ("#7C4DFF", "Working"),
     "needs_you": ("#E6A23C", "Needs you"),
     "done":      ("#6E6E78", ""),
     "error":     ("#F2645A", "Error"),
@@ -112,7 +112,7 @@ class _EdgeTab(QWidget):
     hover works — like VoiceOS, nothing shows). On hover the rail slides out a little and this paints a
     small dark pill with an orange grip: the cue that a click opens it. Clicks fall through to the rail."""
     def paintEvent(self, e):
-        from PySide6.QtGui import QPainter, QColor, QPen
+        from PySide6.QtGui import QPainter, QColor
         rail = self.parent()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -121,14 +121,19 @@ class _EdgeTab(QWidget):
         if not getattr(rail, "_cue", False):
             p.fillRect(self.rect(), QColor(0, 0, 0, 2))
             return
-        h = 112
-        y = (self.height() - h) // 2
-        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
-        p.setBrush(QColor(22, 22, 24, 240))
-        p.drawRoundedRect(-8, y, self.width() + 7, h, 8, 8)   # left side runs off-screen → a tab shape
+        from PySide6.QtGui import QLinearGradient, QRadialGradient
+        cy, h = self.height() // 2, 64
+        glow = QRadialGradient(0, cy, 30)                     # soft Filect-purple glow off the edge
+        glow.setColorAt(0, QColor(124, 77, 255, 110))
+        glow.setColorAt(1, QColor(124, 77, 255, 0))
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(217, 119, 87))
-        p.drawRoundedRect(self.width() // 2 - 2, y + h // 2 - 18, 3, 36, 1.5, 1.5)
+        p.setBrush(glow)
+        p.drawEllipse(-26, cy - 46, 52, 92)
+        pill = QLinearGradient(0, cy - h / 2, 0, cy + h / 2)  # slim pill, #A78BFA → brand #7C4DFF
+        pill.setColorAt(0, QColor(167, 139, 250))
+        pill.setColorAt(1, QColor(124, 77, 255))
+        p.setBrush(pill)
+        p.drawRoundedRect(-4, cy - h // 2, 11, h, 5.5, 5.5)   # left half runs off-screen → ~7px visible
 
 
 class _RailRow(QFrame):
@@ -147,8 +152,8 @@ class _RailRow(QFrame):
             sub = f"{label} · {_ago(when)}"
         else:                                    # finished / past: just when
             sub = _ago(when)
-        border = "rgba(217,119,87,0.45)" if focused else "transparent"
-        bg = "rgba(217,119,87,0.12)" if focused else "transparent"
+        border = "rgba(124,77,255,0.55)" if focused else "transparent"
+        bg = "rgba(124,77,255,0.16)" if focused else "transparent"
         self.setStyleSheet(
             f"QFrame#railRow{{background:{bg};border:1px solid {border};border-radius:10px;}}"
             "QFrame#railRow:hover{background:rgba(255,255,255,0.05);} "
@@ -228,7 +233,7 @@ class ConversationRail(QWidget):
         self._search.setStyleSheet(
             "QLineEdit#railSearch{background:#17171C;color:#ECECEC;border:1px solid rgba(255,255,255,0.08);"
             "border-radius:10px;padding:6px 10px;font-size:12px;}"
-            "QLineEdit#railSearch:focus{border-color:rgba(217,119,87,0.6);}")
+            "QLineEdit#railSearch:focus{border-color:rgba(124,77,255,0.7);}")
         self._search.textChanged.connect(lambda _t: self._render())
         self._search.installEventFilter(self)
         col.addWidget(self._search)
@@ -237,7 +242,7 @@ class ConversationRail(QWidget):
         self._new_btn.setStyleSheet(
             "QPushButton{background:transparent;color:#B9B9C2;border:1px dashed rgba(255,255,255,0.14);"
             "border-radius:10px;padding:7px 10px;font-size:12px;text-align:left;}"
-            "QPushButton:hover{color:#ECECEC;border-color:rgba(217,119,87,0.5);}")
+            "QPushButton:hover{color:#ECECEC;border-color:rgba(124,77,255,0.6);}")
         self._new_btn.clicked.connect(self.new_requested.emit)
         col.addWidget(self._new_btn)
         # The grouped list scrolls. Every layer is explicitly transparent: an unstyled viewport falls
