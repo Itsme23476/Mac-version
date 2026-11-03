@@ -122,11 +122,11 @@ class _EdgeTab(QWidget):
             p.fillRect(self.rect(), QColor(0, 0, 0, 2))
             return
         from PySide6.QtGui import QPen
-        cy, h = self.height() // 2, 150
+        cy, h = self.height() // 2, min(320, self.height() - 20)
         # See-through: no colour of its own, it just darkens what's behind it a little; a faint light
         # hairline keeps it findable on dark wallpapers. Tall and slim (Damianos: lighter, taller).
-        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
-        p.setBrush(QColor(0, 0, 0, 70))
+        p.setPen(QPen(QColor(255, 255, 255, 45), 1))
+        p.setBrush(QColor(0, 0, 0, 110))
         p.drawRoundedRect(-4, cy - h // 2, 11, h, 5.5, 5.5)   # left half runs off-screen → ~7px visible
 
 
