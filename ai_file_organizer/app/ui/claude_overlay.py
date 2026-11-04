@@ -50,12 +50,12 @@ C = {
     "text":       "#F2F2F4",
     "text_2":     "#C2C2CA",
     "text_muted": "#8A8A92",
-    "surface":    "#202024",   # pill / control background
-    "border":     "#2E2E34",
+    "surface":    "#1C1C1F",   # pill / control background (VoiceOS-dark)
+    "border":     "#2A2A2E",
 }
-CARD_BG = "#0A0A0C"            # near-black so the card's top MERGES with the physical notch
-ACCENT = "#D97757"            # Claude orange — brand icon + the "working" accent
-ACCENT_LIGHT = "#E8A98C"
+CARD_BG = "#000000"            # pure black, like the hover bar, so the card MERGES with the notch
+ACCENT = "#A78BFA"            # lavender — the hover bar's orb; focus, send, effort, the "working" accent
+ACCENT_LIGHT = "#C4B5FD"
 AMBER = "#E0A23C"           # "your turn" — an approval is waiting
 GREEN = "#3FB860"
 RED = "#F2645A"
@@ -272,6 +272,11 @@ class _Spinner(QWidget):
         p.end()
 
 
+_CHIP = "background-color:#2A2A2E; color:#A3A3AB; font-size:11px;"
+_SPEAK_HINT = (f"Type or hold <span style='{_CHIP}'>&nbsp;fn&nbsp;</span> "
+               f"<span style='{_CHIP}'>&nbsp;⌃ control&nbsp;</span> to speak")
+
+
 class _TypeField(QLineEdit):
     """Text input on the notch. On click it asks the panel to take keyboard focus — allowed because the
     panel is a floating, non-activating panel with becomesKeyOnlyIfNeeded: a USER click can key it (the
@@ -279,6 +284,22 @@ class _TypeField(QLineEdit):
     def __init__(self, on_click, parent=None):
         super().__init__(parent)
         self._on_click = on_click
+        self._hint = None
+
+    def set_hint(self, html: str) -> None:
+        """A rich placeholder (keycap chips — a QLineEdit placeholder is plain text only), shown while
+        the field is empty. Clicks go through it to the field."""
+        self._hint = QLabel(self)
+        self._hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._hint.setTextFormat(Qt.RichText)
+        self._hint.setText(html)
+        self._hint.setStyleSheet("background:transparent;color:#8E8E96;font-size:13px;")
+        self.textChanged.connect(lambda s: self._hint.setVisible(not s))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._hint is not None:
+            self._hint.setGeometry(15, 0, max(0, self.width() - 20), self.height())
 
     def mousePressEvent(self, e):
         try:
@@ -358,12 +379,10 @@ class _HoverBar(QWidget):
         self.field.setStyleSheet("QLineEdit{background:transparent;border:none;color:#F2F2F4;"
                                  "font-size:14px;padding:0;}")
         self.field.returnPressed.connect(self._submit)
-        chip = "background-color:#2A2A2E; color:#A3A3AB; font-size:11px;"
         self._hint = QLabel(self)
         self._hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._hint.setTextFormat(Qt.RichText)
-        self._hint.setText(f"Type or hold <span style='{chip}'>&nbsp;fn&nbsp;</span> "
-                           f"<span style='{chip}'>&nbsp;⌃ control&nbsp;</span> to speak")
+        self._hint.setText(_SPEAK_HINT)
         self._hint.setStyleSheet("background:transparent;color:#8E8E96;font-size:14px;")
         self.field.textChanged.connect(lambda t: self._hint.setVisible(not t))
 
@@ -443,6 +462,9 @@ class ClaudeOverlay(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setWindowTitle(WIN_TITLE)
+        # Qt keeps a window's layout out of the notch ("safe area") by default — +32px at the top once
+        # the window really sits over the notch. This one is DESIGNED around the notch, so opt out.
+        self.setAttribute(Qt.WA_ContentsMarginsRespectsSafeArea, False)
         self.setFixedWidth(WIDGET_W)
         # System font (like organize) — hand-tuned heights must not shift under the app font.
         self.setStyleSheet("QWidget { font-family: '-apple-system', 'SF Pro Display', "
@@ -506,17 +528,10 @@ class ClaudeOverlay(QWidget):
         # Rounded on all corners: it hangs just BELOW the notch now (not flush to the top edge),
         # so a square top read as a detached slab. A full rounded card looks intentional/centred.
         # Square top (flush with the notch, merges with it), rounded bottom — it drops FROM the notch.
-        self._card_style = (
-            f"QFrame#claudeCard {{ background-color: {CARD_BG}; border: none; "
-            "border-top-left-radius: 0px; border-top-right-radius: 0px; "
-            "border-bottom-left-radius: 20px; border-bottom-right-radius: 20px; }"
-        )
+        # The open card's black shape is PAINTED (paintEvent) like the hover bar's: flush with the
+        # notch, top corners curving into the screen edge, rounded bottom, a soft fade. Flat, no shadow.
+        self._card_style = "QFrame#claudeCard { background: transparent; border: none; }"
         self._card.setStyleSheet(self._card_style)
-        shadow = QGraphicsDropShadowEffect(self._card)
-        shadow.setBlurRadius(26)
-        shadow.setOffset(0, 8)
-        shadow.setColor(QColor(0, 0, 0, 170))
-        self._card.setGraphicsEffect(shadow)
         outer.addWidget(self._card)
 
         col = QVBoxLayout(self._card)
@@ -528,8 +543,8 @@ class ClaudeOverlay(QWidget):
         self._transcript.setWordWrap(True)
         self._transcript.setMaximumHeight(TRANSCRIPT_H)
         self._transcript.setStyleSheet(
-            f"QLabel {{ background: {C['surface']}; color: {C['text_2']}; font-size: 12.5px; "
-            "border-radius: 13px; padding: 9px 13px; }")
+            f"QLabel {{ background: {C['surface']}; color: {C['text']}; font-size: 13px; "
+            "border-radius: 16px; padding: 9px 15px; }")
         self._transcript.setVisible(False)
         col.addWidget(self._transcript)
 
@@ -549,15 +564,13 @@ class ClaudeOverlay(QWidget):
             self._icon.setPixmap(_logo)
             self._icon.setStyleSheet("background: transparent; border: none;")
         else:
-            self._icon.setText("✦")   # neutral placeholder until a real logo is dropped in assets/
-            self._icon.setStyleSheet(
-                f"color: {ACCENT}; font-size: 16px; font-weight: 800; background: transparent; border: none;")
+            self._icon.setPixmap(_orb_pixmap(16))   # the hover bar's orb until a real logo is in assets/
+            self._icon.setStyleSheet("background: transparent; border: none;")
         top.addWidget(self._icon, 0, Qt.AlignVCenter)
-        self._brand = QLabel("Claude Code")
+        self._brand = QLabel("Claude Code")     # kept for reference; the header now sits beside the
+        self._brand.setVisible(False)            # notch (VoiceOS) and has no room for a title
         self._brand.setStyleSheet(
-            f"color: {C['text']}; font-size: 13px; font-weight: 600; background: transparent; border: none;")
-        top.addWidget(self._brand, 0, Qt.AlignVCenter)
-        top.addStretch(1)
+            f"color: {C['text_2']}; font-size: 12.5px; font-weight: 500; background: transparent; border: none;")
         self._status_label = QLabel("")        # Working / Needs you / Done / Error
         self._status_label.setStyleSheet(
             f"color: {C['text_muted']}; font-size: 12px; font-weight: 600; background: transparent; border: none;")
@@ -566,7 +579,7 @@ class ClaudeOverlay(QWidget):
         self._timer_label.setStyleSheet(
             f"color: {C['text_2']}; font-size: 12px; background: transparent; border: none;")
         top.addWidget(self._timer_label, 0, Qt.AlignVCenter)
-        top.addSpacing(4)
+        top.addStretch(1)                       # the physical notch sits in this gap
         self._pin_btn = QPushButton("⇣")
         self._pin_btn.setToolTip("Tuck away")
         self._pin_btn.setCursor(Qt.PointingHandCursor)
@@ -581,7 +594,7 @@ class ClaudeOverlay(QWidget):
         close.setStyleSheet(self._icon_btn_style())
         close.clicked.connect(self._on_dismiss)
         top.addWidget(close, 0, Qt.AlignVCenter)
-        col.addWidget(self._topbar)
+        col.insertWidget(0, self._topbar)       # first: it lives in the notch band, above the bubble
 
         self._stack = QStackedWidget()
         self._stack.setStyleSheet("background: transparent;")
@@ -606,7 +619,7 @@ class ClaudeOverlay(QWidget):
         self._details_feed.setFixedHeight(DETAILS_H - 6)
         self._details_feed.setVisible(False)
         self._details_feed.setStyleSheet(
-            f"QTextEdit {{ background: {C['surface']}; border: 1px solid {C['border']}; border-radius: 10px; "
+            f"QTextEdit {{ background: #111113; border: none; border-radius: 12px; "
             f"color: {C['text_2']}; font-size: 11.5px; padding: 8px; }}"
             # Dark scrollbar: unstyled, its track fell back to the app's LIGHT palette (a white strip).
             "QScrollBar:vertical { background: transparent; width: 6px; margin: 2px; }"
@@ -624,10 +637,11 @@ class ClaudeOverlay(QWidget):
         ctrl.setSpacing(8)
         self._model_btn = QPushButton("Auto  ⌄")     # model · thinking-effort picker
         self._model_btn.setCursor(Qt.PointingHandCursor)
+        self._model_btn.setFixedHeight(26)
         self._model_btn.setStyleSheet(
-            f"QPushButton {{ background: {C['surface']}; border: 1px solid {C['border']}; "
-            f"color: {C['text_2']}; font-size: 11.5px; font-weight: 600; border-radius: 8px; padding: 3px 10px; }}"
-            f"QPushButton:hover {{ border-color: {ACCENT}; color: {C['text']}; }}")
+            f"QPushButton {{ background: {C['surface']}; border: none; "
+            f"color: {C['text_2']}; font-size: 11.5px; font-weight: 600; border-radius: 13px; padding: 4px 12px; }}"
+            f"QPushButton:hover {{ background: #26262A; color: {C['text']}; }}")
         self._model_btn.clicked.connect(self._toggle_model_panel)
         ctrl.addWidget(self._model_btn)
         ctrl.addStretch(1)
@@ -652,7 +666,7 @@ class ClaudeOverlay(QWidget):
         self._model_panel = QFrame()
         self._model_panel.setObjectName("modelPanel")      # targeted bg so it reads as a dark box
         self._model_panel.setStyleSheet(
-            f"QFrame#modelPanel {{ background:#1E1E24; border:1px solid {C['border']}; border-radius:12px; }}")
+            f"QFrame#modelPanel {{ background:#111113; border:1px solid {C['border']}; border-radius:14px; }}")
         self._model_panel.setVisible(False)
         mp = QVBoxLayout(self._model_panel)
         mp.setContentsMargins(14, 12, 14, 12)
@@ -730,12 +744,12 @@ class ClaudeOverlay(QWidget):
         # router as voice (new / follow-up / resume). Precise fallback when the mic mishears.
         self._type_field = _TypeField(self._key_for_typing)
         self._type_field.setObjectName("typeField")
-        self._type_field.setPlaceholderText("Type a task…")
         self._type_field.setFixedHeight(TYPEFIELD_H - 8)
         self._type_field.setStyleSheet(
-            f"QLineEdit#typeField{{background:#17171C; color:{C['text']}; border:1px solid {C['border']};"
-            f" border-radius:9px; padding:4px 11px; font-size:12px;}}"
-            f"QLineEdit#typeField:focus{{border-color:{ACCENT};}}")
+            f"QLineEdit#typeField{{background:{C['surface']}; color:{C['text']}; border:1px solid transparent;"
+            f" border-radius:16px; padding:4px 14px; font-size:13px;}}"
+            "QLineEdit#typeField:focus{border-color:rgba(167,139,250,0.45);}")
+        self._type_field.set_hint(_SPEAK_HINT)
         self._type_field.returnPressed.connect(self._on_type_submit)
         # Chat-style SEND button (painted ↑) — Enter still works; enabled only when there's text.
         self._send_btn = _SendButton()
@@ -744,9 +758,9 @@ class ClaudeOverlay(QWidget):
         self._send_btn.setCursor(Qt.PointingHandCursor)
         self._send_btn.setEnabled(False)
         self._send_btn.setStyleSheet(
-            f"QPushButton#sendBtn{{background:{ACCENT}; border:none; border-radius:9px;}}"
-            f"QPushButton#sendBtn:disabled{{background:#2E2E36; border:none; border-radius:9px;}}"
-            f"QPushButton#sendBtn:hover{{background:#E08A6B;}}")
+            f"QPushButton#sendBtn{{background:{ACCENT}; border:none; border-radius:16px;}}"
+            f"QPushButton#sendBtn:disabled{{background:{C['surface']}; border:none; border-radius:16px;}}"
+            f"QPushButton#sendBtn:hover{{background:{ACCENT_LIGHT};}}")
         self._send_btn.clicked.connect(self._on_type_submit)
         self._type_field.textChanged.connect(lambda s: self._send_btn.setEnabled(bool(s.strip())))
         trow = QHBoxLayout()
@@ -772,6 +786,36 @@ class ClaudeOverlay(QWidget):
 
         self._sync_model_panel()        # initial model-button highlight + slider position
         self._apply_minimized_chrome(True)
+
+    def paintEvent(self, _e) -> None:
+        """The OPEN card, drawn like the hover bar (VoiceOS): one black shape flush with the notch, its
+        top corners curving into the screen edge, rounded bottom corners, a soft fade at the very
+        bottom. Resting / hover-bar states draw nothing here (the handle / bar paint themselves)."""
+        if self._minimized:
+            return
+        from PySide6.QtGui import QPainterPath, QLinearGradient
+        r = self._card.geometry()
+        x0, x1, h = r.left(), r.right() + 1, r.bottom() + 1
+        s, rad = HOVER_SHOULDER, 22
+        path = QPainterPath()
+        path.moveTo(x0 - s, 0)
+        path.lineTo(x1 + s, 0)
+        path.cubicTo(x1 + s * .55, 0, x1, s * .45, x1, s)        # top-right: curves into the edge
+        path.lineTo(x1, h - rad)
+        path.quadTo(x1, h, x1 - rad, h)
+        path.lineTo(x0 + rad, h)
+        path.quadTo(x0, h, x0, h - rad)
+        path.lineTo(x0, s)
+        path.cubicTo(x0, s * .45, x0 - s * .55, 0, x0 - s, 0)    # top-left: curves into the edge
+        path.closeSubpath()
+        g = QLinearGradient(0, 0, 0, h)
+        g.setColorAt(0, QColor(0, 0, 0, 255))
+        g.setColorAt(max(0.0, (h - 22) / max(h, 1)), QColor(0, 0, 0, 255))
+        g.setColorAt(1, QColor(0, 0, 0, 205))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.fillPath(path, g)
+        p.end()
 
     def _hint_html(self) -> str:
         chip = (f"background:{C['surface']}; border:1px solid {C['border']}; border-radius:4px; "
@@ -801,9 +845,9 @@ class ClaudeOverlay(QWidget):
 
     def _icon_btn_style(self) -> str:
         return (
-            "QPushButton { background: transparent; border: none; "
-            f"color: {C['text_muted']}; font-size: 12px; border-radius: 11px; }}"
-            f"QPushButton:hover {{ background: {C['surface']}; color: {C['text']}; }}")
+            f"QPushButton {{ background: {C['surface']}; border: none; "
+            f"color: {C['text_muted']}; font-size: 11px; border-radius: 11px; }}"
+            f"QPushButton:hover {{ background: #2A2A2E; color: {C['text']}; }}")
 
     def _make_idle_page(self) -> QWidget:
         """Shown when the notch is opened at idle (no task): a prompt to type or speak."""
@@ -861,9 +905,9 @@ class ClaudeOverlay(QWidget):
         deny.setCursor(Qt.PointingHandCursor)
         deny.setFixedHeight(34)
         deny.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {RED}; border: 1px solid {RED}; "
-            "border-radius: 9px; font-size: 13px; font-weight: 600; }"
-            "QPushButton:hover { background: rgba(255,107,107,0.10); }")
+            f"QPushButton {{ background: {C['surface']}; color: {RED}; border: none; "
+            "border-radius: 17px; font-size: 13px; font-weight: 600; }"
+            "QPushButton:hover { background: rgba(242,100,90,0.16); }")
         deny.clicked.connect(self._on_deny)
         btns.addWidget(deny, 1)
         approve = QPushButton("Approve")
@@ -871,7 +915,7 @@ class ClaudeOverlay(QWidget):
         approve.setFixedHeight(34)
         approve.setStyleSheet(
             f"QPushButton {{ background: {GREEN}; color: white; border: none; "
-            "border-radius: 9px; font-size: 13px; font-weight: 700; }"
+            "border-radius: 17px; font-size: 13px; font-weight: 700; }"
             "QPushButton:hover { background: #278238; }")
         approve.clicked.connect(self._on_approve)
         btns.addWidget(approve, 1)
@@ -1292,16 +1336,16 @@ class ClaudeOverlay(QWidget):
             self._primary_btn.setText("◼  Stop")
             self._primary_btn.setVisible(True)
             self._primary_btn.setStyleSheet(
-                f"QPushButton {{ background: transparent; color: {RED}; border: 1px solid {RED}; "
-                "border-radius: 8px; font-size: 12px; font-weight: 600; padding: 0 12px; }"
-                "QPushButton:hover { background: rgba(242,100,90,0.12); }")
+                f"QPushButton {{ background: {C['surface']}; color: {RED}; border: none; "
+                "border-radius: 13px; font-size: 12px; font-weight: 600; padding: 0 14px; }"
+                "QPushButton:hover { background: rgba(242,100,90,0.16); }")
         elif self._state in ("done", "error"):
             self._primary_btn.setText("Open in Claude  →")
             self._primary_btn.setVisible(True)
             self._primary_btn.setStyleSheet(
-                f"QPushButton {{ background: {C['surface']}; color: {C['text']}; border: 1px solid {C['border']}; "
-                "border-radius: 8px; font-size: 12px; font-weight: 600; padding: 0 12px; }"
-                f"QPushButton:hover {{ background: {ACCENT}; color: white; border-color: {ACCENT}; }}")
+                f"QPushButton {{ background: {C['surface']}; color: {C['text']}; border: none; "
+                "border-radius: 13px; font-size: 12px; font-weight: 600; padding: 0 14px; }"
+                f"QPushButton:hover {{ background: {ACCENT}; color: #0B0B0E; }}")
         else:                                   # needs_you — Approve/Deny live in the page
             self._primary_btn.setVisible(False)
 
@@ -1540,7 +1584,7 @@ class ClaudeOverlay(QWidget):
         self._topbar.setVisible(not minimized)
         self._stack.setVisible(not minimized)
         self._ctrl_row.setVisible(not minimized)
-        self._footer.setVisible(not minimized)
+        self._footer.setVisible(False)            # the hint lives in the input now
         self._type_field.setVisible(not minimized)
         self._send_btn.setVisible(not minimized)
         self._transcript.setVisible((not minimized) and bool(self._transcript.text()))
@@ -1570,10 +1614,11 @@ class ClaudeOverlay(QWidget):
             self._hover_poll.stop()               # open card: normal enter/leave handles collapse
             self._hover_in = False
             self.layout().setContentsMargins(SHADOW_MARGIN, 0, SHADOW_MARGIN, SHADOW_MARGIN)
-            col.setContentsMargins(16, nb + 8, 16, 12)    # content starts BELOW the notch band
+            # the header row sits IN the notch band (beside the notch); the rest starts just below it
+            col.setContentsMargins(16, max(4, (nb - TOPBAR_H) // 2), 16, 12)
             self._card.setStyleSheet(self._card_style)
             if eff is not None:
-                eff.setEnabled(True)
+                eff.setEnabled(False)
 
     def _nub_style(self) -> str:
         # At rest the nub is visually NOTHING, but it must stay a CLICK TARGET. A non-activating
@@ -1603,7 +1648,7 @@ class ClaudeOverlay(QWidget):
                 h += MODEL_LIST_H             # model dropdown list expanded
         if self._details_open:
             h += sp + (DETAILS_H - 6)         # the expanded live feed
-        h += sp + TYPEFIELD_H + sp + FOOTER_H + cm.bottom() + om.bottom()
+        h += sp + TYPEFIELD_H + cm.bottom() + om.bottom()
         self.setMinimumHeight(0)
         self.resize(self.width(), max(60, int(h)))
         self._reassert()
