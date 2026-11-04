@@ -125,6 +125,10 @@ def test_key_tap():
     cb2(None, kCGEventFlagsChanged, ev(59, False, 0), None)
     assert ctl == ["tap"], ctl
     cb2(None, kCGEventFlagsChanged, ev(59, True, CTRL), None)
+    st2['ctrl_t'] -= 0.7                                                                  # a relaxed 0.7s tap…
+    cb2(None, kCGEventFlagsChanged, ev(59, False, 0), None)
+    assert ctl == ["tap", "tap"], "…still sends (the old 0.4s window cut it off)"
+    cb2(None, kCGEventFlagsChanged, ev(59, True, CTRL), None)
     cb2(None, kCGEventKeyDown, ev(8, True, CTRL), None)                                   # ⌃C
     cb2(None, kCGEventFlagsChanged, ev(59, False, 0), None)
     cb2(None, kCGEventFlagsChanged, ev(59, True, CTRL), None)
@@ -132,9 +136,9 @@ def test_key_tap():
     cb2(None, kCGEventFlagsChanged, ev(56, False, CTRL), None)
     cb2(None, kCGEventFlagsChanged, ev(59, False, 0), None)
     cb2(None, kCGEventFlagsChanged, ev(59, True, CTRL), None)
-    st2['ctrl_t'] -= 1                                                                    # held a whole second
+    st2['ctrl_t'] -= 1.5                                                                  # held 1.5s = a hold
     cb2(None, kCGEventFlagsChanged, ev(59, False, 0), None)
-    assert ctl == ["tap", "space-down", "space-up"], f"only the clean tap sends: {ctl}"   # (⇧ still draws)
+    assert ctl == ["tap", "tap", "space-down", "space-up"], f"only clean taps send: {ctl}"   # (⇧ still draws)
     ctl.clear()                            # still holding fn (e.g. a 3rd ⌃ right after ⌃⌃) ≠ the send tap
     cb2(None, kCGEventFlagsChanged, ev(63, True, FN), None)
     cb2(None, kCGEventFlagsChanged, ev(59, True, FN | CTRL), None)
@@ -363,9 +367,15 @@ def test_receive_mode():
     assert d._state == "idle", "a ⌃ tap outside receive mode does nothing"
     # slow ⌃ ⌃ (a normal fn + ⌃ hold, then ⌃ again later) is NOT receive mode
     d._state, d._recorder, d._key_down, d._latched = "recording", _Rec(), True, False
-    d._on_control(); d._ctrl_at -= 1; d._on_control()
+    d._on_control(); d._ctrl_at -= 1.5; d._on_control()
     assert not d._receive and not d._latched
     d._cancel_recording()
+    # a relaxed ⌃ … ⌃ (press, let go, press again 0.7s later) IS receive mode — 0.45s was too tight live
+    d._state, d._recorder, d._key_down, d._latched = "recording", _Rec(), True, False
+    d._on_control(); d._ctrl_at -= 0.7; d._on_control()
+    assert d._receive and d._latched, "⌃ ⌃ 0.7s apart → receive mode"
+    d._cancel_recording()
+    assert not d._receive
     # Esc in receive mode drops everything — nothing sent, keys back to normal
     n = len(mw.assistant_page.calls)
     fn_down_and_ctrl_ctrl()

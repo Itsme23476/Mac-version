@@ -362,9 +362,9 @@ def test_hover_cues_click_opens():
     print("rail: hover = cue only, click opens, nudge = cue  OK")
 
 
-def test_drawer_leave_lock_and_search():
-    """VoiceOS drawer: opened by a click, it tucks away shortly after the mouse leaves — unless the lock
-    is on, or you're typing in the search box."""
+def test_drawer_leave_and_search():
+    """VoiceOS drawer: opened by a click, it tucks away shortly after the mouse leaves — unless you're
+    typing in the search box. No lock button (removed 2026-11-05)."""
     from PySide6.QtCore import QPoint
     from app.ui import conversation_rail as cr
     rail = ConversationRail()
@@ -380,16 +380,8 @@ def test_drawer_leave_lock_and_search():
         assert rail._expanded and rail.x() == rail._x_open
         cr._cursor_pos = lambda: away
         pump(800)
-        assert not rail._expanded, "unlocked drawer should tuck away after the mouse leaves"
-        cr._cursor_pos = lambda: on
-        rail.open_full(); pump(200)
-        rail._toggle_lock()                                     # lock it open
-        cr._cursor_pos = lambda: away
-        pump(800)
-        assert rail._expanded and rail._pinned, "locked drawer stays open"
-        rail._toggle_lock()                                     # unlock while away → tucks away
-        pump(800)
-        assert not rail._expanded
+        assert not rail._expanded, "the drawer should tuck away after the mouse leaves"
+        assert not hasattr(rail, "_lock_btn") and not hasattr(rail, "_pinned"), "lock is gone"
         cr._cursor_pos = lambda: on
         rail.open_full(); pump(200)
         rail._search.setText("essay")                           # typing a search
@@ -483,7 +475,7 @@ if __name__ == "__main__":
     test_continued_chats_survive_restart()
     test_idle_rail_shown_before_any_request()
     test_hover_cues_click_opens()
-    test_drawer_leave_lock_and_search()
+    test_drawer_leave_and_search()
     test_new_chat_opens_blank_notch()
     test_notch_returns_to_last_sent_chat_or_default()
     test_quit_mid_task_stops_threads()

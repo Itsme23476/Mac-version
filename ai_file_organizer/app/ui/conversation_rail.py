@@ -2,9 +2,9 @@
 
 At rest: a slim dark see-through sliver against the left screen edge. Hover → the sliver grows (a cue,
 never opens). CLICK → a near-black drawer slides out, flush on the edge with corners that curve into it:
-pill search + a lock, "New chat", then the chats grouped like Claude's sidebar — Running (working or
+pill search, "New chat", then the chats grouped like Claude's sidebar — Running (working or
 waiting on you), Today / Previous 7 days / Previous 30 days / one group per month — one line each with a
-round icon. Unlocked, it tucks away shortly after the mouse leaves; the lock keeps it open. Hover is read
+round icon. It tucks away shortly after the mouse leaves (not while you're searching). Hover is read
 by polling the cursor (macOS doesn't deliver enter/leave to an inactive app's non-activating panel).
 Selecting a conversation shows it in the notch. Same non-activating, all-Spaces, no-focus-steal panel
 mechanics as the notch (`notch_panel.configure_macos_panel`), so it never steals focus from your app.
@@ -213,10 +213,9 @@ class ConversationRail(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._pinned = False          # the lock: keeps the drawer open after the mouse leaves it
         self._close_timer = QTimer(self)
         self._close_timer.setSingleShot(True)
-        self._close_timer.setInterval(450)    # grace before an unlocked drawer tucks away on leave
+        self._close_timer.setInterval(450)    # grace before the drawer tucks away on leave
         self._close_timer.timeout.connect(self._close_if_left)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -256,8 +255,8 @@ class ConversationRail(QWidget):
         col = QVBoxLayout(self._card)
         col.setContentsMargins(10, 12, 8, 10)
         col.setSpacing(6)
-        # Top bar (VoiceOS): a pill search box + a lock that keeps the drawer open. Clicking the search
-        # keys the panel so it can take typing (see _focus_search).
+        # Top bar (VoiceOS): a pill search box. Clicking it keys the panel so it can take typing
+        # (see _focus_search).
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(6)
@@ -274,15 +273,6 @@ class ConversationRail(QWidget):
         self._search.textChanged.connect(lambda _t: self._render())
         self._search.installEventFilter(self)
         top.addWidget(self._search, 1)
-        self._lock_btn = QPushButton()
-        self._lock_btn.setFixedSize(30, 30)
-        self._lock_btn.setCursor(Qt.PointingHandCursor)
-        self._lock_btn.setStyleSheet(
-            "QPushButton{background:#232327;border:none;border-radius:15px;}"
-            "QPushButton:hover{background:#2E2E33;}")
-        self._lock_btn.clicked.connect(self._toggle_lock)
-        self._sync_lock()
-        top.addWidget(self._lock_btn)
         col.addLayout(top)
         self._new_btn = QPushButton("New chat")
         self._new_btn.setIcon(QIcon(_glyph("plus")))
@@ -494,33 +484,20 @@ class ConversationRail(QWidget):
         if inside == self._hovered:
             return
         self._hovered = inside
-        logger.info("[rail] hover in" if inside else f"[rail] hover out (locked={self._pinned})")
+        logger.info("[rail] hover in" if inside else "[rail] hover out")
         self._set_cue(inside)
         if inside:
             self._close_timer.stop()
         elif self._expanded:
-            self._close_timer.start()            # unlocked → tuck away shortly after you leave
+            self._close_timer.start()            # tuck away shortly after you leave
 
     def _close_if_left(self):
-        """Grace period over: tuck the drawer away unless it's locked, you came back, or you're typing
-        in the search box."""
+        """Grace period over: tuck the drawer away unless you came back or you're typing in the search
+        box."""
         # (search TEXT, not focus: Qt hands the search box focus as soon as the drawer shows)
-        if self._expanded and not self._pinned and not self._hovered and not self._search.text():
-            logger.info("[rail] closed (mouse left, unlocked)")
+        if self._expanded and not self._hovered and not self._search.text():
+            logger.info("[rail] closed (mouse left)")
             self._set_expanded(False)
-
-    def _toggle_lock(self):
-        self._pinned = not self._pinned
-        logger.info(f"[rail] lock {'on' if self._pinned else 'off'}")
-        self._sync_lock()
-        if not self._pinned and not self._hovered:
-            self._close_timer.start()
-
-    def _sync_lock(self):
-        from PySide6.QtGui import QIcon
-        self._lock_btn.setIcon(QIcon(_glyph("lock", on=self._pinned)))
-        self._lock_btn.setToolTip("Unlock (tuck away when the mouse leaves)" if self._pinned
-                                  else "Lock open")
 
     def _poll_hover(self):
         """Hover source of truth: is the global cursor over the rail (incl. the 7 px edge strip)? macOS
@@ -530,7 +507,7 @@ class ConversationRail(QWidget):
             return
         inside = self.frameGeometry().contains(_cursor_pos())
         self._set_hovered(inside)
-        if not inside and self._expanded and not self._pinned and not self._close_timer.isActive():
+        if not inside and self._expanded and not self._close_timer.isActive():
             self._close_timer.start()    # open but the mouse isn't on it (e.g. opened from a row/notch)
 
     def enterEvent(self, e):
@@ -551,15 +528,12 @@ class ConversationRail(QWidget):
 
     def open_full(self):
         """Open the drawer (its own click action — the notch is not affected). It stays open while the
-        mouse is on it; the lock keeps it open after you leave."""
+        mouse is on it."""
         self._close_timer.stop()
         self._set_expanded(True)
 
     def collapse(self):
         self._close_timer.stop()
-        if self._pinned:
-            self._pinned = False
-            self._sync_lock()
         self._set_expanded(False)
 
     def _configure(self):

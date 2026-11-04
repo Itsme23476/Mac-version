@@ -436,3 +436,28 @@ yourself, the Mac side can't see it.
     first and vanished over dark windows.
   - Working: the alpha breathes. An approval waiting adds the amber dot to its right.
   - `_STATE_COLOR` and `_Handle._color()` are deleted.
+
+### 8e. After 14.10.1 (Mac, 2026-11-05): lock removed, ⌃ timings 1s, quit logging
+- **Lock button removed from BOTH the notch card and the left drawer** (Damianos: unclear, and
+  VoiceOS has none).
+  - Card: `_pin_btn`, `_toggle_pin` and `_sync_pin_btn` are deleted. `_pinned` STAYS: clicking the
+    notch still opens the card pinned (it stays until you click again, press X or Esc). A card that
+    opened by itself still closes after 3.5s unless the mouse is on it.
+  - Drawer: `_lock_btn`, `_toggle_lock`, `_sync_lock` and `_pinned` are deleted. It tucks away 0.45s
+    after the mouse leaves, except while the search box has text.
+  - `_glyph` lost its `'lock'` kind and `on` parameter.
+  - Test: `test_rail_recent.py::test_drawer_leave_and_search`.
+- **⌃ timings widened to 1 second** (both were too tight live):
+  - `dictation.RECEIVE_TAP_SEC` 0.45 → 1.0: the 2nd ⌃ press while fn is held enters receive mode.
+    Press, let go, press again within 1s counts.
+  - `mac_hotkey.CTRL_TAP_SEC` 0.4 → 1.0: in receive mode, a lone ⌃ released within 1s sends.
+  - On Windows, if receive mode exists, use the same values. Tests: `test_screen_ink.py`. A 0.7s tap
+    and a 0.7s ⌃…⌃ now pass; checked that they fail with the old values.
+- **"App quit by itself" diagnostics: BOTH platforms.** Closing the main window quits the whole app.
+  Its `closeEvent` stops voice, and Qt's quit-on-last-window-closed is on. Telemetry (`session_ended`)
+  showed every "random" quit was that window closing.
+  - New `[quit]` log line in `MainWindow.closeEvent` via `_close_trigger()`. It records the macOS event
+    being handled (red button = mouse, ⌘W/⌘Q = key + which key, quit request = type 13), the frontmost
+    app, whether Filect was active, and the Python caller.
+  - `main.py` also logs `lastWindowClosed` and `aboutToQuit`.
+  - On Windows, log the same in `closeEvent` (the caller + `event.spontaneous()` part is portable).

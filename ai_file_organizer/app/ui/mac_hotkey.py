@@ -409,7 +409,7 @@ ESC_KEYCODE = 53
 SHIFT_KEYCODES = (56, 60)       # left / right Shift
 CONTROL_KEYCODES = (59, 62)     # left / right Control
 COMMAND_FLAG = 0x100000         # kCGEventFlagMaskCommand
-CTRL_TAP_SEC = 0.4              # receive mode: ⌃ pressed + released alone within this = send
+CTRL_TAP_SEC = 1.0              # receive mode: ⌃ pressed + released alone within this = send (was 0.4)
 FN_FLAG = 0x800000              # kCGEventFlagMaskSecondaryFn
 SHIFT_FLAG = 0x20000            # kCGEventFlagMaskShift
 CONTROL_FLAG = 0x40000          # kCGEventFlagMaskControl

@@ -547,6 +547,9 @@ def main():
     window = MainWindow()
     app.set_main_window(window)  # register for filect:// deep link handling
     window.show()
+    # Quit diagnostics (see MainWindow.closeEvent's "[quit]" line for what closed the window).
+    app.lastWindowClosed.connect(lambda: logger.info("[quit] last window closed → Qt quits the app"))
+    app.aboutToQuit.connect(lambda: logger.info("[quit] app is quitting"))
 
     # Pull the app to the front now that the main window exists. After a Google
     # sign-in (active subscription) the browser had focus, so without this the

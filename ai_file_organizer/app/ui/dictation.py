@@ -366,7 +366,8 @@ class VoiceDictationController(QObject):
                 self._take_shot()                      # a hold: release = snapshot
 
     # ---- receive mode: hold fn, double-tap ⌃ → hands-free; talk, scroll, snapshot; tap ⌃ = send --
-    RECEIVE_TAP_SEC = 0.45   # two ⌃ presses this close together (while fn is held) = receive mode
+    RECEIVE_TAP_SEC = 1.0    # two ⌃ presses this close together (while fn is held) = receive mode
+                             # (was 0.45: too tight live; press–release–press within 1s now counts)
 
     def _on_control(self, kind: str = "press"):
         """"press" = ⌃ while fn is held: a second one in quick succession enters receive mode.

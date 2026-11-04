@@ -49,6 +49,28 @@ from app.ui.contextual_tips import ContextualTipsManager
 
 logger = logging.getLogger(__name__)
 
+
+def _close_trigger() -> str:
+    """For the '[quit]' log: the macOS event being handled when the main window closed (red-button
+    click vs ⌘W / ⌘Q key), which app was frontmost, whether Filect was active, and the Python caller
+    (only meaningful for a close/quit called from our own code)."""
+    import sys
+    import traceback
+    caller = " <- ".join(f"{f.name}:{f.lineno}" for f in reversed(traceback.extract_stack()[-6:-2]))
+    if sys.platform != "darwin":
+        return f"caller={caller}"
+    try:
+        from AppKit import NSApp, NSWorkspace
+        ev = NSApp.currentEvent()
+        what = "no event" if ev is None else f"type={ev.type()}"
+        if ev is not None and ev.type() in (10, 11):           # NSEventTypeKeyDown / KeyUp
+            what += f" key={ev.charactersIgnoringModifiers()!r} cmd={bool(ev.modifierFlags() & (1 << 20))}"
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        return (f"event[{what}] frontmost={front.localizedName() if front else None} "
+                f"filect_active={bool(NSApp.isActive())} caller={caller}")
+    except Exception as e:
+        return f"caller={caller} (no NSEvent: {e})"
+
 # QuickSearch heuristics: localized button/label names
 CONFIRM_NAMES = [
     "Open", "Save", "OK", "Select", "Choose"
@@ -450,6 +472,9 @@ class MainWindow(QMainWindow):
             _app.applicationStateChanged.connect(self._on_app_state_changed)
 
     def closeEvent(self, event):
+        # Closing this window quits the whole app — log WHAT closed it (it "quit by itself" 3× on
+        # 2026-11-04; telemetry showed each time was this window closing).
+        logger.info("[quit] main window close (spontaneous=%s) %s", event.spontaneous(), _close_trigger())
         # Session length signal. Fires synchronously but track() itself is async,
         # so we don't block the shutdown. Wrapped in try/except so a failed
         # telemetry POST can never block the user from closing the app.

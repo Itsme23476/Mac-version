@@ -104,31 +104,21 @@ def _load_logo(px: int):
     return None
 
 
-def _glyph(kind: str, px: int = 16, on: bool = False, color=None):
-    """Small line glyphs painted in code (the bundle has no icon assets): 'search', 'lock', 'plus',
-    'close'. on = lavender (and a shut lock); color overrides the pen colour."""
-    from PySide6.QtGui import QPixmap, QPainterPath
+def _glyph(kind: str, px: int = 16, color=None):
+    """Small line glyphs painted in code (the bundle has no icon assets): 'search', 'plus', 'close'."""
+    from PySide6.QtGui import QPixmap
     pm = QPixmap(px * 2, px * 2)
     pm.setDevicePixelRatio(2)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing, True)
-    pen = QPen(color or (QColor(167, 139, 250) if on else QColor(150, 150, 160)), 1.5)
+    pen = QPen(color or QColor(150, 150, 160), 1.5)
     pen.setCapStyle(Qt.RoundCap)
     p.setPen(pen)
     s = float(px)
     if kind == "search":
         p.drawEllipse(QRectF(s * .18, s * .18, s * .5, s * .5))
         p.drawLine(QPointF(s * .6, s * .6), QPointF(s * .84, s * .84))
-    elif kind == "lock":
-        p.drawRoundedRect(QRectF(s * .22, s * .46, s * .56, s * .4), 2, 2)
-        lift = 0 if on else s * .1                      # unlocked: the shackle sits raised and open
-        path = QPainterPath(QPointF(s * .34, s * .46 - lift))
-        path.lineTo(s * .34, s * .32 - lift)
-        path.arcTo(QRectF(s * .34, s * .14 - lift, s * .32, s * .32), 180, -180)
-        if on:
-            path.lineTo(s * .66, s * .46)
-        p.drawPath(path)
     elif kind == "plus":
         p.drawLine(QPointF(s * .5, s * .22), QPointF(s * .5, s * .78))
         p.drawLine(QPointF(s * .22, s * .5), QPointF(s * .78, s * .5))
@@ -602,14 +592,6 @@ class ClaudeOverlay(QWidget):
             f"color: {C['text_2']}; font-size: 12px; background: transparent; border: none;")
         top.addWidget(self._timer_label, 0, Qt.AlignVCenter)
         top.addStretch(1)                       # the physical notch sits in this gap
-        self._pin_btn = QPushButton()            # lock = keep open (same icon as the left list's lock)
-        self._pin_btn.setToolTip("Tuck away")
-        self._pin_btn.setCursor(Qt.PointingHandCursor)
-        self._pin_btn.setFixedSize(22, 22)
-        self._pin_btn.setIconSize(QSize(13, 13))
-        self._pin_btn.setStyleSheet(self._icon_btn_style())
-        self._pin_btn.clicked.connect(self._toggle_pin)
-        top.addWidget(self._pin_btn, 0, Qt.AlignVCenter)
         close = QPushButton()
         close.setIcon(QIcon(_glyph("close", 13, color=QColor(C["text_2"]))))
         close.setIconSize(QSize(13, 13))
@@ -983,7 +965,6 @@ class ClaudeOverlay(QWidget):
         self._done_timer.stop()
         # Default = NOT pinned → tucked at rest, revealed on hover. (Keeps whatever the user pinned;
         # present never force-pins anymore — that was the old 'constantly up' behaviour.)
-        self._sync_pin_btn()
         self.set_state("working")
         self._set_status("Working", C["text_muted"])
         self._start_elapsed()        # reset the "Working m:ss" counter for this task
@@ -1025,7 +1006,6 @@ class ClaudeOverlay(QWidget):
         self._reset_details()
         self._stack.setCurrentWidget(self._page_idle)
         self._pinned = False
-        self._sync_pin_btn()
         if self.isVisible() and not self._minimized:
             return                               # already open (you're hovering) — leave it be
         self._minimized = True
@@ -1532,7 +1512,6 @@ class ClaudeOverlay(QWidget):
             return
         if self._state != "needs_you":
             self._pinned = False
-            self._sync_pin_btn()
             self.minimize_panel()
             e.accept()
             return
@@ -1562,20 +1541,8 @@ class ClaudeOverlay(QWidget):
     def open_full(self) -> None:
         """Expand the card and pin it (the notch's own click action)."""
         self._pinned = True
-        self._sync_pin_btn()
         if self._minimized:
             self.restore_panel()
-
-    def _toggle_pin(self) -> None:
-        self._pinned = not self._pinned
-        self._sync_pin_btn()
-        if not self._pinned and not self.frameGeometry().contains(QCursor.pos()):
-            self._collapse_timer.start(200)
-
-    def _sync_pin_btn(self) -> None:
-        self._pin_btn.setIcon(QIcon(_glyph("lock", 13, on=self._pinned,
-                                           color=None if self._pinned else QColor(C["text_2"]))))
-        self._pin_btn.setToolTip("Unpin (collapse on leave)" if self._pinned else "Keep open")
 
     def restore_panel(self) -> None:
         """Expand from the handle to the full card."""
