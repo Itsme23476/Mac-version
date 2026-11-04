@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 from PySide6.QtCore import (
     Qt, QTimer, QPointF, QRectF, QSize, QPropertyAnimation, QEasingCurve, Signal, QUrl,
 )
-from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QCursor, QDesktopServices
+from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QCursor, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextBrowser, QSlider, QLineEdit,
@@ -71,14 +71,6 @@ TYPEFIELD_H = 40            # the "type a task" input row at the bottom
 PEEK_H = 34                 # strip below the notch band: invisible at rest, shows the hover tab (click target)
 WIN_TITLE = "Filect Assistant"   # unique — notch_panel finds the NSWindow by this
 
-# State -> handle colour. working/needs_you also breathe (animated alpha).
-_STATE_COLOR = {
-    "idle":      QColor(255, 255, 255, 90),
-    "working":   QColor(ACCENT),
-    "needs_you": QColor(AMBER),
-    "done":      QColor(GREEN),
-    "error":     QColor(RED),
-}
 # Deterministic content heights per state (no runtime layout measuring — that raced in organize).
 _STACK_H = {"working": 22, "needs_you": 116, "done": 118, "error": 56, "idle": 34}
 DETAILS_H = 166      # height of the live "Details" feed when expanded
@@ -112,10 +104,44 @@ def _load_logo(px: int):
     return None
 
 
+def _glyph(kind: str, px: int = 16, on: bool = False, color=None):
+    """Small line glyphs painted in code (the bundle has no icon assets): 'search', 'lock', 'plus',
+    'close'. on = lavender (and a shut lock); color overrides the pen colour."""
+    from PySide6.QtGui import QPixmap, QPainterPath
+    pm = QPixmap(px * 2, px * 2)
+    pm.setDevicePixelRatio(2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(color or (QColor(167, 139, 250) if on else QColor(150, 150, 160)), 1.5)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    s = float(px)
+    if kind == "search":
+        p.drawEllipse(QRectF(s * .18, s * .18, s * .5, s * .5))
+        p.drawLine(QPointF(s * .6, s * .6), QPointF(s * .84, s * .84))
+    elif kind == "lock":
+        p.drawRoundedRect(QRectF(s * .22, s * .46, s * .56, s * .4), 2, 2)
+        lift = 0 if on else s * .1                      # unlocked: the shackle sits raised and open
+        path = QPainterPath(QPointF(s * .34, s * .46 - lift))
+        path.lineTo(s * .34, s * .32 - lift)
+        path.arcTo(QRectF(s * .34, s * .14 - lift, s * .32, s * .32), 180, -180)
+        if on:
+            path.lineTo(s * .66, s * .46)
+        p.drawPath(path)
+    elif kind == "plus":
+        p.drawLine(QPointF(s * .5, s * .22), QPointF(s * .5, s * .78))
+        p.drawLine(QPointF(s * .22, s * .5), QPointF(s * .78, s * .5))
+    elif kind == "close":
+        p.drawLine(QPointF(s * .28, s * .28), QPointF(s * .72, s * .72))
+        p.drawLine(QPointF(s * .72, s * .28), QPointF(s * .28, s * .72))
+    p.end()
+    return pm
+
+
 class _Handle(QWidget):
-    """The notch hotspot. INVISIBLE at rest — it draws nothing unless you hover it (a faint pill
-    appears so you know where to click) or the task is blocked waiting on you (needs_you: a quiet
-    amber pill + dot that breathes, the one thing allowed to show unprompted). Click opens."""
+    """The notch hotspot. INVISIBLE at rest when idle. While a task is live or finished it shows a gray
+    lip hanging flush from the notch (amber dot = an approval waits); hover grows it. Click opens."""
 
     clicked = Signal()
 
@@ -181,15 +207,6 @@ class _Handle(QWidget):
         # (amber), a finished task (green), or an error (red). Only idle is invisible.
         return self._state in ("working", "needs_you", "done", "error")
 
-    def _color(self) -> QColor:
-        base = _STATE_COLOR.get(self._state, _STATE_COLOR["idle"])
-        if self._hovered and self._state in ("idle", "working", "done"):
-            base = QColor(255, 255, 255, 150)      # neutral affordance on hover
-        if self._state in ("working", "needs_you") and not self._hovered:
-            a = 150 + int(90 * (0.5 + 0.5 * math.sin(self._phase)))
-            return QColor(base.red(), base.green(), base.blue(), a)
-        return base
-
     def paintEvent(self, _e) -> None:
         base = self._shows_at_rest()
         # At rest the notch is COMPLETELY hidden — nothing is drawn until you hover it (reveal > 0),
@@ -220,18 +237,23 @@ class _Handle(QWidget):
                 p.drawLine(QPointF(cx, cy + 2), QPointF(cx + 5, cy - 3))
             p.end()
             return
-        # Live states (working / needs_you / done / error): the small status pill, as before.
-        r = max(self._reveal, 0.45)
-        pill_w = 46.0 + 54.0 * r
-        pill_h = 4.0 + 3.0 * r
-        x = (self.width() - pill_w) / 2.0
-        y = 2.0
-        col = self._color()
+        # Live states (working / needs_you / done / error): a gray lip hanging FLUSH from the notch (like
+        # the left list's edge tab, attached to the edge), that grows on hover. Solid gray, not
+        # translucent black — black vanished over dark windows. Working breathes; an approval adds amber.
+        r = self._reveal
+        lip_w = self.width() * (0.5 + 0.12 * r)
+        t = 4.0 + 4.0 * r
+        a = 150 + int(70 * r)
+        if self._state == "working" and r < 0.02:
+            a = 90 + int(90 * (0.5 + 0.5 * math.sin(self._phase)))
+        x = (self.width() - lip_w) / 2.0
         p.setPen(Qt.NoPen)
-        p.setBrush(col)
-        p.drawRoundedRect(QRectF(x, y, pill_w, pill_h), pill_h / 2.0, pill_h / 2.0)
+        p.setBrush(QColor(160, 160, 168, a))
+        p.drawRoundedRect(QRectF(x, -6.0, lip_w, t + 6.0), t / 2.0 + 1, t / 2.0 + 1)   # top is off-widget → flat, attached
         if self._state == "needs_you":
-            p.drawEllipse(QPointF(x + pill_w + 9, y + pill_h / 2.0), 3.5, 3.5)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(AMBER))
+            p.drawEllipse(QPointF(x + lip_w + 9, t / 2.0 + 1), 3.5, 3.5)
         p.end()
 
     def mousePressEvent(self, e) -> None:
@@ -580,14 +602,17 @@ class ClaudeOverlay(QWidget):
             f"color: {C['text_2']}; font-size: 12px; background: transparent; border: none;")
         top.addWidget(self._timer_label, 0, Qt.AlignVCenter)
         top.addStretch(1)                       # the physical notch sits in this gap
-        self._pin_btn = QPushButton("⇣")
+        self._pin_btn = QPushButton()            # lock = keep open (same icon as the left list's lock)
         self._pin_btn.setToolTip("Tuck away")
         self._pin_btn.setCursor(Qt.PointingHandCursor)
         self._pin_btn.setFixedSize(22, 22)
+        self._pin_btn.setIconSize(QSize(13, 13))
         self._pin_btn.setStyleSheet(self._icon_btn_style())
         self._pin_btn.clicked.connect(self._toggle_pin)
         top.addWidget(self._pin_btn, 0, Qt.AlignVCenter)
-        close = QPushButton("✕")
+        close = QPushButton()
+        close.setIcon(QIcon(_glyph("close", 13, color=QColor(C["text_2"]))))
+        close.setIconSize(QSize(13, 13))
         close.setCursor(Qt.PointingHandCursor)
         close.setToolTip("Close")
         close.setFixedSize(22, 22)
@@ -845,9 +870,8 @@ class ClaudeOverlay(QWidget):
 
     def _icon_btn_style(self) -> str:
         return (
-            f"QPushButton {{ background: {C['surface']}; border: none; "
-            f"color: {C['text_muted']}; font-size: 11px; border-radius: 11px; }}"
-            f"QPushButton:hover {{ background: #2A2A2E; color: {C['text']}; }}")
+            "QPushButton { background: #2C2C31; border: none; border-radius: 11px; padding: 0; }"
+            "QPushButton:hover { background: #3A3A41; }")
 
     def _make_idle_page(self) -> QWidget:
         """Shown when the notch is opened at idle (no task): a prompt to type or speak."""
@@ -1549,7 +1573,8 @@ class ClaudeOverlay(QWidget):
             self._collapse_timer.start(200)
 
     def _sync_pin_btn(self) -> None:
-        self._pin_btn.setText("⇣" if self._pinned else "⇡")
+        self._pin_btn.setIcon(QIcon(_glyph("lock", 13, on=self._pinned,
+                                           color=None if self._pinned else QColor(C["text_2"]))))
         self._pin_btn.setToolTip("Unpin (collapse on leave)" if self._pinned else "Keep open")
 
     def restore_panel(self) -> None:

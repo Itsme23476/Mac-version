@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 import logging
 
 from app.ui import notch_panel
-from app.ui.claude_overlay import _TypeField   # a QLineEdit that runs a callback on click (keys the panel)
+from app.ui.claude_overlay import _TypeField, _glyph   # _TypeField: a QLineEdit that runs a callback on click
 
 logger = logging.getLogger(__name__)
 
@@ -108,38 +108,6 @@ def _matches(query: str, *fields) -> bool:
     """Every word of the query appears somewhere in the fields (case-insensitive)."""
     hay = " ".join(f or "" for f in fields).lower()
     return all(w in hay for w in query.lower().split())
-
-
-def _glyph(kind: str, px: int = 16, on: bool = False):
-    """Small line glyphs painted in code (the bundle has no icon assets): 'search', 'lock', 'plus'."""
-    from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath
-    from PySide6.QtCore import QRectF, QPointF
-    pm = QPixmap(px * 2, px * 2)
-    pm.setDevicePixelRatio(2)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing, True)
-    pen = QPen(QColor(167, 139, 250) if on else QColor(150, 150, 160), 1.5)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
-    s = float(px)
-    if kind == "search":
-        p.drawEllipse(QRectF(s * .18, s * .18, s * .5, s * .5))
-        p.drawLine(QPointF(s * .6, s * .6), QPointF(s * .84, s * .84))
-    elif kind == "lock":
-        p.drawRoundedRect(QRectF(s * .22, s * .46, s * .56, s * .4), 2, 2)
-        lift = 0 if on else s * .1                      # unlocked: the shackle sits raised and open
-        path = QPainterPath(QPointF(s * .34, s * .46 - lift))
-        path.lineTo(s * .34, s * .32 - lift)
-        path.arcTo(QRectF(s * .34, s * .14 - lift, s * .32, s * .32), 180, -180)
-        if on:
-            path.lineTo(s * .66, s * .46)
-        p.drawPath(path)
-    elif kind == "plus":
-        p.drawLine(QPointF(s * .5, s * .22), QPointF(s * .5, s * .78))
-        p.drawLine(QPointF(s * .22, s * .5), QPointF(s * .78, s * .5))
-    p.end()
-    return pm
 
 
 def _row_icon(status: str, px: int = 18):
