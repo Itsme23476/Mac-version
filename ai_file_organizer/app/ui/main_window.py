@@ -472,9 +472,17 @@ class MainWindow(QMainWindow):
             _app.applicationStateChanged.connect(self._on_app_state_changed)
 
     def closeEvent(self, event):
-        # Closing this window quits the whole app — log WHAT closed it (it "quit by itself" 3× on
-        # 2026-11-04; telemetry showed each time was this window closing).
-        logger.info("[quit] main window close (spontaneous=%s) %s", event.spontaneous(), _close_trigger())
+        # Closing the window (red button / ⌘W) only HIDES it: Filect keeps running in the menu bar —
+        # voice, the notch and the left list stay on. It used to quit the whole app (the "quit by
+        # itself" of 2026-11-04). A real quit (⌘Q, the menu-bar icon's Quit, an update) sets
+        # app._quitting first (FilectApplication.event) and falls through to the shutdown below.
+        if not getattr(QApplication.instance(), "_quitting", False):
+            logger.info("[quit] main window closed → hidden, Filect keeps running. %s", _close_trigger())
+            event.ignore()
+            self.hide()
+            self._set_macos_focus_mode(False)     # back to a menu-bar app (no Dock icon) while hidden
+            return
+        logger.info("[quit] main window close (quitting) %s", _close_trigger())
         # Session length signal. Fires synchronously but track() itself is async,
         # so we don't block the shutdown. Wrapped in try/except so a failed
         # telemetry POST can never block the user from closing the app.

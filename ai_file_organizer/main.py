@@ -60,6 +60,7 @@ class FilectApplication(QApplication):
         # FileOpen event. We stash it here so main() can forward it to the
         # running instance over the single-instance socket before exiting.
         self._pending_url = None
+        self._quitting = False
 
     def set_main_window(self, window):
         self._main_window = window
@@ -68,6 +69,8 @@ class FilectApplication(QApplication):
         self._auth_dialog = dialog
 
     def event(self, event):
+        if event.type() == QEvent.Quit:
+            self._quitting = True   # a real quit (⌘Q / menu-bar Quit / quit()): let the main window close
         if event.type() == QEvent.FileOpen:
             url = event.url().toString()
             # Always stash — main() reads this to forward to an existing
@@ -547,8 +550,9 @@ def main():
     window = MainWindow()
     app.set_main_window(window)  # register for filect:// deep link handling
     window.show()
-    # Quit diagnostics (see MainWindow.closeEvent's "[quit]" line for what closed the window).
-    app.lastWindowClosed.connect(lambda: logger.info("[quit] last window closed → Qt quits the app"))
+    # Filect lives in the menu bar: closing windows never quits it (MainWindow.closeEvent hides
+    # itself). Only an explicit quit does — ⌘Q, the menu-bar icon's "Quit Filect", or an update.
+    app.setQuitOnLastWindowClosed(False)
     app.aboutToQuit.connect(lambda: logger.info("[quit] app is quitting"))
 
     # Pull the app to the front now that the main window exists. After a Google

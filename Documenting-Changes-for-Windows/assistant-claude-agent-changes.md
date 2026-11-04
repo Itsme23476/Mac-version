@@ -461,3 +461,22 @@ yourself, the Mac side can't see it.
     app, whether Filect was active, and the Python caller.
   - `main.py` also logs `lastWindowClosed` and `aboutToQuit`.
   - On Windows, log the same in `closeEvent` (the caller + `event.spontaneous()` part is portable).
+
+### 8f. Closing the window keeps Filect running (Mac, 2026-11-05): **BOTH platforms (Qt)**
+- Damianos: closing the main window must HIDE it and keep Filect running in the background. The same
+  bug exists on any platform where `closeEvent` accepts and Qt's quit-on-last-window is on.
+- `main.py`: `app.setQuitOnLastWindowClosed(False)`, set after the main window is created. Only an
+  explicit quit ends the app.
+- `FilectApplication.event`: on `QEvent.Quit`, set `self._quitting = True`. ⌘Q, a macOS quit request,
+  `QApplication.quit()` from the tray or the updater all arrive as `QEvent.Quit`; verified on Qt 6.11.
+  Initialise `_quitting = False` in `__init__`.
+- `MainWindow.closeEvent`:
+  - If not `app._quitting`: `event.ignore()`, `self.hide()`, then switch back to a menu-bar app.
+    Voice, the notch and the drawer stay alive.
+  - If quitting: the old shutdown runs (session_ended telemetry and voice cleanup).
+- The tray icon (`assistant_page._get_or_create_tray`) got a menu with "Open Filect" (calls
+  `app._bring_to_front()`) and "Quit Filect" (`QApplication.quit`), the way back in and out. On Windows
+  the tray menu shows on right-click.
+- Test (real macOS): `tests/test_hide_on_close_real.py`. NSWindow `performClose:` (the red button)
+  hides the window with the app still running; "Open Filect" shows it; "Quit Filect" exits 0. On
+  Windows, test with the title-bar X and the tray menu.

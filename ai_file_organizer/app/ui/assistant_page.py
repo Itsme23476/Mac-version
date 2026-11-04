@@ -84,12 +84,19 @@ def _get_or_create_tray():
     must be kept in a module global or Qt garbage-collects it and the notifications stop firing."""
     global _TRAY
     try:
-        from PySide6.QtWidgets import QSystemTrayIcon, QApplication
-        if QApplication.instance() is None:
+        from PySide6.QtWidgets import QSystemTrayIcon, QApplication, QMenu
+        app = QApplication.instance()
+        if app is None:
             return None
         if _TRAY is None:
             _TRAY = QSystemTrayIcon(_filect_icon())
             _TRAY.setToolTip("Filect")
+            # Closing the window only hides it (Filect keeps running), so the icon is the way back in/out.
+            menu = QMenu()
+            menu.addAction("Open Filect", lambda: getattr(app, "_bring_to_front", lambda: None)())
+            menu.addAction("Quit Filect", QApplication.quit)
+            _TRAY.setContextMenu(menu)
+            _TRAY._menu = menu              # keep it alive (Qt doesn't own it)
             _TRAY.setVisible(True)
     except Exception:
         return None
