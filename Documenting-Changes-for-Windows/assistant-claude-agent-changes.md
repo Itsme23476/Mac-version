@@ -351,13 +351,88 @@ These follow Damianos' calls after comparing against VoiceOS. The behavior is pl
 
 ### 7e. Notch idle hover = VoiceOS-style bar (Mac, 2026-11-04). Mac notch only; Windows uses its own top widget
 - This is the idle state only, with no task running. Rest the cursor on the notch for 220ms and it grows
-  into a black bar 1.9× the notch's width. The bar has shoulders curving into the top edge, rounded
-  bottom corners, and fades to alpha 95 at the bottom. It holds a lavender orb beside the notch and a
-  "Type or hold fn ⌃ control to speak" input under it.
+  into a black bar. Its width is 2.1× the notch, clamped to 330–420px (`_hover_w`), and the body is 56px
+  (`HOVER_BODY_H`). The bar has shoulders curving into the top edge, rounded bottom corners, and fades to
+  alpha 95 at the bottom. It holds a 16px lavender orb beside the notch and a "Type or hold fn ⌃ control
+  to speak" input under it (14px).
 - `_HoverBar` is a separate child widget layered over the resting strip. The card and its layout are
-  untouched. Enter → `submit_text` (same path as the card's type field). A press elsewhere is ignored so
-  it reaches the overlay's `mousePressEvent`, which opens the full card as before. Leaving tucks it back
-  after 280ms, or 4s if you clicked into the input; it stays while text is typed. Esc tucks it away.
+  untouched. Enter → `submit_text` (same path as the card's type field). Leaving tucks it back after
+  280ms, or 4s if you clicked into the input; it stays while text is typed. Esc tucks it away.
   `set_state(non-idle)` and `_apply_minimized_chrome` close it.
-- A live task (working/needs_you/done/error) keeps the old status-pill hover.
+- **Click (updated in §8a):** the first click puts the cursor in the bar's own input. It does NOT switch
+  to the old card. A second click with the input empty closes the bar (`close_requested`). With a draft
+  typed, a click only places the cursor, so nothing typed is lost.
+- A live task (working/needs_you/done/error) doesn't get this bar; see §8d for its gray lip.
 - If the Windows app has a top-center widget, the same widget + rules port as-is. Test: `tests/test_notch_hover.py`.
+
+## 8. Notch + card polish (Mac v14.10.1, 2026-11-05)
+
+Everything here was asked for by Damianos after testing 14.10.0 live. Apart from §8b, it's Qt-level and
+applies to the Windows top widget if it reuses `claude_overlay.py`. As always: check the Windows code
+yourself, the Mac side can't see it.
+
+### 8a. Which chat the card opens on (the "last chat" rule): **BOTH platforms**
+- His rule: before you've sent any request, opening the card shows the blank default. Once you've sent
+  one, closing and reopening shows your LAST chat, not whatever you clicked in the rail.
+- `assistant_page.py`: `_last_sent_key` is set in `_start_worker` (before `_focus(fresh=True)`) and in
+  `run_task`'s queued follow-up path. `ClaudeOverlay` emits `collapsed` at the end of `minimize_panel`,
+  connected to `_on_notch_collapsed`:
+  ```python
+  sess = self._focused
+  if sess is None or sess.running or sess.key == self._last_sent_key: return
+  last = self._last_sent_key if self._last_sent_key in self._sessions else None
+  self._resume_target = None
+  if last: self._focused_key = last; self._render_focused()
+  else: self._focused_key = None; self._notch("rest_idle")
+  self._refresh_rail()
+  ```
+- Test: `tests/test_rail_recent.py`.
+
+### 8b. Notch window sat BELOW the menu bar: **Mac-only cause; one Qt flag matters for BOTH**
+- Bug: "nothing pops up at the start". `NSPanel.setFloatingPanel_(True)` silently resets the window
+  level to 3. At level 3, AppKit kept the window under the menu bar (y=33) while Qt still believed y=0,
+  so hovering the notch never reached it.
+- Mac fix (`notch_panel.py`): re-apply level 1000 right after `setFloatingPanel_`, then `place_native()`.
+  This sets the NSWindow frame directly from Qt's rect, and is called after configure, `_reanchor` and
+  every slide.
+- **Qt 6.11, BOTH platforms:** `ClaudeOverlay` sets `WA_ContentsMarginsRespectsSafeArea` to False. With
+  it on, Qt adds the screen's safe-area inset (32px under the notch) to the layout and pushes the card
+  down. Windows has no notch inset, so the flag is harmless there; keep it so the code stays the same.
+- Test (real macOS only): `tests/test_notch_top_edge.py`.
+
+### 8c. Open card restyled to match the hover bar (visual only): **design applies to BOTH**
+- Palette: surface #1C1C1F, border #2A2A2E, card #000000, accent lavender #A78BFA (light #C4B5FD).
+  This replaced the Claude-orange accent.
+- The card frame is transparent with no drop shadow. `ClaudeOverlay.paintEvent` paints the card itself:
+  pure black, shoulders curving into the top edge, bottom radius 22, and a fade to alpha 205 over the last
+  22px. Skip this when minimized.
+- Header row sits IN the notch band: `[orb][status][timer] … [lock][close]`, inserted at index 0 of the
+  card's column. The expanded margins are `(16, max(4,(nb-TOPBAR_H)//2), 16, 12)`. On Windows, set `nb`
+  to your top widget's band height (or 0).
+- Pills:
+  - Transcript: radius 16, 13px font.
+  - Model: height 26, radius 13, no border.
+  - Stop / Open in Claude: dark, radius 13.
+  - Approve / Deny: radius 17; Deny is dark with red text.
+- Type field: surface background, radius 16, focus border `rgba(167,139,250,0.45)`, and the same hint as
+  the hover bar via `_TypeField.set_hint(_SPEAK_HINT)`. The separate footer hint row is gone (`_fit`
+  no longer counts it).
+
+### 8d. Visible lock / close buttons + gray lip under the notch: **design applies to BOTH**
+- Bug: the two header buttons were text glyphs (⇣/⇡ and ✕, 11px muted grey) on near-black circles and
+  read as blank.
+- Fix: the icons are now painted. `_glyph()` moved from `conversation_rail.py` into `claude_overlay.py`
+  (the rail imports it from there), gained a `'close'` kind and a `color=` override.
+  - Pin button = the rail's **lock** icon (lavender and shut = kept open, grey and open = tucks away on
+    leave).
+  - Close = a grey-white X.
+  - Both are 13px on 22px circles: `#2C2C31`, hover `#3A3A41`, `padding: 0`.
+- Bug: while a task was working or finished, a colored pill floated 2px under the notch (green = done)
+  and read as a stray green bar.
+- Fix (`_Handle.paintEvent`, live states only; idle draws nothing): a GRAY lip hanging flush from the
+  notch, drawn from y=-6 so its top is flat and attached.
+  - Size: 50% of the strip wide and 4px thick; on hover it grows to 62% and 8px.
+  - Colour: `QColor(160,160,168)`, alpha 150, rising to 220 on hover. Translucent black was tried
+    first and vanished over dark windows.
+  - Working: the alpha breathes. An approval waiting adds the amber dot to its right.
+  - `_STATE_COLOR` and `_Handle._color()` are deleted.
