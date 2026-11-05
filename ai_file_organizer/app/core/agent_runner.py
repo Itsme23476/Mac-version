@@ -190,11 +190,13 @@ class ApprovalRequest:
 # Setup problems in plain words. They are not task failures: the card shows them with a one-click fix
 # (open_claude_setup) instead of a raw "Claude Code not found at: …" or a fake "Done: Not logged in".
 SETUP_INSTALL = ("Claude Code isn't installed on this Mac yet. The Assistant runs on Claude Code with "
-                 "your Claude plan. Set it up once (about a minute), then try again.")
-SETUP_SIGNIN = "Claude Code isn't signed in yet. Sign in once with your Claude account, then try again."
+                 "your Claude plan. Set it up once (about a minute) and your task runs right after.")
+SETUP_SIGNIN = ("Claude Code isn't signed in yet. Sign in once with your Claude account and your task "
+                "runs right after.")
 CODEX_SETUP_INSTALL = ("Codex isn't installed on this Mac yet. The Assistant can run on Codex with your "
-                       "ChatGPT plan. Set it up once (about a minute), then try again.")
-CODEX_SETUP_SIGNIN = "Codex isn't signed in yet. Sign in once with your ChatGPT account, then try again."
+                       "ChatGPT plan. Set it up once (about a minute) and your task runs right after.")
+CODEX_SETUP_SIGNIN = ("Codex isn't signed in yet. Sign in once with your ChatGPT account and your task "
+                      "runs right after.")
 AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 _SETUP = {("claude", "install"): SETUP_INSTALL, ("claude", "signin"): SETUP_SIGNIN,
           ("codex", "install"): CODEX_SETUP_INSTALL, ("codex", "signin"): CODEX_SETUP_SIGNIN}
@@ -250,7 +252,7 @@ def open_claude_setup(kind: str) -> str:
               'echo "Signing in with your Claude account. A browser window will open."', "echo",
               "claude auth login --claudeai", "echo",
               "if claude auth status 2>/dev/null | grep -q '\"loggedIn\": true'; then",
-              '  echo "✓ All set. Go back to Filect and try again. You can close this window."',
+              '  echo "✓ All set. Filect is running your task now. You can close this window."',
               "else",
               '  echo "Sign-in didn\'t finish. Click the button in Filect to try again."',
               "fi"]
@@ -261,6 +263,24 @@ def open_claude_setup(kind: str) -> str:
     subprocess.Popen(["open", "-a", "Terminal", path])
     logger.info("[agent] opened Claude Code setup (%s)", kind)
     return path
+
+
+def claude_ready() -> bool:
+    """Claude Code installed AND signed in (`claude auth status`, ~0.2s) — so a task waiting on its setup
+    can run by itself the moment you finish (see AssistantPage._check_setup)."""
+    import json
+    import shutil
+    import subprocess
+    use_login_path()
+    exe = shutil.which("claude")
+    if not exe:
+        return False
+    try:
+        out = subprocess.run([exe, "auth", "status"], capture_output=True, text=True, timeout=20,
+                             stdin=subprocess.DEVNULL).stdout
+        return bool(json.loads(out).get("loggedIn"))
+    except Exception:
+        return False
 
 
 class AgentRunner:

@@ -249,6 +249,50 @@ def test_refused_claude_attempt_is_not_a_chat():
     print("a refused Claude attempt (only an API error) isn't listed as a chat; real chats are  OK")
 
 
+def test_task_runs_by_itself_after_setup():
+    """Press "Sign in to Codex" on the card, finish signing in → the waiting task runs on its own (it used to
+    say "go back and try again" and wait for you to re-send it). Not if you re-sent it yourself."""
+    import subprocess
+    page = _page(primary="codex")
+    started = []
+    page._start_worker = lambda s, rid, seed=True, send=None: started.append((s.key, s.agent, rid, send))
+    page._down["claude"] = ("signin", time.time() + 999)        # Claude can't take it either
+    real_popen, real_ready = subprocess.Popen, cr.codex_ready
+    subprocess.Popen = lambda *a, **k: None                       # don't really open Terminal here
+    answers = iter([False, False, True])                          # still signing in… then signed in
+    cr.codex_ready = lambda: next(answers, True)
+    try:
+        sess = ap.AgentSession("w1", tempfile.mkdtemp(), "what is 6 times 7", "Six Times", True, None, "low",
+                               agent="codex")
+        page._sessions = {"w1": sess}
+        page._focused_key = page._last_sent_key = "w1"
+        ov = page._ensure_notch()
+        page._notch("present")
+        page._on_error("w1", ar.CODEX_SETUP_SIGNIN)
+        assert "Sign in to Codex" in ov._setup_btn.text() and sess.status == "error"
+        ov._setup_btn.click()                                     # the real button
+        page._setup_timer.setInterval(30)                         # (2s in the app)
+        assert _pump(lambda: started, 5), "the task never ran after sign-in"
+        assert started == [("w1", "codex", None, "what is 6 times 7")], started
+        assert sess.status == "working" and ov._state == "working" and page._setup_wait is None
+        assert "ready" in ov._tool_chip.text(), ov._tool_chip.text()
+
+        # You re-sent it yourself while signing in → it isn't run a second time.
+        started.clear()
+        s2 = ap.AgentSession("w2", tempfile.mkdtemp(), "again", "Again", True, None, "low", agent="codex")
+        page._sessions["w2"] = s2
+        page._focused_key = "w2"
+        page._on_error("w2", ar.CODEX_SETUP_SIGNIN)
+        ov._setup_btn.click()
+        s2.status = "working"                                     # (you sent it again)
+        page._setup_timer.setInterval(30)
+        _pump(lambda: page._setup_wait is None, 5)
+        assert started == [], started
+    finally:
+        subprocess.Popen, cr.codex_ready = real_popen, real_ready
+    print("after 'Sign in to Codex', the waiting task runs by itself once you're signed in (not twice)  OK")
+
+
 def test_real_codex_task_followup_and_stop():
     page = _page(primary="codex")
     tmp = tempfile.mkdtemp(prefix="filect-codex-")
@@ -321,6 +365,7 @@ if __name__ == "__main__":
     test_both_unavailable_shows_the_fixable_one()
     test_codex_chat_on_the_card_and_rail()
     test_refused_claude_attempt_is_not_a_chat()
+    test_task_runs_by_itself_after_setup()
     test_real_codex_task_followup_and_stop()
     test_real_signed_out_claude_hands_over_to_codex()
     test_real_codex_routes_a_voice_command()

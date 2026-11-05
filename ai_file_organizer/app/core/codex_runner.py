@@ -59,6 +59,12 @@ def signed_in(exe: str) -> bool:
         return False
 
 
+def codex_ready() -> bool:
+    """Codex installed AND signed in — a task waiting on its setup runs by itself once this is true."""
+    exe = find_codex()
+    return bool(exe) and signed_in(exe)
+
+
 def codex_models() -> list:
     """[(slug, display name)] Codex offers this account, best first — its own cached model list."""
     try:
@@ -288,7 +294,7 @@ def open_codex_setup(kind: str) -> str:
     lines += ['echo "Signing in with your ChatGPT account. A browser window will open."', "echo",
               "codex login", "echo",
               "if codex login status >/dev/null 2>&1; then",
-              '  echo "✓ All set. Go back to Filect and try again. You can close this window."',
+              '  echo "✓ All set. Filect is running your task now. You can close this window."',
               "else",
               '  echo "Sign-in didn\'t finish. Click the button in Filect to try again."',
               "fi"]

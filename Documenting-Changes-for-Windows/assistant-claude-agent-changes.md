@@ -734,3 +734,19 @@ yourself, the Mac side can't see it.
     - A real click on "Open in Codex" → `codex resume` showed the chat.
     - A real click on Stop → stopped in 0.3 s.
     - The rail shows the Codex tags.
+- **The waiting task runs by itself after setup (2026-11-05): BOTH platforms.**
+  - Before: after "Set up / Sign in to Codex | Claude Code" the card and Terminal said "try again", and you
+    had to re-send the task. Found in the live test: the retry had come from the tester, not the app.
+  - Now `_open_agent_setup` remembers the task on the card (`_setup_wait`) and a 2 s QTimer checks the
+    agent off the UI thread, for up to 10 min. Codex is checked with `codex_runner.codex_ready()` (installed +
+    `codex login status`); Claude with `agent_runner.claude_ready()` (installed +
+    `claude auth status` → "loggedIn").
+  - When it's ready, `_run_after_setup` re-runs that same request: on that agent, as the same chat, with the
+    card going back to "Codex is ready — running your task".
+  - Skipped if you already re-sent or stopped it. If you set up the OTHER agent (yours was out of usage), it
+    runs there with a recap.
+  - The texts now say "…and your task runs right after" and "✓ All set. Filect is running your task now."
+  - Live-verified: one real click on "Sign in to Codex", then nothing else sent. The browser sign-in
+    finished at +9 s, and the task ran and answered at +14 s.
+  - **Windows:** same logic. The readiness checks run the same CLIs (`codex login status`,
+    `claude auth status`).

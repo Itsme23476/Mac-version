@@ -323,6 +323,7 @@ class AssistantPage(QWidget):
     _voice_decided = Signal(object)       # {intent, idx, task, candidates, focused_key} from the router
     _recent_loaded = Signal(object)       # [SessionInfo] — past voice-agent chats for the rail
     _transcript_loaded = Signal(str, object)   # (session id, load_transcript() dict|None)
+    _setup_checked = Signal(str, bool)         # (agent, ready) — background check after a setup button
 
     def __init__(self, main_window):
         super().__init__()
@@ -355,6 +356,10 @@ class AssistantPage(QWidget):
         self._voice_decided.connect(self._on_voice_decided)
         self._recent_loaded.connect(self._on_recent_loaded)
         self._transcript_loaded.connect(self._on_transcript_loaded)
+        self._setup_checked.connect(self._on_setup_checked)
+        self._setup_wait = None      # {agent, key, until}: a task waiting for you to finish an agent's setup
+        self._setup_timer = None
+        self._setup_checking = False
         self._load_recent()
         self._last_notified_key = None   # which session the latest notification was about (click → focus)
         self._last_sent_key = None       # the chat you last SENT a request in (the notch returns to it)
@@ -1544,6 +1549,84 @@ class AssistantPage(QWidget):
             open_setup(kind)
         except Exception as e:
             _trace(f"{agent} setup failed to open: {e}")
+            return
+        # The task on this card waits for you: once the agent is ready it runs by itself — no "go back
+        # and try again". ponytail: a 2s poll (codex login status ~20ms, claude auth status ~0.2s) for
+        # up to 10 min; a file watch on the auth store if it ever matters.
+        import time
+        self._setup_wait = {"agent": agent, "key": self._focused_key, "until": time.time() + 600}
+        if self._setup_timer is None:
+            self._setup_timer = QTimer(self)
+            self._setup_timer.setInterval(2000)
+            self._setup_timer.timeout.connect(self._check_setup)
+        self._setup_timer.start()
+        _trace(f"waiting for {agent} setup to finish (task {self._focused_key})")
+
+    def _check_setup(self):
+        import threading
+        import time
+        w = self._setup_wait
+        if not w or time.time() > w["until"]:
+            self._setup_timer.stop()
+            self._setup_wait = None
+            return
+        if self._setup_checking:
+            return
+        self._setup_checking = True
+        agent = w["agent"]
+
+        def worker():                               # off the UI thread: it runs the agent's CLI
+            try:
+                if agent == "codex":
+                    from app.core.codex_runner import codex_ready as ready
+                else:
+                    from app.core.agent_runner import claude_ready as ready
+                ok = ready()
+            except Exception:
+                ok = False
+            try:
+                self._setup_checked.emit(agent, ok)
+            except RuntimeError:                    # page torn down (quit)
+                pass
+        threading.Thread(target=worker, daemon=True, name="filect-setup-check").start()
+
+    def _on_setup_checked(self, agent: str, ok: bool):
+        self._setup_checking = False
+        w = self._setup_wait
+        if not ok or not w or w["agent"] != agent:
+            return
+        self._setup_timer.stop()
+        self._setup_wait = None
+        self._down.pop(agent, None)
+        _trace(f"{agent} is ready — running the waiting task {w['key']}")
+        self._run_after_setup(w["key"], agent)
+
+    def _run_after_setup(self, key, agent: str):
+        """You finished an agent's setup: run the task that was waiting on it (same chat, same request)
+        on that agent. Not if you've since re-sent or stopped it yourself."""
+        import time
+        sess = self._sessions.get(key) if key else None
+        if sess is None or sess.running or sess.status != "error":
+            return
+        from app.core.agent_runner import AGENT_NAMES
+        send = sess.prompt
+        if agent != sess.agent:                     # set up the OTHER agent (yours was out of usage)
+            if sess.session_id or sess.resume:
+                send = self._recap(sess, AGENT_NAMES[sess.agent]) + sess.prompt
+            sess.agent = agent
+            sess.model, sess.effort = self._model_for(agent)
+            sess.session_id, sess.resume = "", None
+        sess.status, sess.result_text, sess.approval_req = "working", "", None
+        sess.fallback_to, sess.fell_back, sess.first_error, sess.before_switch = None, False, "", None
+        sess.started_at, sess.duration = time.time(), None
+        cue = f"{AGENT_NAMES[agent]} is ready — running your task"
+        sess.last_action = cue
+        self._start_worker(sess, sess.session_id or sess.resume or None, seed=False, send=send)
+        if key == self._focused_key:
+            self._set_view_agent(agent)
+            self._append(f"↪ {cue}")
+            self._notch("show_working", cue, "")
+            self._notch("open_full")
 
     def _on_error(self, key, msg: str):
         sess = self._sessions.get(key)
