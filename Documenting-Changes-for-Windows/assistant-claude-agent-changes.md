@@ -890,3 +890,13 @@ yourself, the Mac side can't see it.
     `daemon stop`, `codex exec resume` on it answered.
   - **Windows:** check whether the Windows Codex has the daemon (`codex app-server daemon --help`) and
     where its control socket/pipe lives. Swap `ps -axo` for the process list there.
+- **"Open in Terminal →" was clipped at both ends (2026-11-05): BOTH platforms (Qt).**
+  - Cause: Qt sized the button from the regular-weight font, but the stylesheet paints it semibold
+    (~4px wider).
+  - Fix:
+    - `_update_primary` sets the button's minimum width from DemiBold 12px metrics + 30.
+    - The Details button now takes the row's slack itself (no stretch item, which cost a gap).
+    - `CARD_W` went 440 → 450, so the widest pill ("GPT-5.6-Terra · Extra high") still fits beside
+      "Open in Terminal →".
+  - **Windows:** fonts differ (Segoe UI). Recheck the widest pill + "Open in Terminal →" on a real
+    Windows screen.

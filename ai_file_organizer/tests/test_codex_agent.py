@@ -21,6 +21,7 @@ from app.core import codex_runner as cr  # noqa: E402
 from app.core.settings import settings  # noqa: E402
 from app.ui import assistant_page as ap  # noqa: E402
 settings._save_config = lambda: None            # NEVER write the user's settings.json
+settings.assistant_claude_open_in = settings.assistant_codex_open_in = "app"   # not his saved choice
 ar.use_login_path()                             # once, for real, before any test stubs subprocess
 ap._play_chime = lambda *a, **k: None
 ap._notify = lambda *a, **k: None

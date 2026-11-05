@@ -61,7 +61,7 @@ AMBER = "#E0A23C"           # "your turn" — an approval is waiting
 GREEN = "#3FB860"
 RED = "#F2645A"
 
-CARD_W = 440
+CARD_W = 450               # fits the widest model pill ("GPT-5.6-Terra · Extra high") beside "Open in Terminal →"
 SHADOW_MARGIN = 22
 WIDGET_W = CARD_W + SHADOW_MARGIN * 2
 TOP_MARGIN = 0
@@ -676,7 +676,6 @@ class ClaudeOverlay(QWidget):
             f"QPushButton:hover {{ background: #26262A; color: {C['text']}; }}")
         self._model_btn.clicked.connect(self._toggle_model_panel)
         ctrl.addWidget(self._model_btn)
-        ctrl.addStretch(1)
         self._details_btn = QPushButton("Details  ⌄")
         self._details_btn.setCursor(Qt.PointingHandCursor)
         self._details_btn.setStyleSheet(
@@ -684,7 +683,7 @@ class ClaudeOverlay(QWidget):
             f"color: {C['text_muted']}; font-size: 12px; font-weight: 600; }}"
             f"QPushButton:hover {{ color: {C['text']}; }}")
         self._details_btn.clicked.connect(self._toggle_details)
-        ctrl.addWidget(self._details_btn)
+        ctrl.addWidget(self._details_btn, 1, Qt.AlignRight)   # takes the slack itself (a stretch cost a gap)
         self._primary_btn = QPushButton("")          # Stop (working) / Open in Claude (done/error)
         self._primary_btn.setCursor(Qt.PointingHandCursor)
         self._primary_btn.setFixedHeight(26)
@@ -1657,6 +1656,12 @@ class ClaudeOverlay(QWidget):
                 "font-size: 12px; font-weight: 600; padding: 0 12px 0 14px; }"
                 f"QPushButton:hover {{ background: {ACCENT}; color: #0B0B0E; }}")
             self._open_alt.setText(f"Open in {name} app" if in_terminal else "Open in Terminal")
+            # Qt sizes the button with the regular-weight font but paints it semibold (~4px wider), which
+            # clipped "Open in Terminal →" at both ends — reserve the painted width (+ the 26px padding).
+            f = QFont(self._primary_btn.font())
+            f.setPixelSize(12)
+            f.setWeight(QFont.Weight.DemiBold)
+            self._primary_btn.setMinimumWidth(QFontMetrics(f).horizontalAdvance(self._primary_btn.text()) + 30)
             self._open_more.setVisible(True)
             return
         else:                                   # needs_you — Approve/Deny live in the page

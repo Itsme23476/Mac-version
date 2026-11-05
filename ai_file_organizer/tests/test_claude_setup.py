@@ -14,6 +14,9 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 app = QApplication.instance() or QApplication([])
 from app.core import agent_runner as ar  # noqa: E402
 from app.ui import assistant_page as ap  # noqa: E402
+from app.core.settings import settings  # noqa: E402
+settings._save_config = lambda: None            # never write the user's settings.json
+settings.assistant_claude_open_in = "app"        # the card reads "Open in Claude", not his saved choice
 ap._play_chime = lambda *a, **k: None
 ap._notify = lambda *a, **k: None
 ap.AssistantPage._show_idle_overlays = lambda self: None
