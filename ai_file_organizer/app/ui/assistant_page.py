@@ -413,6 +413,7 @@ class AssistantPage(QWidget):
         ov.stop_clicked.connect(self._on_stop_task)
         ov.submit_text.connect(lambda t: self.run_voice_task(t, source="typed"))   # typed = same routing
         ov.collapsed.connect(self._on_notch_collapsed)
+        ov.setup_requested.connect(self._open_claude_setup)
         try:
             ov.set_model_effort(self._model, self._effort)   # reflect the saved choice on the pill
         except Exception:
@@ -1374,6 +1375,14 @@ class AssistantPage(QWidget):
                 _trace(f"NOTIFY done: {sess.title!r}")
                 _notify("Filect · task finished", sess.title or "Done")
 
+    def _open_claude_setup(self, kind: str):
+        """The card's "Set up / Sign in to Claude Code" button: Terminal with the official setup."""
+        try:
+            from app.core.agent_runner import open_claude_setup
+            open_claude_setup(kind)
+        except Exception as e:
+            _trace(f"Claude Code setup failed to open: {e}")
+
     def _on_error(self, key, msg: str):
         sess = self._sessions.get(key)
         if sess is None:
@@ -1390,7 +1399,8 @@ class AssistantPage(QWidget):
         if key != self._focused_key or not _app_is_active():
             self._last_notified_key = key
             _trace(f"NOTIFY error: {sess.title!r}")
-            _notify("Filect · task failed", msg)
+            from app.core.agent_runner import setup_kind
+            _notify("Filect · set up Claude Code" if setup_kind(msg) else "Filect · task failed", msg)
 
     def _on_done(self, key):
         sess = self._sessions.get(key)

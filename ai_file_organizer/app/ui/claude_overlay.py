@@ -478,6 +478,7 @@ class ClaudeOverlay(QWidget):
     stop_clicked = Signal()            # "Stop" pressed while a task is running
     submit_text = Signal(str)          # a typed task submitted from the bottom input field
     collapsed = Signal()               # the open card tucked back into the notch
+    setup_requested = Signal(str)      # "install" / "signin" → open the Claude Code setup in Terminal
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -503,6 +504,7 @@ class ClaudeOverlay(QWidget):
         self._detail_last = ""        # last line appended to the feed (dedup)
         self._entries = []            # rich Details: the conversation's entries (see details_view)
         self._rich = False            # True once entries drive Details (plain status lines stop)
+        self._setup_kind = ""         # the error is a Claude Code setup step ("install"/"signin"), not a failure
         self._expanded = set()        # entry ids whose "Show full" is open
         self._model = "opus"          # a real model is always chosen: opus/sonnet/haiku
         self._effort = "high"         # a real effort is always chosen: low/medium/high/xhigh/max
@@ -981,6 +983,18 @@ class ClaudeOverlay(QWidget):
             row.addWidget(label, 1)
             self._error_label = label
         lay.addLayout(row)
+        if kind != "done":
+            # Claude Code missing / signed out: one click opens Terminal with the official setup.
+            self._setup_btn = QPushButton("")
+            self._setup_btn.setCursor(Qt.PointingHandCursor)
+            self._setup_btn.setFixedHeight(32)
+            self._setup_btn.setStyleSheet(
+                f"QPushButton {{ background: {ACCENT}; color: #0B0B0E; border: none; border-radius: 16px; "
+                "font-size: 12.5px; font-weight: 700; padding: 0 18px; }"
+                f"QPushButton:hover {{ background: {ACCENT_LIGHT}; }}")
+            self._setup_btn.clicked.connect(lambda: self.setup_requested.emit(self._setup_kind))
+            self._setup_btn.setVisible(False)
+            lay.addWidget(self._setup_btn, 0, Qt.AlignLeft)
         lay.addStretch(1)
         return pg
 
@@ -1342,8 +1356,19 @@ class ClaudeOverlay(QWidget):
             self._fit()
 
     def show_error(self, msg: str) -> None:
+        try:
+            from app.core.agent_runner import setup_kind
+        except Exception:                        # the standalone self-check has no app package
+            setup_kind = lambda _m: ""           # noqa: E731
+        self._setup_kind = setup_kind(msg)
         self.set_state("error")
-        self._set_status("Error", RED)
+        if self._setup_kind:                     # a setup step, not a failure: amber, with the fix
+            self._set_status("Setup needed", AMBER)
+            self._setup_btn.setText("Set up Claude Code  →" if self._setup_kind == "install"
+                                    else "Sign in to Claude Code  →")
+        else:
+            self._set_status("Error", RED)
+        self._setup_btn.setVisible(bool(self._setup_kind))
         self._stop_elapsed()
         self._work_spinner.stop()
         self._done_timer.stop()
@@ -1427,6 +1452,8 @@ class ClaudeOverlay(QWidget):
                 f"QPushButton {{ background: {C['surface']}; color: {RED}; border: none; "
                 "border-radius: 13px; font-size: 12px; font-weight: 600; padding: 0 14px; }"
                 "QPushButton:hover { background: rgba(242,100,90,0.16); }")
+        elif self._state == "error" and self._setup_kind:
+            self._primary_btn.setVisible(False)  # nothing to open yet — the setup button is the action
         elif self._state in ("done", "error"):
             self._primary_btn.setText("Open in Claude  →")
             self._primary_btn.setVisible(True)
@@ -1709,6 +1736,8 @@ class ClaudeOverlay(QWidget):
     def _content_height(self) -> int:
         if self._state == "done":                 # the answer's measured height (see show_done)
             return self._done_view.maximumHeight() + 4
+        if self._state == "error" and self._setup_kind:
+            return _STACK_H["error"] + 46          # + the setup button
         return _STACK_H.get(self._state, 90)
 
     def _fit(self) -> None:

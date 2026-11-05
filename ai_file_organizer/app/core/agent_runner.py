@@ -174,6 +174,48 @@ class ApprovalRequest:
     tool_input: dict = field(default_factory=dict)
 
 
+# Setup problems in plain words. They are not task failures: the card shows them with a one-click fix
+# (open_claude_setup) instead of a raw "Claude Code not found at: …" or a fake "Done: Not logged in".
+SETUP_INSTALL = ("Claude Code isn't installed on this Mac yet. The Assistant runs on Claude Code with "
+                 "your Claude plan. Set it up once (about a minute), then try again.")
+SETUP_SIGNIN = "Claude Code isn't signed in yet. Sign in once with your Claude account, then try again."
+
+
+class AgentSetupError(Exception):
+    """Claude Code is missing ("install") or signed out ("signin"). str() is the friendly message."""
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(SETUP_INSTALL if kind == "install" else SETUP_SIGNIN)
+
+
+def setup_kind(message: str) -> str:
+    """"install" / "signin" for a setup message, else "" (a real task error)."""
+    return {SETUP_INSTALL: "install", SETUP_SIGNIN: "signin"}.get((message or "").strip(), "")
+
+
+def open_claude_setup(kind: str) -> str:
+    """Open Terminal running Anthropic's OFFICIAL installer (only if it's missing), then `claude` so you
+    sign in with your Claude account — every step visible, nothing hidden. Returns the script path."""
+    import subprocess
+    import tempfile
+    lines = ["#!/bin/bash", "clear", 'echo "Filect · setting up Claude Code"', "echo"]
+    if kind == "install":
+        lines += ['echo "Installing Claude Code with Anthropic\'s official installer (claude.ai/install.sh)…"',
+                  "curl -fsSL https://claude.ai/install.sh | bash || "
+                  '{ echo; echo "The install did not finish. See above."; read -n 1; exit 1; }', "echo"]
+    lines += ['export PATH="$HOME/.local/bin:$PATH"',
+              'echo "Sign in with your Claude account (type /login if it doesn\'t ask)."',
+              'echo "Once you\'re signed in, type /exit, close this window, and try again in Filect."',
+              "echo", "claude"]
+    path = os.path.join(tempfile.gettempdir(), "filect-claude-setup.command")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(path, 0o755)
+    subprocess.Popen(["open", "-a", "Terminal", path])
+    logger.info("[agent] opened Claude Code setup (%s)", kind)
+    return path
+
+
 class AgentRunner:
     """One task == one Claude session.
 
@@ -219,7 +261,8 @@ class AgentRunner:
         bypass=True runs without any Approve/Deny cards — like Claude Code's bypass-permissions
         mode, the agent edits files and runs commands on its own. Use only for trusted tasks.
         """
-        from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, ResultMessage
+        from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions, ResultMessage,
+                                      AssistantMessage, CLINotFoundError)
         use_login_path()
         # setting_sources=[] isolates from the user's global ~/.claude permissions in both modes.
         common = dict(cwd=self.cwd, setting_sources=[], resume=resume, max_turns=max_turns)
@@ -239,24 +282,32 @@ class AgentRunner:
         # fn + ⌃ + Space screenshots go in the message itself — built BEFORE connecting, since it may
         # briefly wait for a screenshot that's still being written.
         msg = user_message(prompt, images) if images else None
-        async with ClaudeSDKClient(options=opts) as client:
-            self._client = client            # exposed so stop() can interrupt the running turn
-            if msg is not None:
-                logger.info("[agent] sending %d screenshot(s)",
-                            sum(b["type"] == "image" for b in msg["message"]["content"]))
+        try:
+            async with ClaudeSDKClient(options=opts) as client:
+                self._client = client            # exposed so stop() can interrupt the running turn
+                if msg is not None:
+                    logger.info("[agent] sending %d screenshot(s)",
+                                sum(b["type"] == "image" for b in msg["message"]["content"]))
 
-                async def _one():
-                    yield msg
-                await client.query(_one())
-            else:
-                await client.query(prompt)
-            async for msg in client.receive_response():
-                for st in _steps_from_message(msg):
-                    self.on_step(st)
-                if isinstance(msg, ResultMessage):
-                    self.session_id = getattr(msg, "session_id", None)
-                    self.on_result(self.session_id, getattr(msg, "total_cost_usd", 0.0) or 0.0)
-        self._client = None
+                    async def _one():
+                        yield msg
+                    await client.query(_one())
+                else:
+                    await client.query(prompt)
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantMessage) and getattr(msg, "error", None) == "authentication_failed":
+                        # Signed out: Claude Code answers "Not logged in · Please run /login" as if it were
+                        # the reply — that showed as a DONE card. It's a setup step, not an answer.
+                        raise AgentSetupError("signin")
+                    for st in _steps_from_message(msg):
+                        self.on_step(st)
+                    if isinstance(msg, ResultMessage):
+                        self.session_id = getattr(msg, "session_id", None)
+                        self.on_result(self.session_id, getattr(msg, "total_cost_usd", 0.0) or 0.0)
+        except CLINotFoundError as e:            # no `claude` anywhere (the packaged app doesn't bundle it)
+            raise AgentSetupError("install") from e
+        finally:
+            self._client = None
         return self.session_id
 
     async def interrupt(self) -> None:

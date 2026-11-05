@@ -571,3 +571,31 @@ yourself, the Mac side can't see it.
   Live end-to-end in the dev app with real system input: receive mode, right-click, left-drag, right-click
   gave "snapshot 1 (marks=True)" with the red mark in the saved PNG, then Esc. Both tests fail if the
   swallow or the Esc rule is removed.
+
+### 8k. Claude Code missing or signed out → plain words + one-click setup (Mac, 2026-11-05): **BOTH platforms**
+- Before:
+  - Missing: the packaged app doesn't bundle the SDK's 261MB `claude`, so users got the raw
+    `CLINotFoundError` text in red.
+  - Signed out: Claude Code ANSWERS "Not logged in · Please run /login" (an `AssistantMessage` with
+    `error == "authentication_failed"`, then a `ResultMessage(is_error=True)`), so the card showed a
+    **Done** card whose "answer" was that line.
+- Fix (`agent_runner.py`):
+  - `AgentSetupError(kind)` with kind "install" or "signin"; `str()` is the friendly
+    `SETUP_INSTALL` / `SETUP_SIGNIN` text.
+  - `run()` raises it on `CLINotFoundError` and on an `authentication_failed` message, before any
+    step or result.
+  - `setup_kind(msg)` maps the text back to its kind.
+  - `open_claude_setup(kind)` writes a `.command` script and opens it in Terminal. For "install" it runs
+    the official installer `curl -fsSL https://claude.ai/install.sh | bash` (that URL 302s to
+    downloads.claude.ai); either way it then runs `claude` so the user signs in. Every step is visible.
+- Card (`claude_overlay.py`): `show_error` uses `setup_kind`. For a setup step: an amber
+  "Setup needed" status, a lavender `_setup_btn` ("Set up Claude Code →" / "Sign in to Claude Code →"),
+  the "Open in Claude" primary hidden, and the stack +46px. Real errors are unchanged. The
+  `setup_requested(kind)` signal → `AssistantPage._open_claude_setup`. The notification title is
+  "Filect · set up Claude Code".
+- **Windows:** same logic. The installer differs: use Anthropic's official Windows command from their
+  setup docs (PowerShell) — check the docs, don't guess. Open it in a new PowerShell window.
+- Tests: `tests/test_claude_setup.py`. Signed out uses the REAL CLI with a throwaway `CLAUDE_CONFIG_DIR`
+  (the user's login is untouched), and fails if the detection is removed. Missing = the SDK's own
+  `_find_cli` comes up empty. The card test checks the button opens Terminal with exactly the official
+  commands (the launch is captured, not run).
