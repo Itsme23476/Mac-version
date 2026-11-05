@@ -89,12 +89,13 @@ def test_card_shows_the_fix():
         ov._setup_btn.click()                                  # the real button → page → Terminal
         assert opened and opened[-1][:3] == ["open", "-a", "Terminal"], opened
         script = Path(opened[-1][3]).read_text()
-        assert "curl -fsSL https://claude.ai/install.sh | bash" in script and script.rstrip().endswith("claude")
+        assert "curl -fsSL https://claude.ai/install.sh | bash" in script and "claude auth login --claudeai" in script
+        assert "All set" in script, "it must say plainly when you're done"
         page._on_error("s1", ar.SETUP_SIGNIN)                  # signed out: sign-in only, no installer
         assert "Sign in to Claude Code" in ov._setup_btn.text()
         ov._setup_btn.click()
         script = Path(opened[-1][3]).read_text()
-        assert "install.sh" not in script and script.rstrip().endswith("claude")
+        assert "install.sh" not in script and "claude auth login --claudeai" in script
         page._on_error("s1", "Something broke in the task")   # a REAL failure stays a red Error
         assert ov._status_label.text() == "Error" and not ov._setup_btn.isVisibleTo(ov)
         assert ov._primary_btn.isVisibleTo(ov) and "Open in Claude" in ov._primary_btn.text()

@@ -194,8 +194,8 @@ def setup_kind(message: str) -> str:
 
 
 def open_claude_setup(kind: str) -> str:
-    """Open Terminal running Anthropic's OFFICIAL installer (only if it's missing), then `claude` so you
-    sign in with your Claude account — every step visible, nothing hidden. Returns the script path."""
+    """Open Terminal running Anthropic's OFFICIAL installer (only if it's missing), then `claude auth login`
+    to sign in with your Claude account, then a plain "all set" — every step visible. Returns the path."""
     import subprocess
     import tempfile
     lines = ["#!/bin/bash", "clear", 'echo "Filect · setting up Claude Code"', "echo"]
@@ -203,10 +203,16 @@ def open_claude_setup(kind: str) -> str:
         lines += ['echo "Installing Claude Code with Anthropic\'s official installer (claude.ai/install.sh)…"',
                   "curl -fsSL https://claude.ai/install.sh | bash || "
                   '{ echo; echo "The install did not finish. See above."; read -n 1; exit 1; }', "echo"]
+    # `claude auth login` signs in and then EXITS (plain `claude` took over the window, wiped these
+    # instructions and left people inside Claude Code). Then confirm it worked, in plain words.
     lines += ['export PATH="$HOME/.local/bin:$PATH"',
-              'echo "Sign in with your Claude account (type /login if it doesn\'t ask)."',
-              'echo "Once you\'re signed in, type /exit, close this window, and try again in Filect."',
-              "echo", "claude"]
+              'echo "Signing in with your Claude account. A browser window will open."', "echo",
+              "claude auth login --claudeai", "echo",
+              "if claude auth status 2>/dev/null | grep -q '\"loggedIn\": true'; then",
+              '  echo "✓ All set. Go back to Filect and try again. You can close this window."',
+              "else",
+              '  echo "Sign-in didn\'t finish. Click the button in Filect to try again."',
+              "fi"]
     path = os.path.join(tempfile.gettempdir(), "filect-claude-setup.command")
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")

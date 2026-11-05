@@ -587,7 +587,13 @@ yourself, the Mac side can't see it.
   - `setup_kind(msg)` maps the text back to its kind.
   - `open_claude_setup(kind)` writes a `.command` script and opens it in Terminal. For "install" it runs
     the official installer `curl -fsSL https://claude.ai/install.sh | bash` (that URL 302s to
-    downloads.claude.ai); either way it then runs `claude` so the user signs in. Every step is visible.
+    downloads.claude.ai). Then it runs `claude auth login --claudeai`, which signs in and EXITS. Plain
+    `claude` took over the window and wiped the instructions. Finally it prints "✓ All set — go back to
+    Filect" if `claude auth status` says `"loggedIn": true`, else "didn't finish".
+  - Verified for real: the installer into a throwaway HOME (15s, `~/.local/bin/claude`); Filect finds it
+    with a bare PATH and no bundled CLI, with no restart; and the Terminal sign-in with a throwaway
+    `CLAUDE_CONFIG_DIR` reached "Login successful" → "✓ All set". The test login was then removed with
+    `claude auth logout` on that profile.
 - Card (`claude_overlay.py`): `show_error` uses `setup_kind`. For a setup step: an amber
   "Setup needed" status, a lavender `_setup_btn` ("Set up Claude Code →" / "Sign in to Claude Code →"),
   the "Open in Claude" primary hidden, and the stack +46px. Real errors are unchanged. The
