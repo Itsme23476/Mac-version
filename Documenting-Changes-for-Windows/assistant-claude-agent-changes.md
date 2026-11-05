@@ -900,3 +900,101 @@ yourself, the Mac side can't see it.
       "Open in Terminal →".
   - **Windows:** fonts differ (Segoe UI). Recheck the widest pill + "Open in Terminal →" on a real
     Windows screen.
+
+### 8m. Filect Assistant — hands-free listening, phase 1 (Mac, 2026-11-06): **BOTH platforms (logic + UI); mic filter, mic-user check, lock check and Esc are per-platform**
+- **What it is:** a new **Assistant** tab (sidebar, page index 6). The old "Assistant" tab, the chat list,
+  is renamed **Agents** (still index 5).
+  - **Start Filect Assistant** → Filect listens until Stop (in the tab or the menu-bar menu). It never
+    starts by itself.
+  - Each thing you say, once you've stopped talking for "send after" seconds (1–10, default 2), runs
+    exactly like fn + ⌃: router → Claude / Codex → the notch card.
+  - The tab shows:
+    - status: Listening / Hearing you… / Sending in 1.4 s · Esc cancels / Paused while … / errors;
+    - a mic level bar;
+    - an activity list: what it heard → Started “X” / Continued “X” / Ignored — not a request /
+      Couldn't check / Cancelled (Esc); clicking a row opens that chat in Agents;
+    - today's voice usage.
+  - A small violet light under the notch while it's on. It pulses while listening, is bright while it
+    hears you, and is gray while paused.
+- **Files:** `app/core/live_listener.py` (new), `app/ui/live_page.py` (new), plus changes in
+  `mic_helper.py`, `transcription.py` (`StreamingTranscriber(external=True)` + `feed()`),
+  `intent_router.py`, `assistant_page.py`, `claude_overlay.py` (`set_listening`), `main_window.py`,
+  `settings.py`, `requirements.txt` (+ `webrtcvad-wheels`) and `Filect.spec` (+ `webrtcvad`, `_webrtcvad`).
+- **Shared logic (port as-is):**
+  - **`UtteranceDetector`:** pure, frame-clocked (30 ms frames, 16 kHz).
+    - It starts on ≥ 7 of 10 frames of clear speech that is loud enough. "Loud enough" means above the
+      sensitivity's floor, above 4× the room's measured noise floor, and (once it has heard you) above
+      a share of your usual level.
+    - About 0.4 s of audio from before you started is kept, so the first word isn't clipped.
+    - When the last 0.5 s is under 30% speech, it stops sending and the "send after" countdown runs.
+    - It resumes on 4 of 6 frames of clear speech, and ends after "send after" seconds.
+    - Under 0.6 s of speech in total (a cough, "uh") is dropped.
+    - Esc puts it in `suppress()`: the rest of that sentence is dropped too.
+    - It's capped at 90 s per request.
+  - **Only speech is sent**, never the silence, so only that counts toward the daily voice limit. The
+    usage estimate is kept in `assistant_usage.json` in the app data dir.
+  - **`LiveListener`:**
+    - It streams each request through a `StreamingTranscriber(external=True)` and emits `heard(id, text)`.
+    - A result of one word or fewer is dropped.
+    - The daily-limit error stops it with a message.
+    - Stop also drops requests that are still being transcribed.
+    - A mic that dies 5 times within 60 s ends it with an error.
+  - **Router:** a 4th intent, **IGNORE**, only for `source="live"`. It's added per message (`_LIVE` in
+    `_build_prompt`), so fn + ⌃ never gets it, and `_parse(..., allow_ignore=False)` maps IGNORE to NEW.
+  - **`run_voice_task(source="live", tag=…)`:**
+    - The card opens only once it's a real request.
+    - A routing failure runs **nothing**, where fn + ⌃ falls back to a new chat.
+    - The outcome is reported through `live_routed(tag, new|continued|ignored|failed, title, key)`.
+- **Per-platform (Mac now / Windows to do):**
+  1. **Noise filter.**
+     - Mac: the mic child's `go-vp` mode runs AVAudioEngine with `setVoiceProcessingEnabled_(True)`,
+       AGC off (so near/far loudness stays real), ducking of other apps' audio at Min, channel 0
+       (it reports 9 identical channels), and a numpy `Resampler` from 48 kHz to 16 kHz.
+     - Measured: the Mac's own playback was **not picked up at all** (a long request spoken through
+       the speakers started nothing).
+     - Cost: the mic child is about 1.5% CPU and **coreaudiod about 8–10%**. Without the filter it's
+       about 2.5%. That's why there's an on/off setting.
+     - **Windows:** use the capture endpoint's communications processing (AEC/NS), or WebRTC APM, then
+       the same 16 kHz pipe. If it can't start, fall back to the plain mic (exit code 4 → plain mode).
+  2. **IMPORTANT, Mac finding: voice processing filters the mic for EVERY app while it runs.** Another
+     app's room noise dropped from 0.0072 to 0.0002. So hands-free **lets go of the mic** whenever
+     anything else records:
+     - Filect's own captures, instantly: `mic_helper.add_foreground_hook` kills the voice-processing
+       child BEFORE a foreground capture starts. Measured: gone 0.03 s after, and dictation's very
+       first 100 ms is clean.
+     - Other apps (Zoom, FaceTime → "avconferenced", screen recorders), within about 1 s: CoreAudio
+       process objects (`'prs#'`, `'piri'`, `'ppid'`; macOS 14.2+) via ctypes. Names come from the
+       .app they belong to. `corespeechd` (Siri) and `heard` are ignored, and Filect's own processes
+       read as "a Filect shortcut".
+     - It comes back about 3–4 s after the mic is free (1 s settle + about 2 s voice-processing start).
+     - **Windows:** check whether Windows' communications mode affects other apps the same way, and
+       list capture sessions with `IAudioSessionManager2` (pycaw) on the default capture endpoint.
+  3. **Screen locked → paused.** Mac: `CGSessionCopyCurrentDictionary()['CGSSessionScreenIsLocked']`,
+     polled every 1 s. Windows: `WTSRegisterSessionNotification` / an `OpenInputDesktop` check.
+  4. **Esc is observed only, never swallowed.** Mac: an `NSEvent` global + local monitor, installed only
+     while it's on. Windows: a non-swallowing `WH_KEYBOARD_LL` hook.
+  5. **Chime:** `NSSound "Tink"`. Windows: `winsound.MessageBeep`.
+  6. **The menu-bar / tray item "Start/Stop Filect Assistant"** is the same `QSystemTrayIcon` on both.
+- **Real-room finding (fixed): the room's noise floor.** With the filter OFF, a real room measured about
+  0.012 RMS and webrtcvad called **80% of it "speech"**, so a request never ended. Even with the filter
+  ON, about 19% of quiet frames counted as speech.
+  - Fix: learn the room's noise floor (the 20th percentile of the last 5 s, frozen while you talk). The
+    first 1 s after the mic opens is warm-up. Speech must be ≥ 4× the floor to start and ≥ 3× to count
+    as still talking, and "you paused" uses the under-30% window.
+  - `test_noisy_room_without_the_filter` fails on the old logic ("never ended") and passes now.
+- **Settings:** `live_send_after_sec` (2.0, clamped 1–10), `live_sensitivity` (low|medium|high:
+  webrtcvad 3/2/1, floor 0.006/0.003/0.0015, share of your level 0.40/0.25/0.12), `live_chime`
+  (True), `live_noise_filter` (True), and `live_speak` (False; phase 2, not built).
+- **Tests:**
+  - `tests/test_live_listener.py` (14): real `say` speech, fake mic + transcriber, plus the real
+    noise-filtered mic for 3 s.
+  - `tests/test_live_page.py` (7): router IGNORE, the hands-free path, the tab, settings validation,
+    and the real wiring.
+  - The full suite is unchanged against the pre-change baseline (the same 14 old failures in
+    test_database / plan / search / settings / theme).
+  - Live on his Mac:
+    - real speech through real transcription and the real router: a request started a chat; "I'll
+      call you back…" and "Honey, can you grab some milk…" were **ignored**; "and make it a markdown
+      file" **continued** the chat; "Hmm." made no row;
+    - a real Claude run answered "56" from a spoken question;
+    - real Start/Stop on screen, with the notch light.

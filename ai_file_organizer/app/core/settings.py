@@ -59,6 +59,12 @@ class Settings:
         #   app holds is continued by closing the app (then reopening it), without asking
         self.assistant_claude_open_in: str = 'app'  # Assistant "Open in …": 'app' (desktop app) or 'terminal'
         self.assistant_codex_open_in: str = 'app'   #   — the last one picked under the ⌄ becomes the default
+        # Filect Assistant (hands-free): Start in its tab → listens; each thing you say runs like fn + ⌃.
+        self.live_send_after_sec: float = 2.0       # send after you've stopped talking this long (1–10 s)
+        self.live_sensitivity: str = 'medium'       # 'low' (ignores more) | 'medium' | 'high' (picks up softer)
+        self.live_chime: bool = True                # a short sound when something you said becomes a task
+        self.live_noise_filter: bool = True         # Apple voice processing: no background noise / Mac's own sound
+        self.live_speak: bool = False               # (phase 2) speak replies — not built yet
         self.assistant_router_model: str = 'opus'  # Assistant: model for the voice intent router
         #   (new-vs-follow-up-vs-resume). Opus by default; latency is spawn-bound so the model is
         #   ~latency-neutral. Change to 'sonnet'/'haiku' to spend less of your Max limits on routing.
@@ -331,6 +337,16 @@ class Settings:
         for _k in ('assistant_claude_open_in', 'assistant_codex_open_in'):
             if data.get(_k) in ('app', 'terminal'):
                 setattr(self, _k, data[_k])
+        try:
+            if data.get('live_send_after_sec') is not None:
+                self.live_send_after_sec = min(10.0, max(1.0, float(data['live_send_after_sec'])))
+        except (TypeError, ValueError):
+            pass
+        if data.get('live_sensitivity') in ('low', 'medium', 'high'):
+            self.live_sensitivity = data['live_sensitivity']
+        for _k in ('live_chime', 'live_noise_filter', 'live_speak'):
+            if isinstance(data.get(_k), bool):
+                setattr(self, _k, data[_k])
         for k in ('assistant_codex_model', 'assistant_codex_effort'):
             v = data.get(k)
             if isinstance(v, str):
@@ -454,6 +470,11 @@ class Settings:
             'assistant_codex_close_app': self.assistant_codex_close_app,
             'assistant_claude_open_in': self.assistant_claude_open_in,
             'assistant_codex_open_in': self.assistant_codex_open_in,
+            'live_send_after_sec': self.live_send_after_sec,
+            'live_sensitivity': self.live_sensitivity,
+            'live_chime': self.live_chime,
+            'live_noise_filter': self.live_noise_filter,
+            'live_speak': self.live_speak,
             'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,

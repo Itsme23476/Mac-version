@@ -454,11 +454,12 @@ class StreamingTranscriber(QThread):
     _DONE_WAIT = 3.0
     _MAX_RECORD_SEC = 600   # 10-min hard cap (runaway / stuck-hotkey safety)
 
-    def __init__(self, language: Optional[str] = None, device=None, terms=None):
+    def __init__(self, language: Optional[str] = None, device=None, terms=None, external: bool = False):
         super().__init__()
         self.language = language
         self.terms = terms
         self.device = device
+        self._external = external    # True: no mic of its own — the hands-free listener feed()s audio
         self.is_recording = False
         self._chunks = []            # full int16 audio (for the batch fallback)
         self._outbox = []            # raw PCM byte chunks queued for streaming
@@ -476,6 +477,15 @@ class StreamingTranscriber(QThread):
 
     def stop_recording(self):
         self.is_recording = False
+
+    def feed(self, data: bytes) -> None:
+        """External audio (external=True — Filect Assistant's listener owns the mic): 16 kHz int16
+        mono, any block size. Streamed up exactly like mic blocks, and kept for the batch fallback."""
+        if not data:
+            return
+        import numpy as np
+        self._chunks.append(np.frombuffer(data, dtype=np.int16).copy())
+        self._outbox.append(data)
 
     def words_so_far(self) -> int:
         """Words heard so far (finished sentences + the one in progress) — a screenshot taken
@@ -584,17 +594,19 @@ class StreamingTranscriber(QThread):
         # stop can deadlock and kill voice until restart), so it keeps capturing into
         # _outbox/_chunks while the (slow) mute + auth + WS connect happen below; the
         # backlog is flushed to xAI the instant it opens.
-        try:
-            self._stream = mic_helper.open_mic(cb)   # ponytail: default input only (self.device unused — no caller sets it)
-        except Exception as e:
-            logger.error(f"[STREAM] mic start failed: {e}")
-            self.error.emit("Could not access the microphone.")
-            self._emit_stopped_once()
-            # Mic never started → nothing to batch either; signal handled.
-            return "", True
+        if not self._external:
+            try:
+                self._stream = mic_helper.open_mic(cb)   # ponytail: default input only (self.device unused — no caller sets it)
+            except Exception as e:
+                logger.error(f"[STREAM] mic start failed: {e}")
+                self.error.emit("Could not access the microphone.")
+                self._emit_stopped_once()
+                # Mic never started → nothing to batch either; signal handled.
+                return "", True
 
-        # Mic is capturing now — do the slow setup (mute, auth, connect) while it buffers.
-        self._mute_output_if_enabled()
+            # Mic is capturing now — do the slow setup (mute, auth, connect) while it buffers.
+            # (External audio: never mute — hands-free runs for hours while you listen to things.)
+            self._mute_output_if_enabled()
 
         # Resolve streaming prerequisites. If a prerequisite is missing, DON'T bail — leave
         # ws=None so the mic keeps recording the full clip and batch transcribes on release

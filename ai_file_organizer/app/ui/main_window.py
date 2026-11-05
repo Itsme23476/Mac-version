@@ -700,6 +700,7 @@ class MainWindow(QMainWindow):
         self.setup_settings_page()    # Index 3
         self.setup_voice_page()       # Index 4
         self.setup_assistant_page()   # Index 5
+        self.setup_live_page()        # Index 6
 
         # Subtle drop-shadows to lift cards off the background (light mode especially).
         self._apply_card_shadows()
@@ -718,10 +719,20 @@ class MainWindow(QMainWindow):
         self._refresh_account_info()
     
     def setup_assistant_page(self):
-        """Assistant page (index 5): drive a local Claude agent with live steps + Approve/Deny cards."""
+        """Agents page (index 5): drive a local Claude agent with live steps + Approve/Deny cards."""
         from app.ui.assistant_page import AssistantPage
         self.assistant_page = AssistantPage(self)
         self.page_stack.addWidget(self.assistant_page)   # Index 5
+
+    def setup_live_page(self):
+        """Assistant page (index 6): Filect Assistant — Start, then just talk (hands-free)."""
+        try:
+            from app.ui.live_page import LivePage
+            self.live_page = LivePage(self)
+        except Exception as e:                           # never let it take the rest of the app down
+            logger.error(f"Filect Assistant page failed to load: {e}")
+            self.live_page = QLabel("Filect Assistant couldn't load.")
+        self.page_stack.addWidget(self.live_page)        # Index 6
 
     def setup_sidebar(self):
         """Setup the left sidebar with navigation and account section."""
@@ -784,7 +795,8 @@ class MainWindow(QMainWindow):
             ("folder", "Organize", 1),
             ("layers", "Analyze Files", 2),
             ("mic", "Voice", 4),
-            ("sparkle", "Assistant", 5),
+            ("waveform", "Assistant", 6),     # Filect Assistant — hands-free (live_page.py)
+            ("sparkle", "Agents", 5),         # the agent chats (assistant_page.py)
             ("gear", "Settings", 3),
         ]
 
@@ -3315,6 +3327,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'organize_page') and hasattr(self.organize_page, '_apply_theme_styles'):
             self.organize_page._apply_theme_styles(new_theme)
         self._apply_voice_theme_styles(new_theme)
+        if hasattr(getattr(self, 'live_page', None), 'apply_theme'):
+            try:
+                self.live_page.apply_theme(new_theme)
+            except Exception:
+                pass
         self.status_bar.showMessage(f"Switched to {new_theme} mode", 3000)
 
     def _apply_voice_theme_styles(self, theme=None):

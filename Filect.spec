@@ -90,11 +90,13 @@ hidden_imports = [
     'AppKit',
     'Foundation',
     'Quartz',
-    'AVFoundation',   # video keyframe + audio extraction (video_analysis)
+    'AVFoundation',   # video keyframe + audio extraction (video_analysis); hands-free voice processing
     'CoreMedia',      # CMTime helpers for the above
     'objc',
     
     # Other dependencies
+    'webrtcvad',      # Filect Assistant (hands-free): speech detection
+    '_webrtcvad',
     'PIL',
     'PIL.Image',
     'filetype',
@@ -203,7 +205,7 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=hidden_imports,
-    hookspath=[],
+    hookspath=[os.path.join(SPEC_DIR, 'pyinstaller_hooks')],   # hook-webrtcvad.py (see there)
     hooksconfig={},
     runtime_hooks=[],
     excludes=[

@@ -35,18 +35,30 @@ _SYS = (
 )
 
 
-def _build_prompt(text: str, focused_title: str | None, candidate_titles: list[str]) -> str:
+# Hands-free (Filect Assistant): an always-on mic hears things that aren't meant for the assistant at
+# all, so for those messages ONLY a 4th intent is allowed. (Per message, so the warm conversation's
+# system prompt stays the same for fn + ⌃, where IGNORE is never accepted.)
+_LIVE = ("\n\nHANDS-FREE: this was picked up by an always-on microphone, so it may not be meant for "
+         "the assistant at all. For THIS message only, a 4th intent is allowed: IGNORE — use it when the "
+         "speech is NOT an instruction or question for the assistant: talking to another person, a phone "
+         "call, thinking out loud, reading something aloud, a TV / video / music, filler ('okay', 'hmm', "
+         "'yeah'). If it IS a request for the assistant, route it as usual.")
+
+
+def _build_prompt(text: str, focused_title: str | None, candidate_titles: list[str], live: bool = False) -> str:
     listing = "\n".join(f"{i}. {t}" for i, t in enumerate(candidate_titles)) or "(none)"
     return (f"Current conversation: {focused_title or '(none)'}\n"
-            f"Other conversations:\n{listing}\n\nSpoken command: {text!r}")
+            f"Other conversations:\n{listing}\n\nSpoken command: {text!r}" + (_LIVE if live else ""))
 
 
-def _parse(raw: str, fallback_task: str) -> dict:
+def _parse(raw: str, fallback_task: str, allow_ignore: bool = False) -> dict:
     raw = (raw or "").strip()
     if raw.startswith("```"):
         raw = raw.strip("`").split("\n", 1)[-1].rsplit("```", 1)[0]
     data = json.loads(raw)
     intent = str(data.get("intent", "NEW")).upper()
+    if intent == "IGNORE" and allow_ignore:
+        return {"intent": "IGNORE", "index": None, "task": fallback_task}
     if intent not in ("NEW", "FOLLOW_UP", "RESUME"):
         intent = "NEW"
     idx = data.get("index")
@@ -128,31 +140,33 @@ class IntentRouter:
         return "".join(out)
 
     def classify(self, text: str, focused_title: str | None,
-                 candidate_titles: list[str], timeout: float = 12.0) -> dict:
-        """Return {"intent": NEW|FOLLOW_UP|RESUME, "index": int|None, "task": str}.
+                 candidate_titles: list[str], timeout: float = 12.0, live: bool = False) -> dict:
+        """Return {"intent": NEW|FOLLOW_UP|RESUME (|IGNORE when live), "index": int|None, "task": str}.
         Raises on not-ready / timeout / parse failure — the caller falls back safely."""
         import time
         if not self._ready.wait(8.0) or self._loop is None or self._failed:
             raise RuntimeError("intent router not ready")
-        prompt = _build_prompt(text, focused_title, candidate_titles)
+        prompt = _build_prompt(text, focused_title, candidate_titles, live)
         t0 = time.time()
         with self._call_lock:                          # serialize (single warm conversation)
             fut = asyncio.run_coroutine_threadsafe(self._classify_async(prompt), self._loop)
             raw = fut.result(timeout=timeout)
-        d = _parse(raw, text)
+        d = _parse(raw, text, allow_ignore=live)
         logger.info("[intent-router] %.2fs | heard=%r focused=%r cands=%s -> %s idx=%s task=%r",
                     time.time() - t0, text, focused_title, candidate_titles,
                     d["intent"], d["index"], d["task"])
         return d
 
 
-def classify_with_codex(text: str, focused_title: str | None, candidate_titles: list[str]) -> dict:
+def classify_with_codex(text: str, focused_title: str | None, candidate_titles: list[str],
+                        live: bool = False) -> dict:
     """The same decision made by Codex — when Claude Code isn't available. A cold `codex exec` per call
     (slower than the warm Claude client, several seconds). Raises on any failure, like classify()."""
     import time
     from app.core.codex_runner import complete
     t0 = time.time()
-    d = _parse(complete(_SYS, _build_prompt(text, focused_title, candidate_titles)), text)
+    d = _parse(complete(_SYS, _build_prompt(text, focused_title, candidate_titles, live)), text,
+               allow_ignore=live)
     logger.info("[intent-router] codex %.2fs | heard=%r -> %s idx=%s task=%r",
                 time.time() - t0, text, d["intent"], d["index"], d["task"])
     return d

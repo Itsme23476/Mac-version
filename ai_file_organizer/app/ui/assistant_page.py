@@ -340,6 +340,7 @@ class AgentSession:
 class AssistantPage(QWidget):
     _voice_routed = Signal(object, str)   # (SessionInfo|None, task) — legacy route_speech path
     _voice_decided = Signal(object)       # {intent, idx, task, candidates, focused_key} from the router
+    live_routed = Signal(object, str, str, str)   # Filect Assistant: (tag, new|continued|ignored|failed, title, key)
     _recent_loaded = Signal(object)       # [SessionInfo] — past voice-agent chats for the rail
     _transcript_loaded = Signal(str, object)   # (session id, load_transcript() dict|None)
     _setup_checked = Signal(str, bool)         # (agent, ready) — background check after a setup button
@@ -695,7 +696,7 @@ class AssistantPage(QWidget):
 
     def _build_main(self, root):
         c = theme_manager.get_colors()
-        title = QLabel("Assistant")
+        title = QLabel("Agents")
         title.setStyleSheet("font-size: 22px; font-weight: 700; background: transparent; border: none;")
         root.addWidget(title)
         sub = QLabel("Speak or type a task and a local agent (Claude Code or Codex) does it. Keep talking "
@@ -1066,13 +1067,18 @@ class AssistantPage(QWidget):
             _add("saved", None, ss.id, ss.cwd, ss.title, getattr(ss, "agent", "claude"))
         return cands
 
-    def run_voice_task(self, text: str, source: str = "voice", images=None):
+    def run_voice_task(self, text: str, source: str = "voice", images=None, tag=None):
         """Fn+Control entry. Route the spoken command to a NEW or RESUMED conversation via one
         quick LLM call (off the UI thread), then run it. The notch shows "Routing…" meanwhile, then
-        names the one it picked. Falls back to a new conversation on any routing failure."""
+        names the one it picked. Falls back to a new conversation on any routing failure.
+        source="live" (Filect Assistant, hands-free): the router may also say IGNORE (not a request —
+        the mic is always on), the card stays closed until it's a real request, a routing failure runs
+        NOTHING (never guess from an always-on mic), and the outcome is reported via `live_routed`
+        with `tag`."""
         text = (text or "").strip()
         if not text:
             return
+        live = source == "live"
         # Intent routing on the Claude subscription (Opus): decide NEW vs FOLLOW_UP (continue the
         # focused conversation — the "that one" pointer) vs RESUME a named one. Runs off the UI thread
         # (~2.5s warm); the notch shows "Routing…" meanwhile. ANY failure falls back safely.
@@ -1082,10 +1088,11 @@ class AssistantPage(QWidget):
         images = list(images or [])
         _trace(f"{source} heard: {text!r} | focused={focused_title!r} | screenshots={len(images)} | "
                f"candidates={[c['title'] for c in candidates]}")
-        self._notch("present")
-        self._notch("set_title", "Routing…")
-        self._notch("show_working", "", "")
-        self._notch("flash")
+        if not live:                                # hands-free: no card until it's a real request
+            self._notch("present")
+            self._notch("set_title", "Routing…")
+            self._notch("show_working", "", "")
+            self._notch("flash")
         import threading
         self._route_seq += 1
         rid = self._route_seq
@@ -1096,22 +1103,27 @@ class AssistantPage(QWidget):
         def worker():
             cand_titles = [c["title"] for c in candidates]
             try:
+                kw = {"live": True} if live else {}   # (fn + ⌃ calls stay exactly as they were)
                 try:                                   # Claude routes when it's available (fast, warm)…
                     if not claude_ok:
                         raise RuntimeError("Claude Code unavailable right now")
                     from app.core.intent_router import IntentRouter
-                    d = IntentRouter.get().classify(text, focused_title, cand_titles)
+                    d = IntentRouter.get().classify(text, focused_title, cand_titles, **kw)
                 except Exception as e:                 # …else Codex does (slower, but it decides)
                     _trace(f"router: Claude couldn't route ({e}) -> Codex")
                     from app.core.intent_router import classify_with_codex
-                    d = classify_with_codex(text, focused_title, cand_titles)
+                    d = classify_with_codex(text, focused_title, cand_titles, **kw)
                 intent, idx, task = d["intent"], d["index"], d["task"]
             except Exception as e:                     # safe fallback: continue focused, else new
-                intent, idx, task = ("FOLLOW_UP" if focused_title else "NEW"), None, text
+                if live:                               # …except hands-free: never guess — run nothing
+                    intent, idx, task = "FAILED", None, text
+                else:
+                    intent, idx, task = ("FOLLOW_UP" if focused_title else "NEW"), None, text
                 _trace(f"router FAILED ({e}) -> fallback {intent}")
             self._voice_decided.emit({"rid": rid, "intent": intent, "idx": idx, "task": task,
                                       "candidates": candidates, "images": images,
-                                      "focused_key": focused.key if focused else None})
+                                      "focused_key": focused.key if focused else None,
+                                      "source": source, "tag": tag})
         threading.Thread(target=worker, daemon=True, name="filect-assistant-route").start()
 
     def _on_voice_decided(self, result):
@@ -1126,6 +1138,19 @@ class AssistantPage(QWidget):
         cands, fkey = result["candidates"], result["focused_key"]
         images = result.get("images") or []
         _trace(f"decided: {intent} idx={idx} task={task!r}")
+        live, tag = result.get("source") == "live", result.get("tag")
+
+        def _report(outcome, title=""):
+            if live:
+                key = self._focused_key if outcome in ("new", "continued") else ""
+                self.live_routed.emit(tag, outcome, title or "", key or "")
+
+        if live:
+            if intent in ("IGNORE", "FAILED"):
+                _report("ignored" if intent == "IGNORE" else "failed")
+                return
+            self._notch("present")                     # a real request: now the card opens
+            self._notch("flash")
 
         def _continue(sess, title):
             self._focus(sess.key)
@@ -1141,6 +1166,7 @@ class AssistantPage(QWidget):
 
         if intent == "FOLLOW_UP" and fkey and fkey in self._sessions:
             _continue(self._sessions[fkey], self._sessions[fkey].title)
+            _report("continued", self._sessions[fkey].title)
             return
         if intent == "RESUME" and isinstance(idx, int) and 0 <= idx < len(cands):
             c = cands[idx]
@@ -1152,11 +1178,13 @@ class AssistantPage(QWidget):
                 _trace(f"  -> resume saved '{c['title']}' id={(c['id'] or '')[:8]} ({c.get('agent')})")
                 self._notch("set_title", f"↳ continuing “{c['title']}”")
                 self.run_task(task, resume=c["id"], cwd=c["cwd"], images=images, agent=c.get("agent"))
+            _report("continued", c["title"])
             return
         # NEW (or anything unresolved) → a fresh conversation.
         _trace("  -> NEW conversation")
         self._resume_target = None
         self.run_task(task, images=images)
+        _report("new", self._focused.title if self._focused else task)
 
     def _on_voice_routed(self, session, task):
         """Routing finished (UI thread): resume the matched conversation, or start a new one."""

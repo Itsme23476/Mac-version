@@ -152,6 +152,7 @@ class _Handle(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state = "idle"
+        self._listening = ""          # Filect Assistant: "" (off) | "listening" | "hearing" | "paused"
         self._hovered = False
         self._phase = 0.0
         # Always tall enough to draw the hover tab below the notch — the window never resizes on hover
@@ -170,14 +171,26 @@ class _Handle(QWidget):
 
     def set_state(self, state: str) -> None:
         self._state = state
-        # Breathe only while a task is live (working) or blocked on you (needs_you). At idle the notch
-        # is fully hidden (nothing drawn, no timer) until you hover it.
-        if state in ("working", "needs_you"):
+        self._run_timer()
+        self.update()
+
+    def set_listening(self, mode: str) -> None:
+        """Filect Assistant's light under the notch: a slow violet pulse while it listens, bright while
+        it hears you, dim gray while paused; nothing when it's off."""
+        mode = mode if mode in ("listening", "hearing", "paused") else ""
+        if mode != self._listening:
+            self._listening = mode
+            self._run_timer()
+            self.update()
+
+    def _run_timer(self) -> None:
+        # Breathe only while a task is live (working) or blocked on you (needs_you), or the hands-free
+        # light pulses. At idle the notch is fully hidden (nothing drawn, no timer) until you hover it.
+        if self._state in ("working", "needs_you") or self._listening in ("listening", "hearing"):
             if not self._timer.isActive():
                 self._timer.start()
         else:
             self._timer.stop()
-        self.update()
 
     def set_hovered(self, hovered: bool) -> None:
         if hovered != self._hovered:
@@ -211,11 +224,37 @@ class _Handle(QWidget):
         # (amber), a finished task (green), or an error (red). Only idle is invisible.
         return self._state in ("working", "needs_you", "done", "error")
 
+    def _paint_listening(self, p, y: float) -> None:
+        if not self._listening or self._reveal > 0.3:
+            return
+        cx = self.width() / 2.0
+        if self._listening == "paused":
+            color, r = QColor(150, 150, 160, 150), 3.0
+        elif self._listening == "hearing":
+            color, r = QColor(ACCENT), 4.5
+            glow = QColor(ACCENT)
+            glow.setAlpha(70)
+            p.setPen(Qt.NoPen)
+            p.setBrush(glow)
+            p.drawEllipse(QPointF(cx, y), 8.0, 8.0)
+        else:
+            color, r = QColor(ACCENT), 3.5
+            color.setAlpha(110 + int(120 * (0.5 + 0.5 * math.sin(self._phase * 0.6))))
+        p.setPen(Qt.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(QPointF(cx, y), r, r)
+
     def paintEvent(self, _e) -> None:
         base = self._shows_at_rest()
         # At rest the notch is COMPLETELY hidden — nothing is drawn until you hover it (reveal > 0),
-        # or a task is live/blocked/finished (base). No idle hint, no resting pill.
+        # or a task is live/blocked/finished (base). No idle hint, no resting pill. (Filect Assistant
+        # adds only its small light while it's on.)
         if not base and self._reveal < 0.02:
+            if self._listening:
+                p = QPainter(self)
+                p.setRenderHint(QPainter.Antialiasing, True)
+                self._paint_listening(p, 7.0)
+                p.end()
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -258,6 +297,7 @@ class _Handle(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(AMBER))
             p.drawEllipse(QPointF(x + lip_w + 9, t / 2.0 + 1), 3.5, 3.5)
+        self._paint_listening(p, t + 9.0)
         p.end()
 
     def mousePressEvent(self, e) -> None:
@@ -1354,6 +1394,10 @@ class ClaudeOverlay(QWidget):
             self._toggle_model_panel()
         if not self._minimized:
             self._fit()
+
+    def set_listening(self, mode: str) -> None:
+        """Filect Assistant (hands-free) state for the light under the notch: "" | listening | hearing | paused."""
+        self._handle.set_listening(mode)
 
     def set_open_defaults(self, where: dict) -> None:
         """Where "Open in …" opens, per agent ("app" / "terminal") — the page's saved choice."""
