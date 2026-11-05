@@ -401,6 +401,88 @@ def test_chat_open_in_codex_app_continues_as_new_chat():
     print("a chat held by the Codex app continues here as a new Codex chat (with a recap)  OK")
 
 
+def test_codex_chats_from_codex_index():
+    """Codex keeps most chats only in its database (the Codex app's never get files; old files get pruned).
+    Filect lists them from there — Codex app + terminal chats for "use my conversation about X", Filect's own
+    for the rail — and loads a chat's history from it (for the recap when the Codex app holds that chat)."""
+    import json
+    import sqlite3
+    home = tempfile.mkdtemp()
+    ws = tempfile.mkdtemp()
+    st = sqlite3.connect(os.path.join(home, "state_5.sqlite"))
+    st.execute("create table threads (id text, cwd text, name text, title text, first_user_message text, "
+               "preview text, updated_at integer, source text, archived integer)")
+    rows = [("app1", "/proj", "", "Email drafts for sponsors", "help me write sponsor emails", "", 300, "vscode", 0),
+            ("fil1", ws, "", "make a site", "make a site", "", 200, "exec", 0),
+            ("old1", "/x", "", "Archived one", "x", "", 100, "vscode", 1),
+            ("rev1", "/x", "", "review", "review this", "", 400, '{"subagent":{"other":"guardian"}}', 0),
+            ("tmp1", "/tmp/elsewhere", "", "a test", "a test", "", 500, "exec", 0)]
+    st.executemany("insert into threads values (?,?,?,?,?,?,?,?,?)", rows)
+    st.commit()
+    th = sqlite3.connect(os.path.join(home, "thread_history_1.sqlite"))
+    th.execute("create table thread_items (thread_id text, item_json text, rollout_ordinal integer)")
+    th.execute("create table thread_turns (thread_id text, duration_ms integer, rollout_ordinal integer)")
+    items = [{"type": "userMessage", "content": [{"type": "text", "text": "help me write sponsor emails"}]},
+             {"type": "agentMessage", "text": "Sure — short and friendly, signed Damian."},
+             {"type": "commandExecution", "id": "c1", "command": "/bin/zsh -lc 'ls'", "aggregatedOutput": "a.txt",
+              "exitCode": 0, "status": "completed"},
+             {"type": "fileChange", "id": "f1", "changes": [{"path": "/proj/draft.md", "kind": {"type": "add"}}],
+              "status": "completed"}]
+    th.executemany("insert into thread_items values ('app1', ?, ?)", [(json.dumps(x), i) for i, x in enumerate(items)])
+    th.execute("insert into thread_turns values ('app1', 4200, 1)")
+    th.commit()
+    old = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = home
+    try:
+        every = cr.codex_threads(ws, everywhere=True)
+        assert [t.id for t in every] == ["app1", "fil1"], [t.id for t in every]   # no archived/reviewer/elsewhere
+        assert every[0].title == "Email drafts for sponsors" and every[0].agent == "codex"
+        assert [t.id for t in cr.codex_threads(ws)] == ["fil1"], "the rail: only Filect's folder"
+        tr = cr.load_codex_transcript("app1")
+        kinds = [x[0] for x in tr["steps"]]
+        assert kinds == ["user", "text", "tool", "result", "tool", "result"], kinds
+        assert tr["steps"][3][2] == "a.txt" and tr["steps"][4][1] == "Write" and tr["duration"] == 4.2
+
+        # held by the Codex app, asked for by name in a fresh run → the recap comes from that history
+        page = _page(primary="codex")
+        sess = ap.AgentSession("n1", "/proj", "draft one for Acme", "Email drafts for sponsors", True, None, "low",
+                               resume="app1", agent="codex")
+        sess.entries = [{"id": "0", "kind": "user", "text": "draft one for Acme"}]   # nothing else loaded
+        recap = page._recap(sess, "codex")
+        assert "Me: help me write sponsor emails" in recap and "signed Damian" in recap, recap
+    finally:
+        if old is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = old
+    print("Codex app + terminal chats come from Codex's index (titles, history); a held chat's recap uses it  OK")
+
+
+def test_name_match_prefers_the_title():
+    """'use my conversation about testing the Filect MCP end to end' must reach the chat TITLED that, not
+    one whose long first message just shares common words."""
+    from types import SimpleNamespace as NS
+    import app.core.agent_sessions as asess
+    from app.core import codex_runner as crm
+    filler = [NS(id=f"c{i}", title=f"Chat {i}", cwd="/x", project="p", mtime=900 - i, agent="claude",
+                 preview="tell me what you think, use the end of the file, what failed and what to test next")
+              for i in range(20)]
+    target = NS(id="t1", title="Test Filect MCP end to end", cwd="/y", project="q", mtime=1, agent="codex",
+                preview="I have the Filect MCP connected. Test it end to end.")
+    real = (asess.list_sessions, crm.codex_threads)
+    asess.list_sessions = lambda limit=500: list(filler)
+    crm.codex_threads = lambda ws, everywhere=False: [target]
+    try:
+        page = _page()
+        page._sessions = {}
+        titles = [c["title"] for c in page._build_voice_candidates(
+            "Use my conversation about testing the Filect MCP end to end and tell me what failed")]
+        assert "Test Filect MCP end to end" in titles, titles
+    finally:
+        asess.list_sessions, crm.codex_threads = real
+    print("resume-by-name: a chat's title outweighs common words in other chats' first messages  OK")
+
+
 def test_real_codex_task_followup_and_stop():
     page = _page(primary="codex")
     tmp = tempfile.mkdtemp(prefix="filect-codex-")
@@ -493,6 +575,8 @@ if __name__ == "__main__":
     test_update_codex_button()
     test_open_in_codex_desktop_app()
     test_chat_open_in_codex_app_continues_as_new_chat()
+    test_codex_chats_from_codex_index()
+    test_name_match_prefers_the_title()
     test_real_chat_held_by_codex_app()
     test_real_codex_task_followup_and_stop()
     test_real_signed_out_claude_hands_over_to_codex()

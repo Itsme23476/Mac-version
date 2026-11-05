@@ -1005,20 +1005,29 @@ class AssistantPage(QWidget):
         except Exception:
             saved, _fill = [], set()
         try:                                               # + your Codex chats (Filect's workspace)
-            from app.core.codex_runner import list_codex_sessions
-            saved = sorted(saved + list_codex_sessions(DEFAULT_WORKSPACE), key=lambda s: s.mtime, reverse=True)
+            from app.core.codex_runner import codex_threads   # + your Codex chats (Codex app, terminal, Filect)
+            saved = sorted(saved + [t for t in codex_threads(DEFAULT_WORKSPACE, everywhere=True)
+                                    if not self._junk_session(t)], key=lambda s: s.mtime, reverse=True)
         except Exception:
             pass
         for ss in saved[:12]:                              # recent real conversations (newest first)
             _add("saved", None, ss.id, ss.cwd, ss.title, getattr(ss, "agent", "claude"))
-        words = {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
-                 if len(w) > 2 and w not in _fill}
+        # Topic words only ("use my conversation about X" — the asking isn't the topic), compared by stem
+        # (testing ~ Test, emails ~ email). A hit in a chat's TITLE counts 3x one in its first message:
+        # long first messages full of common words crowded out "Test Filect MCP end to end".
+        asking = {"use", "conversation", "conversations", "chat", "chats", "about", "tell", "what", "back",
+                  "continue", "codex", "claude", "the", "one", "where", "which", "had", "have", "did"}
+
+        def stems(t):
+            return {w[:4] for w in re.findall(r"[a-z0-9]+", (t or "").lower())
+                    if len(w) > 2 and w not in _fill and w not in asking}
+        words = stems(text)
         scored = []
         for ss in saved:                                   # name/topic matches — reach OLD convos
-            hay = (ss.title + " " + ss.preview).lower()
-            sc = sum(1 for w in words if w in hay)
-            if sc >= 2:                                    # need real overlap, not one stray word
-                scored.append((sc, ss.mtime, ss))
+            in_title = len(words & stems(ss.title))
+            in_first = len(words & (stems(ss.preview) - stems(ss.title)))
+            if in_title + in_first >= 2:                   # need real overlap, not one stray word
+                scored.append((3 * in_title + in_first, ss.mtime, ss))
         scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
         for _, _, ss in scored[:6]:
             _add("saved", None, ss.id, ss.cwd, ss.title, getattr(ss, "agent", "claude"))
@@ -1408,8 +1417,8 @@ class AssistantPage(QWidget):
                 # vanish from the rail after a restart
                 found = list_sessions(limit=300, cwd=DEFAULT_WORKSPACE) + remembered_sessions(DEFAULT_WORKSPACE)
                 try:                                # + Codex chats in the workspace (badged on the rail)
-                    from app.core.codex_runner import list_codex_sessions
-                    found += list_codex_sessions(DEFAULT_WORKSPACE)
+                    from app.core.codex_runner import codex_threads     # Codex's own index: chats stay
+                    found += codex_threads(DEFAULT_WORKSPACE)                # after Codex prunes old files
                 except Exception:
                     pass
                 seen, items = set(), []
@@ -1674,7 +1683,7 @@ class AssistantPage(QWidget):
         send = sess.prompt
         if agent != sess.agent:                     # set up the OTHER agent (yours was out of usage)
             if sess.session_id or sess.resume:
-                send = self._recap(sess, AGENT_NAMES[sess.agent]) + sess.prompt
+                send = self._recap(sess, sess.agent) + sess.prompt
             sess.agent = agent
             sess.model, sess.effort = self._model_for(agent)
             sess.session_id, sess.resume = "", None
@@ -1743,7 +1752,7 @@ class AssistantPage(QWidget):
         why = "is out of usage" if setup_kind(sess.first_error) == "usage" else "isn't set up"
         send = sess.prompt
         if sess.session_id or sess.resume:
-            send = self._recap(sess, AGENT_NAMES[old]) + sess.prompt
+            send = self._recap(sess, old) + sess.prompt
         sess.before_switch = (old, sess.session_id, sess.resume, sess.model, sess.effort)
         sess.agent, sess.fell_back = agent, True
         sess.model, sess.effort = self._model_for(agent)
@@ -1761,17 +1770,35 @@ class AssistantPage(QWidget):
             self._append(f"↪ {cue}")
             self._notch("show_working", cue, "")
 
-    @staticmethod
-    def _recap(sess, old_name: str, turns: int = 3) -> str:
-        """The chat's last few exchanges, for the agent picking it up."""
-        pairs, cur = [], None
-        for e in sess.entries:
-            if e.get("kind") == "user":
-                cur = [e.get("text", ""), ""]
-                pairs.append(cur)
-            elif e.get("kind") == "text" and cur is not None:
-                cur[1] = e.get("text", "")
-        pairs = pairs[:-1][-turns:]                  # the last one is this turn's request
+    def _recap(self, sess, old_agent: str, turns: int = 3) -> str:
+        """The chat's last few exchanges, for the agent picking it up: from this run, else from the chat's
+        saved history (a chat you named by voice — "use my email conversation" — has none loaded here)."""
+        from app.core.agent_runner import AGENT_NAMES
+        old_name = AGENT_NAMES.get(old_agent, old_agent)
+
+        def pairs_of(entries):
+            pairs, cur = [], None
+            for e in entries:
+                if e.get("kind") == "user":
+                    cur = [e.get("text", ""), ""]
+                    pairs.append(cur)
+                elif e.get("kind") == "text" and cur is not None:
+                    cur[1] = e.get("text", "")
+            return pairs
+        pairs = pairs_of(sess.entries)[:-1]          # the last one is this turn's request
+        sid = sess.session_id or sess.resume
+        if not pairs and sid:
+            try:
+                if old_agent == "codex":
+                    from app.core.codex_runner import load_codex_transcript
+                    data = load_codex_transcript(sid)
+                else:
+                    from app.core.agent_sessions import load_transcript
+                    data = load_transcript(sid, sess.cwd)
+                pairs = pairs_of(self._transcript_view(data)[3]) if data else []
+            except Exception as e:
+                _trace(f"recap: couldn't read {sid[:8]}'s history ({e})")
+        pairs = pairs[-turns:]
         body = "\n\n".join(f"Me: {u[:600]}\n{old_name}: {(r or '(no reply)')[:900]}" for u, r in pairs) \
             or f"(a chat called “{sess.title}”)"
         return (f"[You're picking up a conversation that started in {old_name}, which can't continue it "

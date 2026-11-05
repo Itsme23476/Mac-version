@@ -155,7 +155,12 @@ def _file_changes(item) -> list:
     ch = item.get("changes") or []
     if isinstance(ch, dict):
         return [(p, (v or {}).get("type", "update"), (v or {}).get("content")) for p, v in ch.items()]
-    return [(c.get("path", ""), c.get("kind", "update"), None) for c in ch if isinstance(c, dict)]
+    out = []
+    for c in ch:
+        if isinstance(c, dict):
+            kind = c.get("kind", "update")                   # the database keeps {"type": "add", …}
+            out.append((c.get("path", ""), kind.get("type", "update") if isinstance(kind, dict) else kind, None))
+    return out
 
 
 def _read(path: str, limit: int = 200_000) -> str:
@@ -182,8 +187,9 @@ def _item_steps(item: dict, completed: bool, saved: bool = False) -> list:
         tool = Step("tool", tool="Bash", detail=_tool_detail("Bash", inp), input=inp, tool_id=iid)
         if not completed:
             return [tool]
-        res = Step("result", tool_id=iid, text=item.get("aggregated_output") or item.get("stdout") or "",
-                   is_error=item.get("exit_code") not in (0, None) or item.get("status") == "failed")
+        code = item.get("exit_code", item.get("exitCode"))   # (the database spells it in camelCase)
+        res = Step("result", tool_id=iid, text=item.get("aggregated_output") or item.get("aggregatedOutput")
+                   or item.get("stdout") or "", is_error=code not in (0, None) or item.get("status") == "failed")
         return [tool, res] if saved else [res]               # live: the tool step came on item.started
     if t == "file_change" and completed:                     # one Write per file, with what's in it now
         out = []
@@ -436,6 +442,49 @@ def _user_text(item: dict) -> str:
                     if isinstance(c, dict) and c.get("type") == "text").strip()
 
 
+def _db(prefix: str):
+    """Codex's own SQLite store (state_N / thread_history_N), newest version, read-only."""
+    import sqlite3
+    dbs = sorted(codex_home().glob(f"{prefix}_*.sqlite"), key=lambda f: _ver(f.stem))
+    if not dbs:
+        raise FileNotFoundError(prefix)
+    return sqlite3.connect(f"file:{dbs[-1]}?mode=ro", uri=True, timeout=2)
+
+
+def _strip_recap(text: str) -> str:
+    """A handed-over chat starts with the recap block — its title is the request after it."""
+    if text.startswith("[You're picking up a conversation") and "]\n\n" in text:
+        return text.split("]\n\n", 1)[1]
+    return text
+
+
+def codex_threads(workspace: str, everywhere: bool = False) -> list:
+    """Your Codex conversations from Codex's own index (the Codex app keeps most chats only there, not as
+    files): the ones Filect ran in `workspace`, plus — `everywhere` — your Codex app and terminal chats, so
+    "use my conversation about X" can find them. Codex's titles; newest first. Falls back to the files."""
+    from app.core.agent_sessions import SessionInfo, generate_title
+    try:
+        rows = _db("state").execute(
+            "select id, cwd, coalesce(nullif(name, ''), title, ''), coalesce(first_user_message, preview, ''), "
+            "updated_at, source from threads where archived = 0 and coalesce(first_user_message, '') != ''"
+        ).fetchall()                                 # (has_user_event is 0 on every row — not usable)
+    except Exception:
+        return list_codex_sessions(workspace)
+    ws, out = os.path.realpath(workspace), []
+    for tid, cwd, title, first, updated, source in rows:
+        in_ws = os.path.realpath(cwd or "/") == ws
+        if not (in_ws or (everywhere and source in ("vscode", "cli"))):
+            continue                                 # (subagents, Codex's reviewer, other tools' runs)
+        first = _strip_recap(first or title or "")
+        if source == "exec":                         # Filect's: named like the rail names them
+            title = generate_title(first) if first else title
+        out.append(SessionInfo(id=tid, cwd=cwd or workspace, title=(title or "Untitled")[:90],
+                               preview=" ".join(first.split())[:220], mtime=float(updated or 0),
+                               project=Path(cwd or workspace).name, agent="codex"))
+    out.sort(key=lambda s: s.mtime, reverse=True)
+    return out
+
+
 def list_codex_sessions(cwd: str, days: int = 45) -> list:
     """Codex chats that ran in `cwd` (Filect's workspace), newest first, as agent_sessions.SessionInfo."""
     from app.core.agent_sessions import SessionInfo, generate_title
@@ -454,6 +503,7 @@ def list_codex_sessions(cwd: str, days: int = 45) -> list:
                     first = _user_text(it)
                     break
             if first and sid:
+                first = _strip_recap(first)
                 preview = " ".join(first.split())[:220]
                 out.append(SessionInfo(id=sid, cwd=cwd, title=generate_title(first), preview=preview,
                                        mtime=f.stat().st_mtime, project=Path(cwd).name, agent="codex"))
@@ -463,11 +513,44 @@ def list_codex_sessions(cwd: str, days: int = 45) -> list:
     return out
 
 
+def _db_transcript(session_id: str) -> Optional[dict]:
+    """A chat Codex keeps only in its database (most Codex app chats; old files get pruned)."""
+    try:
+        db = _db("thread_history")
+        rows = db.execute("select item_json from thread_items where thread_id = ? order by rollout_ordinal",
+                          (session_id,)).fetchall()
+        last = db.execute("select duration_ms from thread_turns where thread_id = ? order by rollout_ordinal "
+                          "desc limit 1", (session_id,)).fetchone()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    steps = []
+    for (raw,) in rows:
+        try:
+            it = json.loads(raw)
+        except Exception:
+            continue
+        if it.get("type") == "userMessage":
+            if _user_text(it):
+                steps.append(("user", _strip_recap(_user_text(it))))
+            continue
+        for st in _item_steps(it, True, saved=True):
+            if st.kind == "text":
+                steps.append(("text", st.text))
+            elif st.kind == "tool":
+                steps.append(("tool", st.tool, st.input, st.tool_id))
+            else:
+                steps.append(("result", st.tool_id, st.text, st.is_error))
+    return {"steps": steps, "duration": (last[0] / 1000.0) if last and last[0] else None}
+
+
 def load_codex_transcript(session_id: str) -> Optional[dict]:
-    """A saved Codex chat in load_transcript()'s format: {"steps": [...], "duration": last turn secs}."""
+    """A saved Codex chat in load_transcript()'s format: {"steps": [...], "duration": last turn secs} —
+    from its file, else from Codex's database."""
     f = next(iter((codex_home() / "sessions").glob(f"*/*/*/rollout-*-{session_id}.jsonl")), None)
     if f is None:
-        return None
+        return _db_transcript(session_id)
     steps, dur = [], None
     try:
         for t, p in _events(f):
@@ -480,7 +563,7 @@ def load_codex_transcript(session_id: str) -> Optional[dict]:
             it = p.get("item") or {}
             if it.get("type") == "UserMessage":
                 if _user_text(it):
-                    steps.append(("user", _user_text(it)))
+                    steps.append(("user", _strip_recap(_user_text(it))))
                 continue
             for st in _item_steps(it, True, saved=True):
                 if st.kind == "text":

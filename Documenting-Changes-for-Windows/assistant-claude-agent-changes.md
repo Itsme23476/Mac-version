@@ -778,3 +778,31 @@ yourself, the Mac side can't see it.
       and the late router answer is dropped. Live: one click, nothing started.
     - Also, a Stop pressed before `codex` has spawned keeps it from starting.
   - `tests/test_worker_thread_affinity.py` pins primary = Claude, because it read his saved Codex primary.
+- **"Use my conversation about X" reaches Codex chats too (2026-11-05): BOTH platforms.**
+  - Codex keeps most chats ONLY in its database. On his Mac: 302 threads in `~/.codex/state_5.sqlite`
+    (`threads`: id, cwd, name/title, first_user_message, updated_at, source, archived) and their
+    messages in `thread_history_1.sqlite` (`thread_items.item_json`: userMessage / agentMessage /
+    commandExecution with `aggregatedOutput`/`exitCode` / fileChange with nested `kind` / …).
+  - Codex app chats (`source = vscode`) never get files, and Codex prunes old rollout files. So
+    `codex_runner.codex_threads(workspace, everywhere)` reads the index read-only (`mode=ro`, newest
+    `state_*.sqlite`): Filect's chats in its folder (the rail — they no longer vanish when files are
+    pruned), plus the Codex app and terminal chats for voice resume-by-name.
+  - `has_user_event` is 0 on every row, so it isn't used as a filter. Archived chats, subagents, Codex's
+    reviewer and other tools' exec runs are left out.
+  - `load_codex_transcript` falls back to `thread_items` when there's no file.
+  - When a chat named by voice is held by the Codex app, the recap is built from that saved history
+    (`AssistantPage._recap` loads it when nothing of the chat is in memory).
+  - Resume-by-name matching:
+    - ignores the asking words ("use my conversation about…");
+    - compares 4-letter stems;
+    - weights a title hit 3×.
+
+    Long Claude first messages had crowded out "Test Filect MCP end to end".
+  - Live, from fresh app runs:
+    - "use my conversation about my email style and draft an email to Acme" continued that Codex chat
+      and the email was signed Damian, $1,400.
+    - With the chat held by the Codex app, it became a new chat whose recap came from the saved history,
+      and the email was still signed Damian.
+    - The router picked his Codex app chats "Test Filect MCP end to end" and "Build a 3D sneaker
+      landing page" by name.
+  - **Windows:** the same files under `%USERPROFILE%\.codex\` (check the names/versions there).
