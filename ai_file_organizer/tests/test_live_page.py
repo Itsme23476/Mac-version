@@ -214,6 +214,14 @@ def test_answers_to_the_agent():
         s.duration = 30
         ctx = page.live_answer_context()
         assert ctx["kind"] == "question" and ctx["question"] == "Should I also add a contact form?", ctx
+        for tail, want in (("Should I create it? (yes/no)", "Should I create it?"),
+                           ("Want me to deploy it?\n\nLet me know.", "Want me to deploy it?"),
+                           ("Should I create a folder called “yes test” inside the “Filect test” folder on your Desktop? "
+                            "I’ll wait for your answer before creating it.",              # Codex, his test
+                            "Should I create a folder called “yes test” inside the “Filect test” folder on your Desktop?"),
+                           ("Done. Created the folder.", ""),
+                           ("Done — what a day? I created every folder. Then I tested every page. All good.", "")):
+            assert ap._last_question(tail) == want, (tail, ap._last_question(tail))
         page.run_voice_task("Yes.", source="live", tag=33)
         assert _pump(lambda: len(reports) == 3, 3)
         assert router.asked[-1] == "Should I also add a contact form?", router.asked

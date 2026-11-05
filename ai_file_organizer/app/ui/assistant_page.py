@@ -306,13 +306,19 @@ def _yes_no(text: str):
 
 
 def _last_question(text: str) -> str:
-    """The question an agent's answer ends with ("…Should I also add a contact form?"), else ""."""
+    """The question an agent's answer ends with, else "". Also when ONE short sentence or tag trails it —
+    agents do that all the time: "…Should I create it? I'll wait for your answer before creating it."
+    (Codex, his test), "…Should I create it? (yes/no)", or a last line "Let me know."."""
     import re
     lines = [ln.strip(" \t*_`>\"'”“") for ln in (text or "").strip().splitlines() if ln.strip(" \t*_`>\"'”“")]
-    if not lines or not lines[-1].endswith("?"):
-        return ""
-    last = re.split(r"(?<=[.!])\s+", lines[-1])[-1]
-    return last[:300]
+    for ln in reversed(lines[-2:]):
+        i = ln.rfind("?")
+        if i < 0:
+            continue
+        after = ln[i + 1:].strip()
+        if len(after) <= 150 and len(re.findall(r"[.!]\s+\S", after)) == 0:    # at most one short sentence after it
+            return re.split(r"(?<=[.!])\s+", ln[:i + 1])[-1][:300]
+    return ""
 
 
 def _setting(name: str, default=None):
