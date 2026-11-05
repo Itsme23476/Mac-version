@@ -1031,8 +1031,7 @@ class AssistantPage(QWidget):
             if sess.bypass:
                 self._append("⚡ Bypass mode: running without approval prompts.\n")
             self._notch("present")                  # resets the notch Details feed
-            self._notch("set_title", sess.prompt)   # seed the feed with this turn's full input…
-            self._notch("set_title", sess.title)    # …but show the short title on the bubble
+            self._notch("set_task", sess.prompt, sess.title)   # bubble = what you asked, bold = its name
             self._notch("show_working", "Starting…", "")
             self._notch("flash")                    # brief 'receipt' so the trigger is visibly confirmed
             sess.feed_lines = [f"▸ {sess.prompt}"]  # mirror what the notch feed now holds

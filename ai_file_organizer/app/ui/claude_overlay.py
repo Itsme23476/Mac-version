@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 from PySide6.QtCore import (
     Qt, QTimer, QPointF, QRectF, QSize, QPropertyAnimation, QEasingCurve, Signal, QUrl,
 )
-from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QCursor, QDesktopServices, QIcon
+from PySide6.QtGui import (QColor, QPainter, QPen, QGuiApplication, QCursor, QDesktopServices, QIcon,
+                           QFont, QFontMetrics)
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextBrowser, QSlider, QLineEdit,
@@ -77,6 +78,7 @@ DETAILS_H = 166      # height of the live "Details" feed when expanded
 DONE_MAX_H = 280     # the finished answer shows in full up to this height, then scrolls
 DONE_TEXT_W = CARD_W - 32 - 26   # its width: card minus the column margins and the ✓ column
 TRANSCRIPT_H = 56    # the "what you said" bubble at the top of the card
+TITLE_H = 20         # the task's short bold name under it (VoiceOS: "Build coffee brand website")
 CTRL_H = 32          # persistent control row (model pill · Details · primary action)
 MODELPANEL_H = 170   # the inline "Model & effort" panel (model dropdown closed)
 MODEL_LIST_H = 96    # extra height when the dropdown list is open (3 rows — the selected is hidden)
@@ -568,6 +570,14 @@ class ClaudeOverlay(QWidget):
             "border-radius: 16px; padding: 9px 15px; }")
         self._transcript.setVisible(False)
         col.addWidget(self._transcript)
+        self._prompt_shown_in_full = False   # the bubble holds the whole prompt → Details skips it
+        self._title_label = QLabel("")
+        self._title_label.setFixedHeight(TITLE_H)
+        self._title_label.setStyleSheet(
+            f"QLabel {{ color: {C['text']}; font-size: 14px; font-weight: 600; background: transparent; "
+            "border: none; padding-left: 2px; }")
+        self._title_label.setVisible(False)
+        col.addWidget(self._title_label)
 
         # The "Claude Code" card sits on the black backing — give it a subtly lighter inset look.
         # Header (VoiceOS-style): [icon] Claude Code  ···  <status> <timer>  [⇣] [✕]
@@ -983,6 +993,7 @@ class ClaudeOverlay(QWidget):
         # A task keeps the card OPEN — while it runs and once it's done — until YOU close it (click
         # the card, ✕ or Esc). 2026-11-05: the auto-tuck hid the answer before it arrived.
         self._pinned = True
+        self._set_task_title("")             # set_task / load_state fill it for this task
         self.set_state("working")
         self._set_status("Working", C["text_muted"])
         self._start_elapsed()        # reset the "Working m:ss" counter for this task
@@ -1021,6 +1032,7 @@ class ClaudeOverlay(QWidget):
         self.set_state("idle")
         self._set_status("", C["text_muted"])
         self._transcript.setVisible(False)
+        self._set_task_title("")
         self._reset_details()
         self._stack.setCurrentWidget(self._page_idle)
         self._pinned = False
@@ -1050,6 +1062,7 @@ class ClaudeOverlay(QWidget):
         self.set_state("idle")
         self._set_status("", C["text_muted"])
         self._transcript.setVisible(False)
+        self._set_task_title("")
         self._reset_details()
         self._stack.setCurrentWidget(self._page_idle)
         if not self.isVisible():
@@ -1059,17 +1072,59 @@ class ClaudeOverlay(QWidget):
         self._key_for_typing()
 
     def set_title(self, title: str) -> None:
-        """Sets the transcript bubble ("what you said"). That IS the task display — there is no
-        separate bold title in the card, so the prompt is never shown twice."""
+        """A short cue in the bubble ("Routing…", "↳ continuing …") before the task is known."""
         title = (title or "").strip()
         if title:
-            self._transcript.setText(title[:300])
+            self._set_bubble(title)
             if not self._minimized:
                 self._transcript.setVisible(True)
         if title and not self._details_feed.toPlainText().strip():
             self._append_detail(f"▸ {title}")      # seed the Details feed with the task
         if not self._minimized:
             self._fit()
+
+    def set_task(self, prompt: str, title: str = "") -> None:
+        """VoiceOS layout: the bubble shows what you asked (its first two lines; hover for all of it),
+        the bold line under it the task's short name."""
+        prompt = (prompt or "").strip()
+        if prompt and not self._details_feed.toPlainText().strip():
+            self._append_detail(f"▸ {prompt}")     # seed the plain feed (rich Details replace it)
+        self._set_bubble(prompt or title, is_prompt=bool(prompt))
+        self._set_task_title(title if prompt else "")
+        if not self._minimized:
+            self._transcript.setVisible(bool(self._transcript.text()))
+            self._fit()
+
+    def _set_bubble(self, text: str, is_prompt: bool = False) -> None:
+        """Cut to the bubble's two lines at a word, with an ellipsis; the full text is the tooltip."""
+        text = " ".join((text or "").split())
+        f = QFont()
+        f.setPixelSize(13)
+        fm = QFontMetrics(f)
+        w = CARD_W - 32 - 30                      # card minus the column margins and the bubble padding
+
+        def fits(t):
+            return fm.boundingRect(0, 0, w, 10000, Qt.TextWordWrap, t).height() <= 2 * fm.lineSpacing()
+
+        full = fits(text)
+        shown = text
+        if not full:
+            lo, hi = 0, len(text)
+            while lo < hi:                        # longest prefix that still fits with the "…"
+                mid = (lo + hi + 1) // 2
+                lo, hi = (mid, hi) if fits(text[:mid].rstrip() + "…") else (lo, mid - 1)
+            shown = text[:lo].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
+        self._transcript.setText(shown)
+        self._transcript.setToolTip("" if full else text)
+        self._prompt_shown_in_full = is_prompt and full
+
+    def _set_task_title(self, title: str) -> None:
+        f = QFont()
+        f.setPixelSize(14)
+        f.setWeight(QFont.DemiBold)
+        title = QFontMetrics(f).elidedText(" ".join((title or "").split()), Qt.ElideRight, CARD_W - 40)
+        self._title_label.setText(title)
+        self._title_label.setVisible(bool(title) and not self._minimized)
 
     def show_working(self, text: str = "", tool: str = "") -> None:
         self.set_state("working")
@@ -1117,7 +1172,10 @@ class ClaudeOverlay(QWidget):
     def _render_details(self, follow: bool) -> None:
         sb = self._details_feed.verticalScrollBar()
         at_bottom, pos = sb.value() >= sb.maximum() - 4, sb.value()
-        self._details_feed.setHtml(details_view.render_html(self._entries, self._expanded))
+        shown = details_view.visible_entries(self._entries, hide_final=self._state == "done",
+                                             hide_prompt=self._prompt_shown_in_full)
+        self._details_feed.setHtml(details_view.render_html(shown, self._expanded) or (
+            f'<p style="color:{C["text_muted"]};">Claude answered directly — no other steps.</p>'))
         # Live updates follow the newest activity only if you were already at the bottom; a Show-full
         # toggle keeps your place.
         sb.setValue(sb.maximum() if (follow and at_bottom) else pos)
@@ -1277,6 +1335,8 @@ class ClaudeOverlay(QWidget):
         view.setFixedHeight(max(24, min(DONE_MAX_H, int(doc.size().height()) + 2)))
         view.verticalScrollBar().setValue(0)
         self._stack.setCurrentWidget(self._page_done)
+        if self._rich:
+            self._render_details(follow=False)   # the answer is on the card now — not in Details too
         # Stays up showing the answer until you close it (present() pinned it).
         if not self._minimized:
             self._fit()
@@ -1302,8 +1362,9 @@ class ClaudeOverlay(QWidget):
         (_append_detail dedupes, so re-seeding the last action line is a no-op.)"""
         self._reset_details()
         title = (title or "").strip()
-        self._transcript.setText(title[:300])
-        self._transcript.setVisible(bool(title) and not self._minimized)
+        self._set_bubble(task or title, is_prompt=bool(task))
+        self._set_task_title(title if task else "")
+        self._transcript.setVisible(bool(self._transcript.text()) and not self._minimized)
         if entries:
             self.set_details(entries)              # rich Details (turns + actions with substance)
         else:
@@ -1603,6 +1664,7 @@ class ClaudeOverlay(QWidget):
         self._type_field.setVisible(not minimized)
         self._send_btn.setVisible(not minimized)
         self._transcript.setVisible((not minimized) and bool(self._transcript.text()))
+        self._title_label.setVisible((not minimized) and bool(self._title_label.text()))
         self._details_feed.setVisible((not minimized) and self._details_open)
         if minimized:
             self._model_open = False
@@ -1657,6 +1719,8 @@ class ClaudeOverlay(QWidget):
         h = om.top() + cm.top()
         if self._transcript.text():
             h += TRANSCRIPT_H + sp            # the "what you said" bubble
+        if self._title_label.text():
+            h += TITLE_H + sp                 # the task's short bold name
         self._stack.setFixedHeight(self._content_height())   # pin it so the page doesn't expand
         h += TOPBAR_H + sp + self._content_height() + sp + CTRL_H
         if self._model_open:

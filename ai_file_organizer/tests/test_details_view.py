@@ -237,6 +237,49 @@ def test_done_card_shows_whole_answer_and_stays_open():
     print("done card: whole answer (formatted), stays open while running + after done until you close it  OK")
 
 
+def test_card_and_details_never_repeat():
+    """VoiceOS split: bubble = what you asked (2 lines, hover for all), bold line = the task's name,
+    the done card = the answer; Details = how it got there, without repeating any of those."""
+    e = _entries(dict(kind="user", text="what files are in my downloads"),
+                 dict(kind="tool", tool="Bash", input={"command": "ls ~/Downloads"}, tool_id="b1"),
+                 dict(kind="result", tool_id="b1", text="a.png\nb.png"),
+                 dict(kind="text", text="Checking the newest ones."),
+                 dict(kind="text", text=DOWNLOADS_REPLY))
+    v = dv.visible_entries(e, hide_final=True, hide_prompt=True)
+    kinds = [x["kind"] for x in v]
+    assert kinds == ["tool", "text"] and v[1]["text"] == "Checking the newest ones.", v
+    shot = _entries(dict(kind="user", text="what is this", images=["/tmp/x.png"]))
+    assert dv.visible_entries(shot, hide_prompt=True) == shot, "a prompt with screenshots stays in Details"
+
+    ov = co.ClaudeOverlay(); ov.rest_idle(); ov.present(); ov.open_full()
+    ov.set_task("what files are in my downloads", "List Downloads Files")
+    assert ov._transcript.text() == "what files are in my downloads" and ov._transcript.toolTip() == ""
+    assert ov._title_label.text() == "List Downloads Files"
+    ov.set_details(e)
+    ov.show_done("sid", 0.0, "what files are in my downloads", "")
+    details, card = ov._details_feed.toPlainText(), ov._done_view.toPlainText()
+    assert "crtypto_trading" in card, "the answer is on the card"
+    assert "crtypto_trading" not in details, "…and not repeated in Details"
+    assert "what files are in my downloads" not in details, "the prompt is in the bubble, not repeated"
+    assert "ls ~/Downloads" in details and "Checking the newest ones." in details, "the steps stay"
+
+    long_prompt = "Build a polished responsive one-page website for an invented coffee brand named " \
+                  "Ember & Oak with a hero, a brand story, featured coffees, a visit section and a footer."
+    ov2 = co.ClaudeOverlay(); ov2.rest_idle(); ov2.present(); ov2.open_full()
+    ov2.set_task(long_prompt, "Build coffee brand website")
+    assert ov2._transcript.text().endswith("…") and ov2._transcript.toolTip() == long_prompt
+    ov2.set_details(_entries(dict(kind="user", text=long_prompt), dict(kind="text", text="Done.")))
+    ov2.show_done("sid", 0.0, long_prompt, "")
+    assert "Ember & Oak with a hero" in ov2._details_feed.toPlainText(), "cut-off prompt → Details keeps it"
+
+    ov3 = co.ClaudeOverlay(); ov3.rest_idle(); ov3.present(); ov3.open_full()
+    ov3.set_task("hello", "Say Hello")
+    ov3.set_details(_entries(dict(kind="user", text="hello"), dict(kind="text", text="Hey Damianos!")))
+    ov3.show_done("sid", 0.0, "hello", "")
+    assert "answered directly" in ov3._details_feed.toPlainText(), ov3._details_feed.toPlainText()
+    print("card vs Details: bubble = ask (cut + tooltip), bold = name, card = answer, Details = only the rest  OK")
+
+
 if __name__ == "__main__":
     test_steps_from_real_sdk_messages()
     test_render_actions()
@@ -244,4 +287,5 @@ if __name__ == "__main__":
     test_overlay_links_and_done_card()
     test_live_flow_through_page()
     test_done_card_shows_whole_answer_and_stays_open()
+    test_card_and_details_never_repeat()
     print("test_details_view OK")

@@ -71,6 +71,25 @@ def final_reply(entries) -> str:
     return ""
 
 
+def visible_entries(entries, hide_final=False, hide_prompt=False):
+    """Details minus what the card already shows (VoiceOS never shows a thing twice): the latest
+    turn's final reply once the done card carries it, and the latest prompt when the top bubble shows
+    it in full (kept if it carries screenshots — the bubble can't show those)."""
+    hide = set()
+    if hide_final:
+        for e in reversed(_last_turn(entries)):
+            if e["kind"] == "text" and e["text"].strip():
+                hide.add(e["id"])
+                break
+    if hide_prompt:
+        for e in reversed(entries):
+            if e["kind"] == "user":
+                if not e.get("images"):
+                    hide.add(e["id"])
+                break
+    return [e for e in entries if e["id"] not in hide]
+
+
 def deliverable(entries):
     """(path, size label) of the file the latest turn produced — its last successful write — or None."""
     for e in reversed(_last_turn(entries)):

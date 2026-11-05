@@ -232,10 +232,13 @@ def test_select_past_chat_shows_it_in_notch():
 
     ov = page._overlay
     assert ov._minimized is False, "selecting a conversation must OPEN the notch on it"
-    assert ov._transcript.text() == "Build me a site"
+    assert ov._transcript.text() == "make it blue", "bubble = what you asked (the latest turn)"
+    assert ov._title_label.text() == "Build me a site", "bold line = the chat's short name"
     assert "Made it blue." in ov._done_view.toPlainText(), ov._done_view.toPlainText()
     details = ov._details_feed.toPlainText()                          # the rich Details feed
-    assert "Wrote index.html" in details and "Edited style.css" in details and "Made it blue." in details, details
+    assert "Wrote index.html" in details and "Edited style.css" in details, details
+    assert "Made it blue." not in details, "the answer is on the card, not repeated in Details"
+    assert "Done — built it." in details, "an EARLIER turn's answer stays in the history"
     assert ov._timer_label.text() == "0:30", f"timer must be the real duration, got {ov._timer_label.text()!r}"
     print("past chat: row click → transcript loaded → notch OPEN showing it, 0:30, stays in its group  OK")
 

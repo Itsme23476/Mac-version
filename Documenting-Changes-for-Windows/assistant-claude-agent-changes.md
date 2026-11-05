@@ -507,3 +507,20 @@ yourself, the Mac side can't see it.
   Downloads answer and checks: the card survives the flash timer with the mouse away; it reopens on the
   result after being tucked; the whole list shows with no raw `**`; a click closes it; a long answer
   scrolls. Checked that it fails with the old `present()`.
+
+### 8h. The card and Details never show the same thing twice (Mac, 2026-11-05): **BOTH platforms (Qt)**
+- Taken from Damianos' VoiceOS recordings: VoiceOS's top says WHAT, Details says HOW, and nothing
+  repeats. Filect's Details was repeating the final answer that the done card already showed.
+- **Top bubble = what you asked:** `ClaudeOverlay.set_task(prompt, title)`, which replaces the old
+  `set_title(prompt)` + `set_title(title)` pair in `assistant_page`. `_set_bubble` cuts the prompt to the
+  bubble's 2 lines at a word with "…" (measured with QFontMetrics at 13px over `CARD_W-62`); the full
+  text is the tooltip. `set_title` is kept only for short cues ("Routing…", "↳ continuing …").
+- **Bold line = the task's short name:** new `_title_label` (14px semibold, `TITLE_H` 20, elided) under
+  the bubble, VoiceOS's "Build coffee brand website". `present()` clears it, then `set_task` /
+  `load_state(title, task=prompt)` set it. It's hidden at idle / New chat; `_fit` counts it.
+- **Details = the rest:** `details_view.visible_entries(entries, hide_final, hide_prompt)`. It hides the
+  latest turn's final reply once the done card shows it (`show_done` re-renders Details). It hides the
+  latest prompt when the bubble shows it in full, unless that prompt carries screenshots. Earlier
+  turns stay. If nothing is left: "Claude answered directly — no other steps."
+- Tests: `test_details_view.py::test_card_and_details_never_repeat` (checked that it fails without the
+  filter); `test_rail_recent.py`: a past chat shows its latest request in the bubble and its name bold.
