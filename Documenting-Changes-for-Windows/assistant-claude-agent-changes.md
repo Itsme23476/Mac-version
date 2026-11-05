@@ -1015,3 +1015,10 @@ yourself, the Mac side can't see it.
   - Ignored speech gets a gray "Not a request" pill; a routing failure gets an amber "Couldn't check that".
   - Every Esc press is logged with the state it found.
   - **Windows:** the same; Esc comes from the non-swallowing keyboard hook.
+- **Stuck "Paused while you use a Filect shortcut" (2026-11-06, his test): BOTH platforms.**
+  - What happened: fn was pressed again 0.27 s after a dictation pasted, while hands-free was still
+    paused from it (it resumes about 1–2 s after a shortcut ends). The foreground hook set a permanent
+    "step aside" flag that was only cleared when hands-free held the mic, so it never resumed.
+  - Fix: `_fg_hook` only acts when hands-free holds the mic, and the signal is a timestamp that expires
+    after `YIELD_SEC` (2 s). By then `mic_helper.busy()` covers the shortcut's capture.
+  - The regression test (back-to-back shortcuts) fails on the old logic.
