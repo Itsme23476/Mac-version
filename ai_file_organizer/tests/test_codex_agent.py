@@ -482,6 +482,141 @@ def test_chat_held_by_codex_app_close_and_continue():
           "postpones it); Always remembered; busy → warned + reopens on the stopped task; didn't close → asks  OK")
 
 
+def test_open_in_menu_app_or_terminal():
+    """"Open in Claude / Codex →" opens the desktop app (the default); the ⌄ shows ONE option — "Open in
+    Terminal" (Claude Code / Codex on the SAME chat, in its folder). Picking it makes Terminal the default
+    for that agent: the button becomes "Open in Terminal →" and the ⌄ option "Open in Codex app" (flips
+    back the same way). Remembered per agent, in settings. No Claude app → Terminal."""
+    import subprocess
+    got = []
+    real_popen, real_has, real_flag = subprocess.Popen, ar.has_app_for, cr._has_flag
+    real_where = settings.assistant_claude_open_in, settings.assistant_codex_open_in
+    subprocess.Popen = lambda args, **k: got.append(args)
+    cr._has_flag = lambda flag, *cmd: True                     # a Codex that knows --no-daemon
+    settings.assistant_claude_open_in = settings.assistant_codex_open_in = "app"
+    try:
+        page = _page()
+        cx = ap.AgentSession("x1", "/tmp/proj dir", "build", "Build", True, None, "low", agent="codex")
+        cl = ap.AgentSession("x2", "/tmp/cl", "plan", "Plan", True, "opus", "high")
+        cx.status = cl.status = "done"
+        cx.session_id, cl.session_id = "01a1-cx", "cl-123"
+        page._sessions = {"x1": cx, "x2": cl}
+        page._focus("x1")
+        ov = page._overlay
+        assert not ov._open_more.isHidden() and ov._open_panel.isHidden()      # (the card is tucked here)
+        assert ov._primary_btn.text().startswith("Open in Codex"), ov._primary_btn.text()
+        ov._primary_btn.click()                                    # default → the Codex app
+        assert got[-1] == ["open", "codex://threads/01a1-cx"], got[-1]
+        ov._open_more.click()                                      # ⌄ → one option
+        assert not ov._open_panel.isHidden() and ov._open_alt.text() == "Open in Terminal", ov._open_alt.text()
+        ov._toggle_model_panel()                                   # one menu at a time
+        assert not ov._open_open and ov._model_open
+        ov._toggle_model_panel(); ov._open_more.click()
+        ov._open_alt.click()                                       # → Terminal, now the default
+        assert got[-1][:3] == ["open", "-a", "Terminal"] and ov._open_panel.isHidden()
+        sc = Path(got[-1][3]).read_text()
+        assert "cd '/tmp/proj dir'" in sc and "exec codex resume --no-daemon 01a1-cx" in sc, sc
+        assert settings.assistant_codex_open_in == "terminal" and settings.assistant_claude_open_in == "app"
+        assert ov._primary_btn.text().startswith("Open in Terminal") and ov._open_alt.text() == "Open in Codex app"
+        ov._primary_btn.click()
+        assert got[-1][:3] == ["open", "-a", "Terminal"], "the next plain click is Terminal now"
+
+        page._focus("x2")                                          # a Claude chat: its own default (app)
+        assert ov._primary_btn.text().startswith("Open in Claude") and ov._open_alt.text() == "Open in Terminal"
+        ov._primary_btn.click()
+        assert got[-1] == ["open", "claude://resume?session=cl-123"], got[-1]
+        ov._open_more.click(); ov._open_alt.click()
+        sc = Path(got[-1][3]).read_text()
+        assert got[-1][:3] == ["open", "-a", "Terminal"] and "cd /tmp/cl" in sc and "exec claude --resume cl-123" in sc
+        assert settings.assistant_claude_open_in == "terminal"
+        ov._open_more.click(); ov._open_alt.click()                # "Open in Claude app" → back to the app
+        assert got[-1] == ["open", "claude://resume?session=cl-123"] and settings.assistant_claude_open_in == "app"
+        assert ov._primary_btn.text().startswith("Open in Claude") and ov._open_alt.text() == "Open in Terminal"
+        ar.has_app_for = lambda url: False                         # no Claude app on this Mac
+        ov._primary_btn.click()
+        assert got[-1][:3] == ["open", "-a", "Terminal"], "no Claude app → Terminal, not nothing"
+
+        page2 = _page()                                            # a fresh start reads the saved defaults
+        page2._sessions = {"x1": cx}
+        page2._focus("x1")
+        assert page2._overlay._primary_btn.text().startswith("Open in Terminal")
+
+        ov.show_working("Running…")                                # the ⌄ is only beside "Open in …"
+        assert ov._open_more.isHidden()
+    finally:
+        subprocess.Popen, ar.has_app_for, cr._has_flag = real_popen, real_has, real_flag
+        settings.assistant_claude_open_in, settings.assistant_codex_open_in = real_where
+    print("Open in → the app by default; ⌄ shows one option (Terminal / the app); the pick becomes that "
+          "agent's default, remembered; Codex in Terminal runs --no-daemon; no Claude app → Terminal  OK")
+
+
+def test_release_codex_background_server():
+    """Codex 0.166+: Codex in Terminal (started without --no-daemon) runs on a shared background server that
+    keeps holding the chat after Terminal's Codex closes. Releasing stops that server — but never while
+    another Codex in Terminal still uses it, and the Codex app's own helper processes don't count."""
+    import subprocess
+    app_procs = ("1 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex "
+                 "-c x=1 app-server --analytics\n2 /Users/u/.codex/packages/bin/codex app-server daemon "
+                 "pid-update-loop\n3 /usr/bin/python3 x.py codex\n")
+    ps = {"out": app_procs}
+    calls = []
+
+    class R:
+        def __init__(self, out=""):
+            self.stdout, self.returncode = out, 0
+
+    def fake_run(args, **k):
+        calls.append(args)
+        if args[0] == "ps":
+            return R(ps["out"])
+        return R("")                                           # pgrep: no `codex resume <id>` running
+
+    real = (cr.subprocess.run, cr._daemon_up, cr.codex_app_running, cr.find_codex)
+    cr.subprocess.run, cr._daemon_up = fake_run, lambda: True
+    cr.codex_app_running, cr.find_codex = lambda: False, lambda: "/x/codex"
+    try:
+        assert cr._codex_tuis() == [], "the Codex app's processes aren't Codex in Terminal"
+        assert cr.chat_holder("sid") == "terminal", "the background server holds it → 'Codex in Terminal'"
+        assert cr.release_chat("sid") == "terminal"
+        assert ["/x/codex", "app-server", "daemon", "stop"] in calls
+        calls.clear()
+        ps["out"] = app_procs + "9 /Users/u/.local/bin/codex resume other-chat\n"   # another Codex in Terminal
+        assert cr._codex_tuis() == ["9"]
+        assert cr.release_chat("sid") == "" and ["/x/codex", "app-server", "daemon", "stop"] not in calls
+    finally:
+        cr.subprocess.run, cr._daemon_up, cr.codex_app_running, cr.find_codex = real
+    print("Codex's background server still holding a chat → stopped (never while another Codex in Terminal "
+          "uses it; the Codex app's processes don't count)  OK")
+
+
+def test_chat_held_by_codex_in_terminal():
+    """Held by Codex in TERMINAL (opened via ⌄ → Terminal): the card says so; closing stops that Codex and
+    continues the same chat — and does NOT open the Codex app afterwards (you weren't using it)."""
+    calls = []
+    real = (cr.chat_holder, cr.release_chat, cr.open_codex_chat, cr.codex_app_busy, settings.assistant_codex_close_app)
+    cr.chat_holder = lambda sid: "terminal"
+    cr.release_chat = lambda sid, timeout=15.0, force=False: (calls.append(("close", sid)) or "terminal")
+    cr.open_codex_chat = lambda sid: calls.append(("reopen", sid))
+    cr.codex_app_busy = lambda: [("01a1-app", "Something in the app")]   # irrelevant: Terminal holds it
+    settings.assistant_codex_close_app = False
+    try:
+        page, s, started = _held_page()
+        ov = page._overlay
+        page._on_error("o1", cr.CHAT_BUSY); page._on_done("o1")
+        assert "open in Codex in Terminal" in ov._error_label.text() and "anyway" not in ov._setup_btn.text()
+        ov._setup_btn.click()
+        assert _pump(lambda: started, 5) and started[-1][2] == "01a1-old" and calls == [("close", "01a1-old")]
+        ap.REOPEN_QUIET_MS = 100
+        s.thread = None
+        page._on_done("o1")
+        _pump(lambda: False, 0.5)
+        assert ("reopen", "01a1-old") not in calls, "Terminal's Codex closed → don't open the Codex app"
+    finally:
+        ap.REOPEN_QUIET_MS = 15000
+        cr.chat_holder, cr.release_chat, cr.open_codex_chat, cr.codex_app_busy, settings.assistant_codex_close_app = real
+    print("held by Codex in Terminal → 'open in Codex in Terminal'; close → same chat, no Codex app reopen  OK")
+
+
 def test_codex_chats_from_codex_index():
     """Codex keeps most chats only in its database (the Codex app's never get files; old files get pruned).
     Filect lists them from there — Codex app + terminal chats for "use my conversation about X", Filect's own
@@ -657,6 +792,9 @@ if __name__ == "__main__":
     test_open_in_codex_desktop_app()
     test_chat_held_by_codex_app_asks_then_new_chat()
     test_chat_held_by_codex_app_close_and_continue()
+    test_open_in_menu_app_or_terminal()
+    test_release_codex_background_server()
+    test_chat_held_by_codex_in_terminal()
     test_codex_chats_from_codex_index()
     test_name_match_prefers_the_title()
     test_real_chat_held_by_codex_app()

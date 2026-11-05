@@ -853,3 +853,40 @@ yourself, the Mac side can't see it.
     - Close + follow-up 1, then follow-up 2 right away: it ran with Codex still closed, same chat.
     - Codex reopened 14.5 s after it, with **no banner**, all three answers in one chat.
     - Follow-up 3 found Codex had taken the chat back and auto-closed it again (Always).
+- **"Open in …" ⌄: one other option, and the pick becomes the default (2026-11-05): BOTH platforms
+  (UI + setting); the Terminal launch is per-platform.**
+  - The card's button opens the chat in the agent's desktop app: **Open in Claude →** / **Open in Codex →**.
+  - The ⌄ beside it shows ONE option, the other place: **Open in Terminal**.
+    - Picking it opens the same chat in Terminal (`claude --resume <id>` / `codex resume --no-daemon <id>`,
+      in the chat's folder), and Terminal becomes that agent's default.
+    - The button then reads **Open in Terminal →** and the ⌄ option reads **Open in Claude app** /
+      **Open in Codex app**. Picking that flips it back.
+  - Remembered per agent: `settings.assistant_claude_open_in` / `assistant_codex_open_in` ("app" |
+    "terminal"), saved by `AssistantPage._open_task`, seeded into the card with
+    `ClaudeOverlay.set_open_defaults`.
+  - No desktop app installed (or a custom CLAUDE_CONFIG_DIR / CODEX_HOME) → Terminal either way.
+  - Code: `claude_overlay.py` (`_open_alt`, `_pick_open`, `_update_primary`), `agent_runner.open_in_claude`,
+    `codex_runner.open_in_codex`.
+  - **Windows:** open Windows Terminal / PowerShell in the chat's folder instead of a `.command` script.
+    The desktop-app links (`claude://`, `codex://`) are registered on Windows too. Check with the
+    Windows equivalent of `has_app_for` (the URL protocol's registry key).
+- **Codex 0.166+ "background server" kept holding a chat after Terminal's Codex closed (2026-11-05):
+  BOTH platforms if the Windows Codex has it.**
+  - Codex 0.166's Terminal mode runs on a shared background server ("app-server daemon", socket
+    `~/.codex/app-server-control/app-server-control.sock`). That server keeps the chat's writer lock after
+    Terminal's Codex exits, so "Close and continue here" closed Terminal's Codex and still got "already
+    has an active writer".
+  - Fix 1: Filect's own "Open in Terminal" runs `codex resume --no-daemon <id>`, only when the installed
+    Codex lists `--no-daemon` in `codex resume --help` (older ones don't have it). The chat is free the
+    moment you close it there.
+  - Fix 2, for a Codex you started yourself: `release_chat` runs `codex app-server daemon stop` after
+    Terminal's Codex exits, or when only the server is left holding the chat. It stops the server only
+    when no other Codex in Terminal is running (`_codex_tuis`).
+    - The Codex app's own `codex … app-server` / `exec-server` helpers (inside `ChatGPT.app`) don't
+      count. They put `-c` options before the command, so the check looks at every argument.
+    - Stopping saves the server's chats, and it starts again the next time you run Codex.
+    - `chat_holder` reports a chat held only by the server as "terminal".
+  - Verified on his Mac: after Terminal's Codex was killed, the server still held the chat; after
+    `daemon stop`, `codex exec resume` on it answered.
+  - **Windows:** check whether the Windows Codex has the daemon (`codex app-server daemon --help`) and
+    where its control socket/pipe lives. Swap `ps -axo` for the process list there.

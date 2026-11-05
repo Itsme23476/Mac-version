@@ -265,6 +265,47 @@ def open_claude_setup(kind: str) -> str:
     return path
 
 
+def open_terminal(name: str, lines: list, env_keys=()) -> str:
+    """Run a small script in a new Terminal window (setup, "Open in … → Terminal"). `env_keys`: a custom
+    profile folder (CLAUDE_CONFIG_DIR / CODEX_HOME) the script must use too. Returns the script's path."""
+    import shlex
+    import subprocess
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), name)
+    head = ["#!/bin/bash", 'export PATH="$HOME/.local/bin:$PATH"']
+    head += [f"export {k}={shlex.quote(os.environ[k])}" for k in env_keys if os.environ.get(k)]
+    with open(path, "w") as f:
+        f.write("\n".join(head + lines) + "\n")
+    os.chmod(path, 0o755)
+    subprocess.Popen(["open", "-a", "Terminal", path])
+    return path
+
+
+def has_app_for(url: str) -> bool:
+    """Is an app installed that opens this kind of link (claude:// → Claude, codex:// → Codex)?"""
+    try:
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+        return NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(NSURL.URLWithString_(url)) is not None
+    except Exception:
+        return False
+
+
+def open_in_claude(session_id: str, cwd: str, where: str = "app") -> str:
+    """"Open in Claude": the Claude desktop app (claude://resume — it imports the chat), or `where` =
+    "terminal" — Claude Code in Terminal, in the chat's folder, on the SAME chat. No Claude app (or a
+    custom profile it doesn't use) → Terminal, instead of silently doing nothing."""
+    import shlex
+    import subprocess
+    if where == "app" and has_app_for("claude://resume") and not os.environ.get("CLAUDE_CONFIG_DIR"):
+        subprocess.Popen(["open", f"claude://resume?session={session_id}"])
+        return f"claude://resume?session={session_id}"
+    logger.info("[agent] opening %s in Terminal", session_id)
+    return open_terminal("filect-open-claude.command",
+                         [f"cd {shlex.quote(cwd or os.path.expanduser('~'))} || exit 1",
+                          f"exec claude --resume {shlex.quote(session_id)}"], ("CLAUDE_CONFIG_DIR",))
+
+
 def claude_ready() -> bool:
     """Claude Code installed AND signed in (`claude auth status`, ~0.2s) — so a task waiting on its setup
     can run by itself the moment you finish (see AssistantPage._check_setup)."""

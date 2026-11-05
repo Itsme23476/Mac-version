@@ -81,6 +81,7 @@ TRANSCRIPT_H = 56    # the "what you said" bubble at the top of the card
 TITLE_H = 20         # the task's short bold name under it (VoiceOS: "Build coffee brand website")
 CTRL_H = 32          # persistent control row (model pill · Details · primary action)
 MODELPANEL_H = 170   # the inline "Model & effort" panel (model dropdown closed)
+OPENPANEL_H = 46     # the ⌄ menu: one row — the other place to open it
 MODEL_ROW_H = 31     # one row of the open model dropdown (28px + spacing; the selected one is hidden)
 _MODELS = ("opus", "sonnet", "haiku", "fable")
 # Display names carry the version (the alias still resolves to Claude Code's latest of each family).
@@ -474,7 +475,7 @@ class ClaudeOverlay(QWidget):
 
     approve_clicked = Signal()
     deny_clicked = Signal()
-    open_requested = Signal()     # "Open in Claude Code / view full task"
+    open_in = Signal(str)         # "Open in …" / the ⌄ row: "app" (desktop app) or "terminal"; the pick becomes the default
     dismissed = Signal()
     model_changed = Signal(str, str)   # (model, effort) picked on the card's model pill
     stop_clicked = Signal()            # "Stop" pressed while a task is running
@@ -688,7 +689,24 @@ class ClaudeOverlay(QWidget):
         self._primary_btn.setCursor(Qt.PointingHandCursor)
         self._primary_btn.setFixedHeight(26)
         self._primary_btn.clicked.connect(self._on_primary)
-        ctrl.addWidget(self._primary_btn)
+        # ⌄ beside "Open in …": the one other place to open it (Terminal, or back to the desktop app).
+        self._open_more = QPushButton("⌄")
+        self._open_more.setCursor(Qt.PointingHandCursor)
+        self._open_more.setToolTip("Open it somewhere else")
+        self._open_more.setFixedSize(26, 26)
+        self._open_more.setStyleSheet(
+            f"QPushButton {{ background: {C['surface']}; color: {C['text_2']}; border: none; "
+            "border-top-right-radius: 13px; border-bottom-right-radius: 13px; "
+            "border-top-left-radius: 0; border-bottom-left-radius: 0; font-size: 12px; font-weight: 700; "
+            "padding: 0 0 3px 0; }"
+            f"QPushButton:hover {{ background: {ACCENT}; color: #0B0B0E; }}")
+        self._open_more.clicked.connect(self._toggle_open_panel)
+        self._open_more.setVisible(False)
+        opn = QHBoxLayout()
+        opn.setSpacing(1)
+        opn.addWidget(self._primary_btn)
+        opn.addWidget(self._open_more)
+        ctrl.addLayout(opn)
         col.addWidget(self._ctrl_row)
 
         # Inline "Model & effort" panel — opens below the controls when the model pill is tapped.
@@ -772,6 +790,29 @@ class ClaudeOverlay(QWidget):
         ends.addWidget(_s)
         mp.addLayout(ends)
         col.addWidget(self._model_panel)
+
+        # The ⌄ menu: ONE row — the other place ("Open in Terminal" / "Open in Claude app"); picking it
+        # makes it the default. Inline (not a popup), like the model panel, so it gets clicks on the
+        # non-activating notch panel.
+        self._open_panel = QFrame()
+        self._open_panel.setObjectName("openPanel")
+        self._open_panel.setStyleSheet(
+            f"QFrame#openPanel {{ background:#111113; border:1px solid {C['border']}; border-radius:14px; }}")
+        self._open_panel.setVisible(False)
+        self._open_open = False
+        self._open_where = {"claude": "app", "codex": "app"}   # per agent; the page seeds it from settings
+        op = QVBoxLayout(self._open_panel)
+        op.setContentsMargins(8, 8, 8, 8)
+        self._open_alt = QPushButton("")
+        self._open_alt.setCursor(Qt.PointingHandCursor)
+        self._open_alt.setFixedHeight(28)
+        self._open_alt.setStyleSheet(
+            f"QPushButton {{ background:#202026; color:{C['text_2']}; border:1px solid {C['border']}; "
+            "border-radius:8px; font-size:12px; text-align:left; padding:0 12px; }"
+            f"QPushButton:hover {{ background:{C['surface']}; color:{C['text']}; border-color:{ACCENT}; }}")
+        self._open_alt.clicked.connect(self._pick_open)
+        op.addWidget(self._open_alt)
+        col.addWidget(self._open_panel)
 
         # Type a task instead of speaking (VoiceOS-style). Enter routes it through the SAME intent
         # router as voice (new / follow-up / resume). Precise fallback when the mic mishears.
@@ -1304,8 +1345,34 @@ class ClaudeOverlay(QWidget):
         el = _EFFORT_NAMES.get(self._effort, "High")
         self._model_btn.setText(f"{ml} · {el}  ⌄")
 
+    def _toggle_open_panel(self) -> None:
+        self._set_open_panel(not self._open_open)
+
+    def _set_open_panel(self, on: bool) -> None:
+        self._open_open = on
+        self._open_panel.setVisible(on)
+        if on and self._model_open:                 # one menu at a time
+            self._toggle_model_panel()
+        if not self._minimized:
+            self._fit()
+
+    def set_open_defaults(self, where: dict) -> None:
+        """Where "Open in …" opens, per agent ("app" / "terminal") — the page's saved choice."""
+        self._open_where.update({k: v for k, v in where.items() if v in ("app", "terminal")})
+        self._update_primary()
+
+    def _pick_open(self) -> None:
+        """The ⌄ row: open it in the OTHER place — which becomes the default from now on."""
+        self._set_open_panel(False)
+        where = "app" if self._open_where.get(self._agent, "app") == "terminal" else "terminal"
+        self._open_where[self._agent] = where
+        self._update_primary()
+        self.open_in.emit(where)
+
     def _toggle_model_panel(self) -> None:
         self._model_open = not self._model_open
+        if self._model_open and self._open_open:     # one menu at a time
+            self._set_open_panel(False)
         if not self._model_open:
             self._model_list_open = False
             self._model_list.setVisible(False)
@@ -1548,11 +1615,14 @@ class ClaudeOverlay(QWidget):
         if self._state == "working":
             self.stop_clicked.emit()
         else:
-            self.open_requested.emit()
+            self.open_in.emit(self._open_where.get(self._agent, "app"))
 
     def hide_primary(self) -> None:
         """No "Open in …" / Stop for this card (a request stopped before it became a chat)."""
         self._primary_btn.setVisible(False)
+        self._open_more.setVisible(False)
+        if self._open_open:
+            self._set_open_panel(False)
 
     def mark_stopping(self) -> None:
         """Called the instant Stop is clicked: disable the button + show it registered, so there's
@@ -1576,14 +1646,24 @@ class ClaudeOverlay(QWidget):
         elif self._state == "error" and self._setup_kind:
             self._primary_btn.setVisible(False)  # nothing to open yet — the setup button is the action
         elif self._state in ("done", "error"):
-            self._primary_btn.setText(f"Open in {_AGENT_NAMES.get(self._agent, 'Claude')}  →")
+            name = _AGENT_NAMES.get(self._agent, "Claude")
+            in_terminal = self._open_where.get(self._agent, "app") == "terminal"
+            self._primary_btn.setText(f"Open in {'Terminal' if in_terminal else name}  →")
             self._primary_btn.setVisible(True)
-            self._primary_btn.setStyleSheet(
+            self._primary_btn.setStyleSheet(       # left half of a split button; the ⌄ is the right half
                 f"QPushButton {{ background: {C['surface']}; color: {C['text']}; border: none; "
-                "border-radius: 13px; font-size: 12px; font-weight: 600; padding: 0 14px; }"
+                "border-top-left-radius: 13px; border-bottom-left-radius: 13px; "
+                "border-top-right-radius: 0; border-bottom-right-radius: 0; "
+                "font-size: 12px; font-weight: 600; padding: 0 12px 0 14px; }"
                 f"QPushButton:hover {{ background: {ACCENT}; color: #0B0B0E; }}")
+            self._open_alt.setText(f"Open in {name} app" if in_terminal else "Open in Terminal")
+            self._open_more.setVisible(True)
+            return
         else:                                   # needs_you — Approve/Deny live in the page
             self._primary_btn.setVisible(False)
+        self._open_more.setVisible(False)          # only beside "Open in …"
+        if self._open_open:
+            self._set_open_panel(False)
 
     # -- header status + elapsed timer -----------------------------------------
     def _set_status(self, text: str, color: str) -> None:
@@ -1881,6 +1961,8 @@ class ClaudeOverlay(QWidget):
                 h += 28 + 6                   # the "Update Codex" row
             if self._model_list_open:         # model dropdown list expanded (the selected one is hidden)
                 h += MODEL_ROW_H * max(0, len(self._model_rows) - 1) + 3
+        if self._open_open:
+            h += sp + OPENPANEL_H             # the ⌄ menu
         if self._details_open:
             h += sp + (DETAILS_H - 6)         # the expanded live feed
         h += sp + TYPEFIELD_H + cm.bottom() + om.bottom()
@@ -1999,7 +2081,7 @@ if __name__ == "__main__":
     fired = {"approve": 0, "deny": 0, "open": 0, "dismiss": 0}
     ov.approve_clicked.connect(lambda: fired.__setitem__("approve", fired["approve"] + 1))
     ov.deny_clicked.connect(lambda: fired.__setitem__("deny", fired["deny"] + 1))
-    ov.open_requested.connect(lambda: fired.__setitem__("open", fired["open"] + 1))
+    ov.open_in.connect(lambda w: fired.__setitem__("open", fired["open"] + 1))
     ov.dismissed.connect(lambda: fired.__setitem__("dismiss", fired["dismiss"] + 1))
 
     ov.present()
@@ -2072,7 +2154,7 @@ if __name__ == "__main__":
     assert ov._handle._state == "error"
 
     # open + dismiss signals.
-    ov.open_requested.emit()
+    ov.open_in.emit("app")
     assert fired["open"] == 1
     ov._on_dismiss()
     assert fired["dismiss"] == 1

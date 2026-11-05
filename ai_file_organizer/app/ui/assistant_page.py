@@ -543,7 +543,8 @@ class AssistantPage(QWidget):
         ov = ClaudeOverlay()
         ov.approve_clicked.connect(lambda: self._decide(True))
         ov.deny_clicked.connect(lambda: self._decide(False))
-        ov.open_requested.connect(self._open_task)
+        ov.open_in.connect(self._open_task)                # "app" / "terminal" (the ⌄ pick becomes the default)
+        ov.set_open_defaults({a: _setting(f"assistant_{a}_open_in", "app") for a in ("claude", "codex")})
         ov.dismissed.connect(self._on_notch_dismissed)
         ov.model_changed.connect(self._on_model_changed)
         ov.stop_clicked.connect(self._on_stop_task)
@@ -642,24 +643,34 @@ class AssistantPage(QWidget):
         except Exception:
             pass
 
-    def _open_task(self):
-        """Notch "Open in Claude/Codex →" — open the ACTUAL conversation: Claude Code's in the Claude
-        desktop app via its resume deep link (claude://resume?session=<id> -> importCliSession), a Codex
-        one in Codex itself (Terminal, `codex resume <id>`). Falls back to Filect's own Assistant tab
-        when there's no session id (e.g. the task errored before saving)."""
+    def _open_task(self, where: str = "app"):
+        """Notch "Open in …" — open the ACTUAL conversation: `where` = "app" → that agent's desktop app
+        (claude://resume / codex://threads), "terminal" → Claude Code / Codex in Terminal, in the chat's
+        folder, on the same chat. No desktop app → Terminal. Where you open it is remembered per agent (the
+        ⌄ pick becomes the button's default). Falls back to Filect's own Assistant tab when there's no
+        session id (e.g. the task errored before saving)."""
         sess = self._focused
         sid = (sess.session_id if sess else "") or ""
-        if sid:
+        agent = sess.agent if sess else self._primary
+        if where in ("app", "terminal") and _setting(f"assistant_{agent}_open_in", "app") != where:
             try:
-                if sess.agent == "codex":
-                    from app.core.codex_runner import open_in_codex
-                    open_in_codex(sid, sess.cwd)
-                else:
-                    import subprocess
-                    subprocess.Popen(["open", f"claude://resume?session={sid}"])
-                return
+                from app.core.settings import settings as _s
+                setattr(_s, f"assistant_{agent}_open_in", where)
+                _s._save_config()
             except Exception:
                 pass
+        if sid:
+            try:
+                _trace(f"open {sess.key} ({sess.agent}) in {where}")
+                if sess.agent == "codex":
+                    from app.core.codex_runner import open_in_codex
+                    open_in_codex(sid, sess.cwd, where)
+                else:
+                    from app.core.agent_runner import open_in_claude
+                    open_in_claude(sid, sess.cwd, where)
+                return
+            except Exception as e:
+                _trace(f"open failed: {e}")
         try:
             self.mw.show()
             self.mw.raise_()
@@ -1774,7 +1785,8 @@ class AssistantPage(QWidget):
         quits. "Always close Codex" (and nothing running there) → close it and continue the SAME chat; else
         the card asks: close Codex and continue here, or continue as a new chat."""
         from app.core import codex_runner as cr
-        busy = cr.codex_app_busy()
+        held_by = cr.chat_holder(sess.session_id or sess.resume)
+        busy = cr.codex_app_busy() if held_by != "terminal" else []
         if _setting("assistant_codex_close_app", False) and not busy:
             _trace(f"{sess.key} always-close Codex -> closing it")
             self._close_codex_and_continue(sess.key, "")
@@ -1785,7 +1797,8 @@ class AssistantPage(QWidget):
         _trace(f"{sess.key} asking: close Codex or new chat (Codex busy: {busy})")
         if sess.key == self._focused_key:
             self._set_view_agent("codex")
-            self._notch("show_codex_choice", "This chat is open in the Codex app.", busy[0][1] if busy else "")
+            self._notch("show_codex_choice", "This chat is open in Codex in Terminal." if held_by == "terminal"
+                        else "This chat is open in the Codex app.", busy[0][1] if busy else "")
             self._notch("open_full")
         self._refresh_rail(sess.key)
         _play_chime(False)
@@ -1861,9 +1874,11 @@ class AssistantPage(QWidget):
             self._refresh_rail(key)
             return
         sid = sess.session_id or sess.resume
-        sess.reopen_codex = interrupted or sid      # bring the app back where you were (or on what it stopped)
+        # Bring the Codex app back where you were (or on the task it stopped) — not if it was Codex in
+        # Terminal you closed (you weren't using the app).
+        sess.reopen_codex = (interrupted or sid) if what == "app" else None
         cue = "Closed Codex — continuing this chat"
-        _trace(f"{key} {what} closed -> continuing {sid[:8]} (reopen on {sess.reopen_codex[:8]})")
+        _trace(f"{key} {what} closed -> continuing {sid[:8]} (reopen on {(sess.reopen_codex or '-')[:8]})")
         sess.last_action = cue
         self._start_worker(sess, sid, seed=False, send=sess.prompt)
         if key == self._focused_key:

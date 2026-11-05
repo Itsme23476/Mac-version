@@ -331,16 +331,8 @@ class CodexRunner:
 
 # ---- the one-click fixes on the card ------------------------------------------------------------
 def _open_terminal(name: str, lines: list) -> str:
-    import tempfile
-    path = os.path.join(tempfile.gettempdir(), name)
-    head = ["#!/bin/bash", 'export PATH="$HOME/.local/bin:$PATH"']
-    if os.environ.get("CODEX_HOME"):             # a custom Codex profile: Terminal must use the same one
-        head.append(f"export CODEX_HOME={shlex.quote(os.environ['CODEX_HOME'])}")
-    with open(path, "w") as f:
-        f.write("\n".join(head + lines) + "\n")
-    os.chmod(path, 0o755)
-    subprocess.Popen(["open", "-a", "Terminal", path])
-    return path
+    from app.core.agent_runner import open_terminal
+    return open_terminal(name, lines, ("CODEX_HOME",))   # a custom Codex profile: Terminal uses it too
 
 
 def open_codex_setup(kind: str) -> str:
@@ -365,13 +357,8 @@ def open_codex_setup(kind: str) -> str:
 
 def _desktop_app() -> bool:
     """Is the Codex desktop app installed (it handles codex:// links — on this Mac it's ChatGPT.app)?"""
-    try:
-        from AppKit import NSWorkspace
-        from Foundation import NSURL
-        return NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(
-            NSURL.URLWithString_("codex://threads/new")) is not None
-    except Exception:
-        return False
+    from app.core.agent_runner import has_app_for
+    return has_app_for("codex://threads/new")
 
 
 # ---- a chat the Codex app is holding: close the app, continue the SAME chat, reopen the app -------
@@ -414,22 +401,84 @@ def codex_app_busy() -> list:
         return []
 
 
+def _resume_pids(session_id: str) -> list:
+    """Codex in Terminal on this chat (`codex resume <id>`)."""
+    return subprocess.run(["pgrep", "-f", f"codex.* resume .*{session_id}"], capture_output=True,
+                          text=True).stdout.split()
+
+
+# Codex 0.166+: Codex in Terminal runs on a shared background server ("daemon") unless started with
+# --no-daemon — and that server keeps holding a chat after Terminal's Codex has closed.
+_NOT_TUI = {"app-server", "exec", "e", "mcp-server", "mcp", "debug", "login", "logout", "update", "archive",
+            "review", "completion", "app", "remote-control", "apply", "sandbox", "cloud", "features", "help",
+            "exec-server"}
+
+
+def _daemon_up() -> bool:
+    return (codex_home() / "app-server-control" / "app-server-control.sock").exists()
+
+
+def _codex_tuis() -> list:
+    """pids of interactive Codex sessions (Codex in Terminal) — the background server's users."""
+    out = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True).stdout
+    pids = []
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        parts = args.split()
+        if (parts and os.path.basename(parts[0]) == "codex" and ".app/" not in parts[0]   # (not the Codex app's own)
+                and not _NOT_TUI.intersection(parts[1:])):    # (options can come before the command)
+            pids.append(pid)
+    return pids
+
+
+def _stop_daemon_if_idle() -> bool:
+    """Stop Codex's background server so it lets go of its chats (it saves them first) — only when no
+    Codex in Terminal is still using it. It starts again by itself the next time you run Codex."""
+    # ponytail: "idle" = no Codex in Terminal open; background `codex agents` work with no Terminal open
+    #   would be stopped too — check the server's own thread list if that ever matters.
+    exe = find_codex()
+    if not exe or not _daemon_up() or _codex_tuis():
+        return False
+    try:
+        subprocess.run([exe, "app-server", "daemon", "stop"], capture_output=True, timeout=20)
+    except Exception as e:
+        logger.warning("[codex] couldn't stop Codex's background server: %s", e)
+        return False
+    logger.info("[codex] stopped Codex's background server (it was still holding the chat)")
+    return True
+
+
+def chat_holder(session_id: str) -> str:
+    """Who holds this chat: "terminal" (Codex in Terminal on it — or its background server, still holding
+    it after Terminal's Codex closed), "app" (the Codex app), or ""."""
+    if _resume_pids(session_id):
+        return "terminal"
+    if codex_app_running():
+        return "app"
+    return "terminal" if _daemon_up() else ""
+
+
 def release_chat(session_id: str, timeout: float = 15.0, force: bool = False) -> str:
     """Free a chat another Codex program holds: Codex in Terminal on that chat is stopped; else the Codex
     app is quit normally (like ⌘Q — nothing is lost, every chat is saved). `force` (you chose "Close Codex
     anyway" while it was working): the Codex app ignores a normal quit while a task runs — and stays open
     after — so it's force-closed then; that stops the task, nothing saved is lost. Returns what was closed
     ("terminal" / "app"), or "" if it couldn't."""
-    held_by = subprocess.run(["pgrep", "-f", f"codex.* resume .*{session_id}"], capture_output=True,
-                             text=True).stdout.split()
+    held_by = _resume_pids(session_id)
     if held_by:
-        for pid in held_by:
+        for pid in held_by:                              # Ctrl-C twice (Codex's UI asks for a second one)
             subprocess.run(["kill", "-INT", pid])
+        time.sleep(0.4)
+        for pid in held_by:
+            subprocess.run(["kill", "-INT", pid], capture_output=True)
         what = "terminal"
     elif codex_app_running():
         for app in _codex_apps():
             app.terminate()
         what = "app"
+    elif _stop_daemon_if_idle():                         # Terminal's Codex is gone; its server held on
+        time.sleep(0.5)
+        return "terminal"
     else:
         return ""
     end = time.time() + timeout
@@ -440,10 +489,14 @@ def release_chat(session_id: str, timeout: float = 15.0, force: bool = False) ->
                 app.forceTerminate()
             forced = True
             logger.info("[codex] the Codex app ignored quit while working — force-closed it")
-        alive = codex_app_running() if what == "app" else bool(
-            subprocess.run(["pgrep", "-f", f"codex.* resume .*{session_id}"], capture_output=True, text=True).stdout)
+        if what == "terminal" and not forced and time.time() > end - timeout + 4:
+            subprocess.run(["pkill", "-TERM", "-f", f"codex.* resume .*{session_id}"])   # still there: end it
+            forced = True
+        alive = codex_app_running() if what == "app" else bool(_resume_pids(session_id))
         if not alive:
             logger.info("[codex] closed the %s holding %s", what, session_id)
+            if what == "terminal":
+                _stop_daemon_if_idle()                   # (a Codex you started without --no-daemon)
             time.sleep(0.5)                              # let its lock go
             return what
         time.sleep(0.3)
@@ -456,17 +509,30 @@ def open_codex_chat(session_id: str) -> None:
     subprocess.Popen(["open", f"codex://threads/{session_id}"])
 
 
-def open_in_codex(session_id: str, cwd: str) -> str:
+def open_in_codex(session_id: str, cwd: str, where: str = "app") -> str:
     """"Open in Codex": the chat in the Codex desktop app (codex://threads/<id> — what Codex's own /app
-    does), like "Open in Claude" opens Claude Desktop. No desktop app → Codex in Terminal, in the chat's
-    folder. Once the app has opened a chat it holds it (CHAT_BUSY) — see AssistantPage._on_error."""
-    if _desktop_app() and not os.environ.get("CODEX_HOME"):   # (a custom profile isn't the app's)
+    does), like "Open in Claude" opens Claude Desktop; `where` = "terminal" (or no desktop app) → Codex in
+    Terminal, in the chat's folder. Either one holds the chat while open (CHAT_BUSY) — see
+    AssistantPage._ask_or_close_codex."""
+    if where == "app" and _desktop_app() and not os.environ.get("CODEX_HOME"):   # (a custom profile isn't the app's)
         subprocess.Popen(["open", f"codex://threads/{session_id}"])
         logger.info("[codex] opened %s in the Codex app", session_id)
         return f"codex://threads/{session_id}"
+    # --no-daemon (Codex 0.166+): run on its own, so the chat is free the moment you close it there.
+    flag = " --no-daemon" if _has_flag("--no-daemon", "resume") else ""
     return _open_terminal("filect-open-codex.command",
                           [f"cd {shlex.quote(cwd or str(Path.home()))} || exit 1",
-                           f"exec codex resume {shlex.quote(session_id)}"])
+                           f"exec codex resume{flag} {shlex.quote(session_id)}"])
+
+
+def _has_flag(flag: str, *cmd: str) -> bool:
+    """Does this Codex know `flag` (older ones don't)?"""
+    exe = find_codex()
+    try:
+        return bool(exe) and flag in subprocess.run([exe, *cmd, "--help"], capture_output=True, text=True,
+                                                    timeout=10).stdout
+    except Exception:
+        return False
 
 
 # ---- voice routing when Claude isn't available --------------------------------------------------
