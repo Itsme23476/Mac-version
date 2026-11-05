@@ -110,6 +110,13 @@ Deno.serve(async (req) => {
     return new Response("Expected a WebSocket upgrade", { status: 426 });
   }
   client.binaryType = "arraybuffer";
+  // The runtime treats the request as finished once the upgrade response returns, and may retire
+  // this worker ("EarlyDrop") while the socket is still OPEN — that cut live dictations mid-stream
+  // (the app saw close 1006 "no close frame" and fell back to the slower batch path; ~2-3% of
+  // dictations since 2026-10-04). Keep a pending waitUntil until the socket closes, as Supabase
+  // documents: https://supabase.com/docs/guides/functions/websockets
+  let socketClosed: () => void = () => {};
+  (globalThis as any).EdgeRuntime?.waitUntil?.(new Promise<void>((r) => { socketClosed = r; }));
 
   const upstream: any = new WS(xaiUrl, { headers: { Authorization: `Bearer ${XAI_API_KEY}` } });
   let upstreamOpen = false;
@@ -133,6 +140,7 @@ Deno.serve(async (req) => {
     try { if (client.readyState === WebSocket.OPEN) client.close(code, reason.slice(0, 120)); } catch (_e) { /* noop */ }
     try { upstream.close(); } catch (_e) { /* noop */ }
     logUsage();
+    socketClosed();
   };
 
   upstream.on("open", () => {
@@ -174,8 +182,8 @@ Deno.serve(async (req) => {
     if (upstreamOpen) { try { upstream.send(u8); } catch (_e) { /* noop */ } }
     else pending.push(u8);
   };
-  client.onclose = () => { try { upstream.close(); } catch (_e) { /* noop */ } logUsage(); };
-  client.onerror = () => { try { upstream.close(); } catch (_e) { /* noop */ } logUsage(); };
+  client.onclose = () => { try { upstream.close(); } catch (_e) { /* noop */ } logUsage(); socketClosed(); };
+  client.onerror = () => { try { upstream.close(); } catch (_e) { /* noop */ } logUsage(); socketClosed(); };
 
   return response;
 });

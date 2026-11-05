@@ -379,3 +379,17 @@ One readable script proves the logic offline (mic/network/permissions faked):
 `voice_dictation_check.py` — 9 checks incl. hold-to-talk and quick-tap-latch. Run headless:
 `venv\Scripts\python voice_dictation_check.py` (Windows) — the gesture checks are
 platform-independent and should pass unchanged.
+
+### 7c. Live transcription cut mid-dictation — SERVER fix, nothing to port (2026-11-05)
+- Symptom: ~2–3% of dictations (184 since 2026-10-04) lost the live stream mid-way and fell back to
+  the slower batch path. The client logged `[STREAM] receiver ended: no close frame received or sent`
+  (WebSocket close 1006).
+- Cause: the Supabase relay `transcribe-stream` was retired by the Edge runtime ("EarlyDrop") while
+  its WebSocket was still open. The runtime treats the request as done once
+  `Deno.upgradeWebSocket` returns, and retired idle workers ~75s after boot. A stream open at that
+  moment was cut; that matches yesterday's cut 75s into a 96s dictation.
+- Fix (deployed as relay v3): a pending `EdgeRuntime.waitUntil(promise)` is resolved in `closeBoth`
+  / `onclose` / `onerror`, as Supabase documents for WebSockets. Verified with real speech: 5 streams
+  OK, plus one 98s stream that ran past the old 75s cut-off. The relay logs show the worker retiring
+  only after the socket closed.
+- **Windows: no code change.** The Windows app uses the same relay, so it's fixed there too.
