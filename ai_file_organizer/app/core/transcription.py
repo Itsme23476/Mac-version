@@ -460,6 +460,7 @@ class StreamingTranscriber(QThread):
         self.terms = terms
         self.device = device
         self._external = external    # True: no mic of its own — the hands-free listener feed()s audio
+        self._cancelled = False      # cancel(): nobody wants the text — never fall back to a batch upload
         self.is_recording = False
         self._chunks = []            # full int16 audio (for the batch fallback)
         self._outbox = []            # raw PCM byte chunks queued for streaming
@@ -476,6 +477,12 @@ class StreamingTranscriber(QThread):
         super().start()
 
     def stop_recording(self):
+        self.is_recording = False
+
+    def cancel(self) -> None:
+        """Hands-free dropped this one (Esc, a noise): stop, and if streaming came back empty DON'T upload
+        the clip again for a batch transcription — that costed voice time for text nobody uses."""
+        self._cancelled = True
         self.is_recording = False
 
     def feed(self, data: bytes) -> None:
@@ -565,6 +572,10 @@ class StreamingTranscriber(QThread):
         if stream_ok and stream_text is not None:
             logger.info(f"[STREAM] final via streaming: {len(stream_text)} chars")
             self.finished.emit(stream_text)
+            return
+        if self._cancelled:                       # (hands-free only — dictation never cancels)
+            logger.info("[STREAM] cancelled — no batch fallback")
+            self.finished.emit("")
             return
         # Fallback → exactly today's behaviour on the buffered audio.
         self._finish_via_batch()

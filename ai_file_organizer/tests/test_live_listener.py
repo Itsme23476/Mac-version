@@ -243,8 +243,12 @@ class FakeTx(QObject):
 
     def __init__(self):
         super().__init__()
-        self.fed, self.stopped = 0, False
+        self.fed, self.stopped, self.cancelled = 0, False, False
         FakeTx.made.append(self)
+
+    def cancel(self):                    # like the real one: stops; a streamed text still arrives
+        self.cancelled = True
+        self.stop_recording()
 
     def start(self):
         pass
@@ -391,6 +395,73 @@ def test_esc_at_every_stage():
           "esc_late for the router stage  OK")
 
 
+def test_short_yes_only_when_an_answer_is_expected():
+    """A short "yes" is noise — unless the agent just asked you something. Noise is never even SENT
+    (it's held on the Mac until it's clearly speech), so it costs nothing from the daily limit."""
+    yes = speech("Yes.")
+    audio = np.concatenate([silence(1.0), yes, silence(3.0)])
+    det = ll.UtteranceDetector(2.0, "medium")
+    assert kinds(run_detector(audio, det=det)[0])[-1] == "drop", "a lone 'yes' is too short normally"
+    det = ll.UtteranceDetector(2.0, "medium")
+    det.min_speech = ll.MIN_ANSWER_SEC
+    assert kinds(run_detector(audio, det=det)[0])[-1] == "end", "…but counts while an answer is expected"
+
+    L, mic, rec = _listener()
+    expected = {"v": False}
+    L.set_answer_probe(lambda: expected["v"])
+    L.start()
+    try:
+        used0 = L.used_today()
+        mic.push(audio)                                                 # nobody asked anything
+        _pump(lambda: False, 0.3)
+        assert FakeTx.made == [] and L.used_today() == used0, "noise is never sent / never counted"
+        assert not rec["heard"]
+        FakeTx.reply = "Yes."
+        expected["v"] = True                                            # the agent asked a question
+        mic.push(audio)
+        assert _pump(lambda: rec["heard"], 2), rec
+        assert rec["heard"][-1][1] == "Yes." and len(FakeTx.made) == 1 and L.used_today() > used0
+        # Esc on something being SENT: cancelled → no batch upload after it
+        FakeTx.reply = "Delete the old folder"
+        s = speech("Delete the old folder on my desktop please.")
+        mic.push(np.concatenate([silence(0.5), s[: len(s) * 2 // 3]]))
+        assert L._cur is not None and L._cur[1] is not None
+        L._on_esc()
+        assert FakeTx.made[-1].cancelled, "cancel() → the transcriber skips its batch fallback"
+        # Esc before it's clearly speech: nothing was ever sent
+        n = len(FakeTx.made)
+        mic.push(silence(1.0))
+        mic.push(np.concatenate([silence(0.5), s[:2400]]))             # 0.15 s in
+        if L._cur is not None:
+            L._on_esc()
+        assert len(FakeTx.made) == n, "nothing sent before it was clearly speech"
+    finally:
+        L.stop()
+    print("a lone 'yes': never sent normally (0 s used), counts when the agent asked; Esc → no extra upload  OK")
+
+
+def test_cancel_skips_the_batch_upload():
+    """StreamingTranscriber.cancel(): if streaming came back empty, it must NOT upload the clip again."""
+    from app.core.transcription import StreamingTranscriber
+    tr = StreamingTranscriber(external=True)
+    batches, done = [], []
+
+    async def empty_session():
+        return None, False
+    tr._session = empty_session
+    tr._finish_via_batch = lambda: batches.append(1)
+    tr.finished.connect(lambda t: done.append(t))
+    tr.cancel()
+    tr.run()                                           # (synchronously: the thread body)
+    assert batches == [] and done == [""], (batches, done)
+    tr2 = StreamingTranscriber(external=True)
+    tr2._session = empty_session
+    tr2._finish_via_batch = lambda: batches.append(2)
+    tr2.run()
+    assert batches == [2], "not cancelled → the normal batch fallback, as dictation always had"
+    print("cancelled transcription skips the batch upload; a normal one still falls back  OK")
+
+
 def test_lets_go_of_the_mic_and_comes_back():
     L, mic, rec = _listener()
     real_busy = mic_helper.busy
@@ -509,6 +580,8 @@ if __name__ == "__main__":
     test_one_word_and_errors()
     test_esc_and_stop_drop_what_isnt_finished()
     test_esc_at_every_stage()
+    test_short_yes_only_when_an_answer_is_expected()
+    test_cancel_skips_the_batch_upload()
     test_lets_go_of_the_mic_and_comes_back()
     test_no_voice_processing_and_a_dying_mic()
     test_real_noise_filtered_mic()

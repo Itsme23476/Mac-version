@@ -412,6 +412,9 @@ class LivePage(QScrollArea):
         if ap is not None and self._hooked_ap is not ap:
             ap.live_routed.connect(self._on_routed)
             self._hooked_ap = ap
+        if ap is not None and hasattr(ap, "live_answer_context") and hasattr(self.listener, "set_answer_probe"):
+            # a short "yes" counts while the agent is waiting for your answer (else: noise, never sent)
+            self.listener.set_answer_probe(lambda: ap.live_answer_context() is not None)
         self._started_at = time.time()
         self.listener.start()
         self._style_start()
@@ -501,6 +504,15 @@ class LivePage(QScrollArea):
             if row is not None:
                 verb = "Started" if outcome == "new" else "Continued"
                 row.set_outcome(f"{verb} “{title}”  →", ACCENT, key)
+            _track("live_task", outcome=outcome)
+        elif outcome in ("approved", "denied"):        # "yes" / "no" to a waiting approval
+            self.listener.learn(tag)
+            if settings.live_chime and outcome == "approved":
+                _chime()
+            if row is not None:
+                row.set_outcome(f"{'Approved' if outcome == 'approved' else 'Denied'} — “{title}”  →",
+                                ACCENT if outcome == "approved" else AMBER, key)
+            self._note("✓  Approved" if outcome == "approved" else "✕  Denied", "#FFFFFF")
             _track("live_task", outcome=outcome)
         elif outcome == "ignored":
             if row is not None:

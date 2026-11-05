@@ -54,10 +54,11 @@ class _MW:
 
 class _Router:
     def __init__(self, intent="NEW", fail=False):
-        self.intent, self.fail, self.calls = intent, fail, []
+        self.intent, self.fail, self.calls, self.asked = intent, fail, [], []
 
-    def classify(self, text, focused, cands, live=False):
+    def classify(self, text, focused, cands, live=False, asked=None):
         self.calls.append(live)
+        self.asked.append(asked)
         if self.fail:
             raise RuntimeError("router down")
         return {"intent": self.intent, "index": None, "task": text}
@@ -187,6 +188,46 @@ def test_note_under_the_notch():
     print(f"note under the notch: drawn ({drawn} px sampled), clears itself  OK")
 
 
+def test_answers_to_the_agent():
+    """The agent waits for you: an approval → a spoken "yes"/"no" answers it right away (no router);
+    a question its last answer ended with → the router gets that question, so "yes" is a reply, not filler."""
+    import time as _t
+    page, notch, runs, reports = _page()
+    decided = []
+    page._decide = lambda ok: decided.append(ok)
+    s = ap.AgentSession("w1", "/tmp", "build a site", "Coffee Site", True, "opus", "high")
+    page._sessions["w1"], page._focused_key = s, "w1"
+    assert page.live_answer_context() is None, "working, nothing asked"
+    s.status, s.approval_req = "needs_you", object()
+    assert page.live_answer_context()["kind"] == "approval"
+    router = _Router("NEW")
+    real = _with_router(router)
+    try:
+        page.run_voice_task("Yes, go ahead.", source="live", tag=31)
+        assert decided == [True] and reports[-1] == (31, "approved", "Coffee Site", "w1") and router.calls == []
+        s.approval_req = object()
+        page.run_voice_task("No, don't.", source="live", tag=32)
+        assert decided == [True, False] and reports[-1][1] == "denied"
+        # a question at the end of its answer
+        s.status, s.approval_req = "done", None
+        s.result_text = "I built the page and started it at localhost:4173.\n\nShould I also add a contact form?"
+        s.duration = 30
+        ctx = page.live_answer_context()
+        assert ctx["kind"] == "question" and ctx["question"] == "Should I also add a contact form?", ctx
+        page.run_voice_task("Yes.", source="live", tag=33)
+        assert _pump(lambda: len(reports) == 3, 3)
+        assert router.asked[-1] == "Should I also add a contact form?", router.asked
+        s.started_at = _t.time() - page.ANSWER_WINDOW_SEC - 60          # long ago → no longer waiting
+        assert page.live_answer_context() is None
+        page.run_voice_task("Open my notes.", source="live", tag=34)
+        assert _pump(lambda: len(reports) == 4, 3) and router.asked[-1] is None
+        page.run_voice_task("open my notes")                            # fn + ⌃: never gets `asked`
+        assert _pump(lambda: len(router.asked) == 3, 3) and router.asked[-1] is None and router.calls[-1] is False
+    finally:
+        _restore(real)
+    print("approval + 'yes'/'no' → answered directly; a question it asked → passed to the router; fn + ⌃ unchanged  OK")
+
+
 def test_fn_ctrl_fakes_with_three_args_still_work():
     page, notch, runs, reports = _page()
 
@@ -216,7 +257,10 @@ class FakeListener(QObject):
 
     def __init__(self):
         super().__init__()
-        self.on, self.learned, self.applied = False, [], 0
+        self.on, self.learned, self.applied, self.probe = False, [], 0, None
+
+    def set_answer_probe(self, fn):
+        self.probe = fn
 
     def start(self):
         self.on = True
@@ -266,6 +310,9 @@ class FakeAP(QObject):
         self._overlay = self.ov
         return self.ov
 
+    def live_answer_context(self):
+        return None
+
     def _focus(self, key):
         self.focused.append(key)
 
@@ -300,6 +347,7 @@ def test_tab_start_stop_and_rows():
     assert page.start_btn.text() == "Start Filect Assistant" and "≈ 2 min" in page.usage_label.text(), page.usage_label.text()
     page.start_btn.click()
     assert L.on and page.start_btn.text() == "Stop" and tracked[-1] == "live_started"
+    assert L.probe is not None, "the tab tells the listener when the agent waits for your answer"
     L.state_changed.emit("listening", "")
     assert page.status.text() == "Listening — just talk" and mw.assistant_page.ov.lights[-1] == "listening"
     L.state_changed.emit("hearing", "")
@@ -351,6 +399,11 @@ def test_tab_start_stop_and_rows():
     L.dropped.emit(6, "", "stopped")
     assert page._rows[6].outcome.text() == "Not sent — you clicked Stop"
 
+    # "yes" to a waiting approval
+    L.heard.emit(12, "yes go ahead")
+    mw.assistant_page.live_routed.emit(12, "approved", "Coffee Shop Site", "k1")
+    assert page._rows[12].outcome.text() == "Approved — “Coffee Shop Site”  →" and mw.assistant_page.ov.notes[-1] == "✓  Approved"
+    assert 12 in L.learned
     # chime off → no chime
     settings.live_chime = False
     n_ch = len(chimes)
@@ -442,6 +495,7 @@ if __name__ == "__main__":
     test_hands_free_routing()
     test_fn_ctrl_fakes_with_three_args_still_work()
     test_esc_while_the_router_checks()
+    test_answers_to_the_agent()
     test_note_under_the_notch()
     test_tab_start_stop_and_rows()
     test_tab_settings()

@@ -48,7 +48,8 @@ START_WINDOW, START_NEEDED = 10, 7     # ≥ 7 of the last 10 frames clear speec
 RESUME_WINDOW, RESUME_NEEDED = 6, 4    # after a pause, ~0.12 s of clear speech = you went on
 GAP_SEC = 0.5               # this much non-speech = a pause: audio stops being sent, the countdown runs
 PREROLL_SEC = 0.4           # audio kept from just before speech starts (no clipped first word)
-MIN_SPEECH_SEC = 0.6        # less speech than this in total = a cough / "uh" → dropped
+MIN_SPEECH_SEC = 0.6        # less speech than this in total = a cough / "uh" → dropped (never even sent)
+MIN_ANSWER_SEC = 0.25       # …unless the agent just asked you something: a short "yes" / "no" counts
 # The room's own noise level (measured live): speech must stand clearly above it. Without Apple's filter
 # a real room measured ~0.012 RMS and webrtcvad called 80% of it "speech" — so a request never ended.
 NOISE_SEC = 5.0             # how much quiet audio the noise estimate looks at
@@ -85,6 +86,7 @@ class UtteranceDetector:
         self.set_sensitivity(sensitivity)
         self._refs = deque(maxlen=5)
         self.ref = None                 # your usual speech loudness, learned from real requests
+        self.min_speech = MIN_SPEECH_SEC  # the listener lowers it while an answer is expected
         self.reset_noise()
         self.reset()
 
@@ -145,6 +147,10 @@ class UtteranceDetector:
         self._levels = []
         self.last_level = 0.0
 
+    def speech_sec(self) -> float:
+        """How much clear speech the request being heard has so far."""
+        return self._speech_frames * FRAME_SEC if self.state in ("speaking", "trailing") else 0.0
+
     def countdown_left(self) -> float | None:
         if self.state != "trailing":
             return None
@@ -169,7 +175,7 @@ class UtteranceDetector:
     def _finish(self, ev: list, forced: bool = False) -> None:
         st = self._stats()
         st["forced"] = forced
-        ev.append(("end" if st["speech_sec"] >= MIN_SPEECH_SEC else "drop", st))
+        ev.append(("end" if st["speech_sec"] >= self.min_speech else "drop", st))
         keep_ref, keep_t = (self.ref, self._refs), self._t
         self.reset()
         self.ref, self._refs = keep_ref
@@ -445,6 +451,8 @@ class LiveListener(QObject):
         self._used_day = time.strftime("%Y-%m-%d")
         self._monitor = None
         self._esc_monitors = []
+        self._held = []                 # audio of the request being heard, kept on the Mac until it's clearly speech
+        self._answer_probe = None       # () -> bool: is the agent waiting for your answer? (set by the page)
         self._chunk_sig.connect(self._on_chunk)
         self._end_sig.connect(self._on_mic_end)
         self._esc_sig.connect(self._on_esc)
@@ -505,6 +513,17 @@ class LiveListener(QObject):
             self._abandon("restarting the mic")
             self._close()
             self._open()
+
+    def set_answer_probe(self, fn) -> None:
+        """fn() → True while the agent you're talking to is waiting for your answer (it just asked you
+        something, or wants an approval). Then a short "yes" / "no" counts instead of being dropped."""
+        self._answer_probe = fn
+
+    def _answer_expected(self) -> bool:
+        try:
+            return bool(self._answer_probe and self._answer_probe())
+        except Exception:
+            return False
 
     def learn(self, uid: int) -> None:
         """That one became a task (it was really you): tune the loudness gate to your voice."""
@@ -678,6 +697,7 @@ class LiveListener(QObject):
         if self.state == "starting":
             self._set_state("listening", "")
         self.level.emit(min(1.0, _rms(b) * 12.0))
+        self._det.min_speech = MIN_ANSWER_SEC if self._answer_expected() else MIN_SPEECH_SEC
         for ev in self._det.feed(b):
             kind = ev[0]
             if kind == "start":
@@ -695,12 +715,26 @@ class LiveListener(QObject):
             elif kind == "drop":
                 self._abandon("too short", stats=ev[1])
                 self._set_state("listening", "")
+        self._maybe_send()
 
     def _begin(self, preroll: bytes) -> None:
+        """You started talking. Nothing is sent yet: the audio is held here until it's clearly speech
+        (_maybe_send) — so a cough or a lone "uh" never leaves the Mac or counts toward your limit."""
         if self._cur is not None:           # shouldn't happen — close the previous one cleanly
             self._abandon("superseded")
         self._uid += 1
-        uid = self._uid
+        self._cur = [self._uid, None]       # [id, transcriber (None until it's clearly speech)]
+        self._held = [preroll]
+        self._set_state("hearing", "")
+        self.utterance_started.emit(self._uid)
+
+    def _maybe_send(self) -> None:
+        """Once what you're saying is clearly speech (≥ min_speech), start transcribing: everything held
+        so far goes up at once (streaming catches up instantly), the rest streams as you talk."""
+        cur = self._cur
+        if cur is None or cur[1] is not None or self._det is None or self._det.speech_sec() < self._det.min_speech:
+            return
+        uid = cur[0]
         try:
             tr = self._make_tx()
             tr._live_uid = uid
@@ -709,26 +743,35 @@ class LiveListener(QObject):
             tr.start()
         except Exception as e:
             logger.error("[live] couldn't start transcription: %s", e)
+            self._cur, self._held = None, []
             self.dropped.emit(uid, "", "Couldn't start transcription")
             return
-        self._cur = (uid, tr)
-        self._send(preroll)
-        self._set_state("hearing", "")
-        self.utterance_started.emit(uid)
+        cur[1] = tr
+        held, self._held = self._held, []
+        for b in held:
+            self._send(b)
 
     def _send(self, data: bytes) -> None:
         if self._cur is None or not data:
+            return
+        if self._cur[1] is None:            # not clearly speech yet: keep it here
+            self._held.append(data)
             return
         self._cur[1].feed(data)
         self._used += len(data) / BYTES_PER_SEC
         self.usage.emit(self._used)
 
     def _finish(self, stats: dict) -> None:
+        self._maybe_send()                  # (enough speech arrived in this very block)
         cur, self._cur = self._cur, None
         self._set_state("listening", "")
         if cur is None:
             return
         uid, tr = cur
+        if tr is None:                      # (can't happen: "end" means ≥ min_speech) — nothing was sent
+            self._held = []
+            self.dropped.emit(uid, "", "too short")
+            return
         self._pending[uid] = (tr, stats)
         self._levels[uid] = stats.get("level", 0.0)
         tr.stop_recording()                 # → final text (streaming), or the batch fallback
@@ -739,14 +782,16 @@ class LiveListener(QObject):
     def _abandon(self, why: str, stats=None) -> None:
         """Drop the utterance being heard right now (its text, if any, is ignored)."""
         cur, self._cur = self._cur, None
+        self._held = []
         if cur is None:
             return
         uid, tr = cur
-        self._cancelled[uid] = why
-        try:
-            tr.stop_recording()
-        except Exception:
-            pass
+        if tr is not None:                  # it was being sent: stop it, and no batch upload after
+            self._cancelled[uid] = why
+            try:
+                (tr.cancel if hasattr(tr, "cancel") else tr.stop_recording)()
+            except Exception:
+                pass
         self.dropped.emit(uid, "", why)
         logger.info("[live] utterance %d dropped: %s %s", uid, why, stats or "")
 
@@ -762,7 +807,8 @@ class LiveListener(QObject):
                 self.dropped.emit(uid, text.strip(), "cancelled")   # show WHAT was cancelled (still not run)
             return
         text = (text or "").strip()
-        if len(text.split()) < MIN_WORDS:
+        min_words = 1 if self._answer_expected() else MIN_WORDS     # "yes" is an answer when one is expected
+        if len(text.split()) < min_words:
             self._levels.pop(uid, None)
             self.dropped.emit(uid, text, "too short to be a request" if text else "no words recognized")
             return

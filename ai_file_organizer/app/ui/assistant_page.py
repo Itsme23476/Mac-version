@@ -280,6 +280,41 @@ def _other_agent(agent: str) -> str:
     return "codex" if agent == "claude" else "claude"
 
 
+# Filect Assistant (hands-free): a spoken yes / no to an agent that's waiting for your approval.
+_YES = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead", "do it", "approve", "approved",
+        "sounds good", "go for it", "please do", "yes please", "alright", "all right", "of course",
+        "absolutely", "correct", "right", "go"}
+_NO = {"no", "nope", "don't", "do not", "deny", "denied", "cancel", "stop", "no thanks", "not now",
+       "don't do it", "wait", "hold on", "no way"}
+
+
+def _yes_no(text: str):
+    """True / False for a clear spoken yes / no ("Yes, go ahead." / "No, don't."), else None."""
+    import re
+    t = " ".join(re.sub(r"[^a-z' ]", " ", (text or "").lower()).split())
+    for lead in ("hey ", "uh ", "um ", "oh ", "well "):
+        if t.startswith(lead):
+            t = t[len(lead):]
+    words = t.split()
+    if not words or len(words) > 5:
+        return None
+    if t in _YES or (words[0] in ("yes", "yeah", "yep", "sure", "okay", "ok") and not set(words) & {"no", "not", "don't"}):
+        return True
+    if t in _NO or words[0] in ("no", "nope"):
+        return False
+    return None
+
+
+def _last_question(text: str) -> str:
+    """The question an agent's answer ends with ("…Should I also add a contact form?"), else ""."""
+    import re
+    lines = [ln.strip(" \t*_`>\"'”“") for ln in (text or "").strip().splitlines() if ln.strip(" \t*_`>\"'”“")]
+    if not lines or not lines[-1].endswith("?"):
+        return ""
+    last = re.split(r"(?<=[.!])\s+", lines[-1])[-1]
+    return last[:300]
+
+
 def _setting(name: str, default=None):
     try:
         from app.core.settings import settings as _s
@@ -1080,6 +1115,18 @@ class AssistantPage(QWidget):
         if not text:
             return
         live = source == "live"
+        asked = None
+        if live:
+            ctx = self.live_answer_context()
+            if ctx and ctx["kind"] == "approval":       # "yes" / "no" to a waiting approval: answer it
+                yn = _yes_no(text)
+                if yn is not None:
+                    _trace(f"hands-free answer to {ctx['key']}'s approval: {'yes' if yn else 'no'}")
+                    self._decide(yn)
+                    self.live_routed.emit(tag, "approved" if yn else "denied", ctx["title"], ctx["key"])
+                    return
+            elif ctx:                                   # it just asked you something
+                asked = ctx["question"]
         # Intent routing on the Claude subscription (Opus): decide NEW vs FOLLOW_UP (continue the
         # focused conversation — the "that one" pointer) vs RESUME a named one. Runs off the UI thread
         # (~2.5s warm); the notch shows "Routing…" meanwhile. ANY failure falls back safely.
@@ -1107,6 +1154,8 @@ class AssistantPage(QWidget):
             cand_titles = [c["title"] for c in candidates]
             try:
                 kw = {"live": True} if live else {}   # (fn + ⌃ calls stay exactly as they were)
+                if asked:
+                    kw["asked"] = asked
                 try:                                   # Claude routes when it's available (fast, warm)…
                     if not claude_ok:
                         raise RuntimeError("Claude Code unavailable right now")
@@ -1128,6 +1177,24 @@ class AssistantPage(QWidget):
                                       "focused_key": focused.key if focused else None,
                                       "source": source, "tag": tag})
         threading.Thread(target=worker, daemon=True, name="filect-assistant-route").start()
+
+    ANSWER_WINDOW_SEC = 600      # an agent's question stays "waiting for your answer" this long after it finished
+
+    def live_answer_context(self):
+        """What the chat you're talking to is waiting for from you, if anything: an approval, or an
+        answer to the question its last message ended with (recently). Hands-free then keeps a short
+        reply ("yes") instead of dropping it as noise."""
+        import time
+        s = self._focused
+        if s is None:
+            return None
+        if s.status == "needs_you" and s.approval_req is not None:
+            return {"kind": "approval", "key": s.key, "title": s.title}
+        if s.status == "done" and not s.running and s.result_text:
+            q = _last_question(s.result_text)
+            if q and time.time() - (s.started_at + (s.duration or 0)) < self.ANSWER_WINDOW_SEC:
+                return {"kind": "question", "key": s.key, "title": s.title, "question": q}
+        return None
 
     def cancel_live(self, tag) -> bool:
         """Esc on a hands-free request the router is still checking: drop it — it never runs."""

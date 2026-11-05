@@ -45,10 +45,16 @@ _LIVE = ("\n\nHANDS-FREE: this was picked up by an always-on microphone, so it m
          "'yeah'). If it IS a request for the assistant, route it as usual.")
 
 
-def _build_prompt(text: str, focused_title: str | None, candidate_titles: list[str], live: bool = False) -> str:
+def _build_prompt(text: str, focused_title: str | None, candidate_titles: list[str], live: bool = False,
+                  asked: str | None = None) -> str:
     listing = "\n".join(f"{i}. {t}" for i, t in enumerate(candidate_titles)) or "(none)"
+    extra = ""
+    if asked:   # hands-free: the agent ended its last answer with a question — "yes" is a reply, not filler
+        extra = (f"\n\nThe CURRENT conversation's assistant just asked the user: {asked[:300]!r}. A reply to "
+                 "that question — even a short one ('yes', 'no', 'sure', 'go ahead', 'the first one') — is a "
+                 "FOLLOW_UP of the current conversation, not filler. Keep the reply as the task.")
     return (f"Current conversation: {focused_title or '(none)'}\n"
-            f"Other conversations:\n{listing}\n\nSpoken command: {text!r}" + (_LIVE if live else ""))
+            f"Other conversations:\n{listing}\n\nSpoken command: {text!r}" + (_LIVE if live else "") + extra)
 
 
 def _parse(raw: str, fallback_task: str, allow_ignore: bool = False) -> dict:
@@ -140,13 +146,14 @@ class IntentRouter:
         return "".join(out)
 
     def classify(self, text: str, focused_title: str | None,
-                 candidate_titles: list[str], timeout: float = 12.0, live: bool = False) -> dict:
+                 candidate_titles: list[str], timeout: float = 12.0, live: bool = False,
+                 asked: str | None = None) -> dict:
         """Return {"intent": NEW|FOLLOW_UP|RESUME (|IGNORE when live), "index": int|None, "task": str}.
         Raises on not-ready / timeout / parse failure — the caller falls back safely."""
         import time
         if not self._ready.wait(8.0) or self._loop is None or self._failed:
             raise RuntimeError("intent router not ready")
-        prompt = _build_prompt(text, focused_title, candidate_titles, live)
+        prompt = _build_prompt(text, focused_title, candidate_titles, live, asked)
         t0 = time.time()
         with self._call_lock:                          # serialize (single warm conversation)
             fut = asyncio.run_coroutine_threadsafe(self._classify_async(prompt), self._loop)
@@ -159,13 +166,13 @@ class IntentRouter:
 
 
 def classify_with_codex(text: str, focused_title: str | None, candidate_titles: list[str],
-                        live: bool = False) -> dict:
+                        live: bool = False, asked: str | None = None) -> dict:
     """The same decision made by Codex — when Claude Code isn't available. A cold `codex exec` per call
     (slower than the warm Claude client, several seconds). Raises on any failure, like classify()."""
     import time
     from app.core.codex_runner import complete
     t0 = time.time()
-    d = _parse(complete(_SYS, _build_prompt(text, focused_title, candidate_titles, live)), text,
+    d = _parse(complete(_SYS, _build_prompt(text, focused_title, candidate_titles, live, asked)), text,
                allow_ignore=live)
     logger.info("[intent-router] codex %.2fs | heard=%r -> %s idx=%s task=%r",
                 time.time() - t0, text, d["intent"], d["index"], d["task"])

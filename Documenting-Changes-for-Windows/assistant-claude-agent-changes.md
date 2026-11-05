@@ -1022,3 +1022,23 @@ yourself, the Mac side can't see it.
   - Fix: `_fg_hook` only acts when hands-free holds the mic, and the signal is a timestamp that expires
     after `YIELD_SEC` (2 s). By then `mic_helper.busy()` covers the shortcut's capture.
   - The regression test (back-to-back shortcuts) fails on the old logic.
+- **Short answers + noise never sent (2026-11-06, his call): BOTH platforms.**
+  - **Noise is never sent.** The listener holds a request's audio on the machine (`_held`) until it is
+    clearly speech: `UtteranceDetector.speech_sec() ≥ min_speech`, 0.6 s normally. Only then does it
+    start the `StreamingTranscriber` and send the held audio at once; streaming catches up instantly.
+    - A cough or a lone "uh" is never uploaded and costs nothing from the daily limit. Before, it
+      streamed from the first frame AND, with an empty result, did a batch re-upload.
+    - `StreamingTranscriber.cancel()` (Esc / a drop) skips the batch fallback. Dictation never calls it.
+  - **Short answers count when the agent is waiting for you.**
+    `AssistantPage.live_answer_context()` returns:
+    - `approval` when the focused chat is `needs_you`;
+    - `question` when its last answer ended with a question (`_last_question`), finished within 10 min
+      (`ANSWER_WINDOW_SEC`).
+    The tab passes this to the listener (`set_answer_probe`). Then `min_speech` drops to 0.25 s and a
+    one-word transcript is allowed.
+    - **Approval:** a clear "yes" / "no" (`_yes_no`: yes / yeah / go ahead / do it… vs no / nope / don't /
+      hold on…) answers it directly via `_decide`, with no router. Reported as `approved` / `denied`.
+    - **Question:** the router gets it as `asked=` (`_build_prompt` adds "a reply to that question —
+      even 'yes' — is a FOLLOW_UP").
+    - Real router: "Yes." / "Yes, and make it blue." / "No thanks." continued the chat that asked;
+      "Yes." when nothing was asked → ignored.
