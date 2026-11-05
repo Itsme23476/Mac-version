@@ -461,6 +461,7 @@ class StreamingTranscriber(QThread):
         self.device = device
         self._external = external    # True: no mic of its own — the hands-free listener feed()s audio
         self._cancelled = False      # cancel(): nobody wants the text — never fall back to a batch upload
+        self._heard_nothing = False  # streaming completed normally and heard NO words (not a failure)
         self.is_recording = False
         self._chunks = []            # full int16 audio (for the batch fallback)
         self._outbox = []            # raw PCM byte chunks queued for streaming
@@ -575,6 +576,13 @@ class StreamingTranscriber(QThread):
             return
         if self._cancelled:                       # (hands-free only — dictation never cancels)
             logger.info("[STREAM] cancelled — no batch fallback")
+            self.finished.emit("")
+            return
+        if self._external and self._heard_nothing:
+            # Hands-free: the stream finished properly and heard no words (a cough, a long "hmm") — trust
+            # it; re-uploading the clip for a batch pass only costs voice time (his test: 2.6 s + 3.1 s for
+            # a cough). Dictation keeps its batch fallback exactly as before.
+            logger.info("[STREAM] no words heard (hands-free) — no batch re-upload")
             self.finished.emit("")
             return
         # Fallback → exactly today's behaviour on the buffered audio.
@@ -793,6 +801,8 @@ class StreamingTranscriber(QThread):
             logger.info(f"[STREAM] FINAL text: {final!r}")
         if final:
             return final, True
+        if done_flag["v"]:
+            self._heard_nothing = True   # the stream finished properly — it just heard no words
         # Nothing usable came back → batch fallback (correct, complete transcript).
         logger.info(f"[STREAM] empty streaming result → batch fallback ({n_part['v']} partials)")
         return None, False

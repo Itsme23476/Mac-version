@@ -458,8 +458,25 @@ def test_cancel_skips_the_batch_upload():
     tr2._session = empty_session
     tr2._finish_via_batch = lambda: batches.append(2)
     tr2.run()
-    assert batches == [2], "not cancelled → the normal batch fallback, as dictation always had"
-    print("cancelled transcription skips the batch upload; a normal one still falls back  OK")
+    assert batches == [2], "a FAILED stream (no transcript.done) still falls back to batch"
+
+    # REGRESSION (his test): a 1.7 s cough → the stream finished properly with no words → no re-upload
+    async def heard_nothing_session(t):
+        t._heard_nothing = True
+        return None, False
+    tr3, done3 = StreamingTranscriber(external=True), []
+    tr3._session = lambda: heard_nothing_session(tr3)
+    tr3._finish_via_batch = lambda: batches.append(3)
+    tr3.finished.connect(lambda t: done3.append(t))
+    tr3.run()
+    assert batches == [2] and done3 == [""], (batches, done3)
+    tr4 = StreamingTranscriber()                                   # dictation: unchanged
+    tr4._session = lambda: heard_nothing_session(tr4)
+    tr4._finish_via_batch = lambda: batches.append(4)
+    tr4.run()
+    assert batches == [2, 4], "dictation keeps its batch fallback exactly as before"
+    print("cancelled / heard-nothing hands-free transcription skips the batch re-upload; failures and "
+          "dictation still fall back  OK")
 
 
 def test_lets_go_of_the_mic_and_comes_back():
