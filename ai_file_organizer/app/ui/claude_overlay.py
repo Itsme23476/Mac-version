@@ -38,7 +38,7 @@ from PySide6.QtGui import (QColor, QPainter, QPen, QGuiApplication, QCursor, QDe
                            QFont, QFontMetrics)
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextBrowser, QSlider, QLineEdit,
+    QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QTextBrowser, QSlider, QLineEdit, QCheckBox,
 )
 try:
     from . import notch_panel, details_view
@@ -482,6 +482,7 @@ class ClaudeOverlay(QWidget):
     collapsed = Signal()               # the open card tucked back into the notch
     setup_requested = Signal(str, str)  # (agent, "install"/"signin") → open that agent's setup in Terminal
     update_requested = Signal()        # "Update Codex" in the model panel (a newer Codex has newer models)
+    codex_choice = Signal(str, bool)   # a chat the Codex app holds: ("close" | "new", always close Codex)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1002,10 +1003,30 @@ class ClaudeOverlay(QWidget):
                 f"QPushButton {{ background: {ACCENT}; color: #0B0B0E; border: none; border-radius: 16px; "
                 "font-size: 12.5px; font-weight: 700; padding: 0 18px; }"
                 f"QPushButton:hover {{ background: {ACCENT_LIGHT}; }}")
-            self._setup_btn.clicked.connect(
-                lambda: self.setup_requested.emit(self._setup_agent, self._setup_kind))
+            self._setup_btn.clicked.connect(self._on_setup_btn)
             self._setup_btn.setVisible(False)
-            lay.addWidget(self._setup_btn, 0, Qt.AlignLeft)
+            # A chat the Codex app holds: "Close Codex and continue here" (above) or a new chat (this).
+            self._choice_btn = QPushButton("Continue as a new chat")
+            self._choice_btn.setCursor(Qt.PointingHandCursor)
+            self._choice_btn.setFixedHeight(32)
+            self._choice_btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {C['text_2']}; border: 1px solid {C['border']}; "
+                "border-radius: 16px; font-size: 12.5px; font-weight: 600; padding: 0 16px; }"
+                f"QPushButton:hover {{ color: {C['text']}; border-color: {ACCENT}; }}")
+            self._choice_btn.clicked.connect(lambda: self.codex_choice.emit("new", False))
+            self._choice_btn.setVisible(False)
+            brow = QHBoxLayout()
+            brow.setSpacing(8)
+            brow.addWidget(self._setup_btn)
+            brow.addWidget(self._choice_btn)
+            brow.addStretch(1)
+            lay.addLayout(brow)
+            self._always_box = QCheckBox("Always close Codex for this")
+            self._always_box.setCursor(Qt.PointingHandCursor)
+            self._always_box.setStyleSheet(
+                f"QCheckBox {{ color: {C['text_muted']}; font-size: 11.5px; background: transparent; }}")
+            self._always_box.setVisible(False)
+            lay.addWidget(self._always_box, 0, Qt.AlignLeft)
         lay.addStretch(1)
         return pg
 
@@ -1420,6 +1441,32 @@ class ClaudeOverlay(QWidget):
         if not self._minimized:
             self._fit()
 
+    def _on_setup_btn(self) -> None:
+        if self._setup_kind == "choice":
+            self.codex_choice.emit("close", self._always_box.isChecked())
+        else:
+            self.setup_requested.emit(self._setup_agent, self._setup_kind)
+
+    def show_codex_choice(self, msg: str, busy: str = "") -> None:
+        """A chat the Codex app holds: close Codex and continue the SAME chat, or a new chat. `busy`: what
+        the Codex app is working on right now (closing would stop it) — warned, and no "Always"."""
+        self.set_state("error")
+        self._setup_agent, self._setup_kind = "codex", "choice"
+        self._set_status("Open in Codex", AMBER)
+        self._stop_elapsed()
+        self._work_spinner.stop()
+        self._error_label.setText(msg + (f" Codex is working on “{busy}” right now — closing it will stop that."
+                                         if busy else ""))
+        self._setup_btn.setText("Close Codex anyway  →" if busy else "Close Codex and continue here  →")
+        self._setup_btn.setVisible(True)
+        self._choice_btn.setVisible(True)
+        self._always_box.setChecked(False)
+        self._always_box.setVisible(not busy)
+        self._update_primary()
+        self._stack.setCurrentWidget(self._page_error)
+        if not self._minimized:
+            self._fit()
+
     def show_error(self, msg: str) -> None:
         try:
             from app.core.agent_runner import setup_info
@@ -1437,6 +1484,8 @@ class ClaudeOverlay(QWidget):
         else:
             self._set_status("Error", RED)
         self._setup_btn.setVisible(self._setup_kind in ("install", "signin"))
+        self._choice_btn.setVisible(False)
+        self._always_box.setVisible(False)
         self._stop_elapsed()
         self._work_spinner.stop()
         self._done_timer.stop()
@@ -1808,6 +1857,8 @@ class ClaudeOverlay(QWidget):
     def _content_height(self) -> int:
         if self._state == "done":                 # the answer's measured height (see show_done)
             return self._done_view.maximumHeight() + 4
+        if self._state == "error" and self._setup_kind == "choice":
+            return _STACK_H["error"] + 46 + (26 if not self._always_box.isHidden() else 0) + 20
         if self._state == "error" and self._setup_kind in ("install", "signin"):
             return _STACK_H["error"] + 46          # + the setup button
         return _STACK_H.get(self._state, 90)

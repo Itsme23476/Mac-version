@@ -374,6 +374,88 @@ def _desktop_app() -> bool:
         return False
 
 
+# ---- a chat the Codex app is holding: close the app, continue the SAME chat, reopen the app -------
+CODEX_APP_ID = "com.openai.codex"          # the Codex desktop app (on his Mac it's named ChatGPT.app)
+
+
+def _codex_apps():
+    try:
+        from AppKit import NSRunningApplication
+        return list(NSRunningApplication.runningApplicationsWithBundleIdentifier_(CODEX_APP_ID) or [])
+    except Exception:
+        return []
+
+
+def codex_app_running() -> bool:
+    return bool(_codex_apps())
+
+
+def codex_app_busy() -> list:
+    """[(chat id, title)] the Codex app is working on RIGHT NOW (closing it would stop them): a turn still
+    in progress with activity in the last 3 minutes. (Old crashed turns stay "inProgress" forever, and
+    Filect's own runs aren't the app's.)"""
+    try:
+        cutoff = int(time.time() * 1000) - 180_000
+        running = _db("thread_history").execute(
+            "select distinct t.thread_id from thread_turns t where t.status = 'inProgress' and t.completed_at is null "
+            "and exists (select 1 from thread_items i where i.thread_id = t.thread_id "
+            "and coalesce(i.completed_at_ms, i.started_at_ms, i.created_at_ms) >= ?)", (cutoff,)).fetchall()
+        if not running:
+            return []
+        db = _db("state")
+        out = []
+        for (tid,) in running:
+            row = db.execute("select coalesce(nullif(name, ''), title, ''), source from threads where id = ?",
+                             (tid,)).fetchone()
+            if row and row[1] != "exec":                 # the app's own chats (not Filect / CLI runs)
+                out.append((tid, (row[0] or "a task")[:60]))
+        return out
+    except Exception:
+        return []
+
+
+def release_chat(session_id: str, timeout: float = 15.0, force: bool = False) -> str:
+    """Free a chat another Codex program holds: Codex in Terminal on that chat is stopped; else the Codex
+    app is quit normally (like ⌘Q — nothing is lost, every chat is saved). `force` (you chose "Close Codex
+    anyway" while it was working): the Codex app ignores a normal quit while a task runs — and stays open
+    after — so it's force-closed then; that stops the task, nothing saved is lost. Returns what was closed
+    ("terminal" / "app"), or "" if it couldn't."""
+    held_by = subprocess.run(["pgrep", "-f", f"codex.* resume .*{session_id}"], capture_output=True,
+                             text=True).stdout.split()
+    if held_by:
+        for pid in held_by:
+            subprocess.run(["kill", "-INT", pid])
+        what = "terminal"
+    elif codex_app_running():
+        for app in _codex_apps():
+            app.terminate()
+        what = "app"
+    else:
+        return ""
+    end = time.time() + timeout
+    forced = False
+    while time.time() < end:
+        if force and what == "app" and not forced and time.time() > end - timeout + 6:
+            for app in _codex_apps():                    # still running after 6s: it's busy — force it
+                app.forceTerminate()
+            forced = True
+            logger.info("[codex] the Codex app ignored quit while working — force-closed it")
+        alive = codex_app_running() if what == "app" else bool(
+            subprocess.run(["pgrep", "-f", f"codex.* resume .*{session_id}"], capture_output=True, text=True).stdout)
+        if not alive:
+            logger.info("[codex] closed the %s holding %s", what, session_id)
+            time.sleep(0.5)                              # let its lock go
+            return what
+        time.sleep(0.3)
+    logger.warning("[codex] the %s holding %s didn't close", what, session_id)
+    return ""
+
+
+def open_codex_chat(session_id: str) -> None:
+    """(Re)open the Codex app right on this chat."""
+    subprocess.Popen(["open", f"codex://threads/{session_id}"])
+
+
 def open_in_codex(session_id: str, cwd: str) -> str:
     """"Open in Codex": the chat in the Codex desktop app (codex://threads/<id> — what Codex's own /app
     does), like "Open in Claude" opens Claude Desktop. No desktop app → Codex in Terminal, in the chat's

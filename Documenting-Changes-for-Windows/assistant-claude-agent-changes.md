@@ -806,3 +806,39 @@ yourself, the Mac side can't see it.
     - The router picked his Codex app chats "Test Filect MCP end to end" and "Build a 3D sneaker
       landing page" by name.
   - **Windows:** the same files under `%USERPROFILE%\.codex\` (check the names/versions there).
+- **A chat the Codex app holds: close Codex and continue the SAME chat (2026-11-05): BOTH platforms
+  (logic); the app close/reopen is per-platform.**
+  - Before: a follow-up to a chat the Codex app had opened became a new chat with a recap (a "split").
+  - Now the card asks: **[Close Codex and continue here]** [Continue as a new chat], ☐ Always close Codex
+    for this (`settings.assistant_codex_close_app`).
+    - "Always" plus an idle Codex: closes it without asking.
+  - Flow:
+    - `CHAT_BUSY` → `_on_done` → `_ask_or_close_codex`.
+    - Close: `codex_runner.release_chat(id)` runs off the UI thread. Codex in Terminal on that chat gets
+      SIGINT; otherwise the app gets `NSRunningApplication.terminate()`. Then
+      `_start_worker(sess, same id)`.
+    - When the turn ends (no follow-up pending), `open codex://threads/<id>` reopens the app on it.
+  - **Busy app:** `codex_app_busy()` = a turn `inProgress` with item activity in the last 3 min, on a
+    non-exec thread. Old crashed turns stay `inProgress` forever, hence the activity check.
+    - The card warns: "Codex is working on 'X' right now — closing it will stop that". It asks even with
+      "Always", and shows no "Always" box.
+    - "Close Codex anyway": the app answers a normal quit with its own "Quit? Active local chats on this
+      machine will be interrupted" dialog (it doesn't quit after the task ends either). So after 6 s Filect
+      force-closes it (`forceTerminate`): you already confirmed. Codex saves every chat continuously,
+      so only the running task stops.
+    - Codex then reopens on the stopped chat, so you can continue it.
+  - **Didn't close:** "Codex didn't close — it may be asking you something…", and it asks again.
+  - Verified facts:
+    - A writer lock is held only while the holding process lives; the next process continues the same
+      chat once it exits.
+    - The Codex app keeps unsent drafts across quit/reopen.
+    - If the app reopens while Filect is still writing the chat, it shows its own "open in another app
+      — Retry" banner and doesn't take the chat until Retry.
+  - Live-tested on his Mac with real clicks:
+    - ask → Close: Codex closed in 5 s, the same chat answered "BLUE-42", and Codex reopened with the
+      follow-up in that chat;
+    - "Continue as a new chat": the recap still knew the code word;
+    - Always: the next follow-up auto-closed with no question;
+    - busy: warned, force-closed after 6 s, same chat, reopened on the stopped task.
+  - **Windows:** close via the app's window/`taskkill` without `/F` first, then `/F` only after "Close
+    anyway". Check the Codex Windows app's quit dialog the same way.

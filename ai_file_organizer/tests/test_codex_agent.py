@@ -377,9 +377,7 @@ def test_open_in_codex_desktop_app():
     print("Open in Codex → the Codex desktop app (codex://threads/<id>); no app → Terminal  OK")
 
 
-def test_chat_open_in_codex_app_continues_as_new_chat():
-    """Once the Codex app has opened a chat it holds it; a follow-up from Filect used to fail. Now it
-    continues as a new Codex chat with a recap."""
+def _held_page():
     page = _page(primary="codex")
     started = []
     page._start_worker = lambda s, rid, seed=True, send=None: started.append((s.key, s.agent, rid, send))
@@ -392,13 +390,84 @@ def test_chat_open_in_codex_app_continues_as_new_chat():
     page._sessions = {"o1": s}
     page._focused_key = "o1"
     page._ensure_notch()
-    page._on_error("o1", cr.CHAT_BUSY)
-    assert s.status != "error"
-    page._on_done("o1")
-    k, agent, rid, send = started[-1]
-    assert (k, agent, rid) == ("o1", "codex", None) and "Codex: Built index.html." in send and send.endswith("make it darker")
-    assert "open in the Codex app" in page._overlay._tool_chip.text(), page._overlay._tool_chip.text()
-    print("a chat held by the Codex app continues here as a new Codex chat (with a recap)  OK")
+    return page, s, started
+
+
+def test_chat_held_by_codex_app_asks_then_new_chat():
+    """A chat the Codex app holds: the card asks; "Continue as a new chat" → a new Codex chat with a recap."""
+    real = (cr.codex_app_busy, settings.assistant_codex_close_app)
+    cr.codex_app_busy, settings.assistant_codex_close_app = (lambda: []), False
+    try:
+        page, s, started = _held_page()
+        ov = page._overlay
+        page._on_error("o1", cr.CHAT_BUSY)
+        page._on_done("o1")
+        assert started == [] and s.status == "needs_you", "it asks first — nothing runs yet"
+        assert ov._status_label.text() == "Open in Codex" and "Close Codex and continue here" in ov._setup_btn.text()
+        assert ov._choice_btn.isVisibleTo(ov) and ov._always_box.isVisibleTo(ov)
+        ov._choice_btn.click()                                     # the real button
+        k, agent, rid, send = started[-1]
+        assert (k, agent, rid) == ("o1", "codex", None) and "Codex: Built index.html." in send
+        assert send.endswith("make it darker") and "open in the Codex app" in ov._tool_chip.text()
+    finally:
+        cr.codex_app_busy, settings.assistant_codex_close_app = real
+    print("held by the Codex app → the card asks; 'Continue as a new chat' → new chat with a recap  OK")
+
+
+def test_chat_held_by_codex_app_close_and_continue():
+    """"Close Codex and continue here" → Codex closes → the SAME chat continues (no recap) → Codex reopens on
+    it when done. "Always" remembers it. Busy app → warned, reopens on what it stopped. Didn't close → asks."""
+    calls = []
+    real = (cr.codex_app_busy, cr.release_chat, cr.open_codex_chat, settings.assistant_codex_close_app)
+    cr.release_chat = lambda sid, timeout=15.0, force=False: (calls.append(("close", sid, force)) or "app")
+    cr.open_codex_chat = lambda sid: calls.append(("reopen", sid))
+    cr.codex_app_busy = lambda: []
+    settings.assistant_codex_close_app = False
+    try:
+        page, s, started = _held_page()
+        ov = page._overlay
+        page._on_error("o1", cr.CHAT_BUSY)
+        page._on_done("o1")
+        ov._always_box.setChecked(True)
+        ov._setup_btn.click()                                      # "Close Codex and continue here"
+        assert _pump(lambda: started, 5), "never continued"
+        assert calls == [("close", "01a1-old", False)] and started[-1] == ("o1", "codex", "01a1-old", "make it darker"), \
+            (calls, started)                                       # idle Codex: a normal quit, never forced
+        assert settings.assistant_codex_close_app is True, "'Always' is remembered"
+        assert "continuing this chat" in ov._tool_chip.text()
+        s.thread = None
+        page._on_done("o1")                                        # the turn ended → Codex comes back on it
+        assert calls[-1] == ("reopen", "01a1-old"), calls
+
+        # Always on + Codex idle → no question at all
+        calls.clear(); started.clear()
+        page._on_error("o1", cr.CHAT_BUSY); page._on_done("o1")
+        assert _pump(lambda: started, 5) and calls[0] == ("close", "01a1-old", False), calls
+
+        # Codex busy → asked even with Always, warned; "Close anyway" → reopens on the chat it stopped
+        calls.clear(); started.clear()
+        cr.codex_app_busy = lambda: [("01a1-app", "Build landing page")]
+        page._on_error("o1", cr.CHAT_BUSY); page._on_done("o1")
+        assert started == [] and "Build landing page" in ov._error_label.text() and "anyway" in ov._setup_btn.text()
+        assert not ov._always_box.isVisibleTo(ov)
+        ov._setup_btn.click()
+        assert _pump(lambda: started, 5)
+        assert calls[0] == ("close", "01a1-old", True), "busy Codex ignores a normal quit: 'anyway' forces it"
+        s.thread = None
+        page._on_done("o1")
+        assert calls[-1] == ("reopen", "01a1-app"), "reopen on the task it stopped, so you can continue it"
+
+        # Codex didn't close → asks again, nothing runs
+        calls.clear(); started.clear()
+        cr.codex_app_busy = lambda: []
+        cr.release_chat = lambda sid, timeout=15.0, force=False: ""
+        page._on_error("o1", cr.CHAT_BUSY); page._on_done("o1")
+        _pump(lambda: s.awaiting_codex and "didn't close" in ov._error_label.text(), 5)
+        assert started == [] and "didn't close" in ov._error_label.text()
+    finally:
+        cr.codex_app_busy, cr.release_chat, cr.open_codex_chat, settings.assistant_codex_close_app = real
+    print("'Close Codex and continue here' → same chat, Codex reopens on it; Always remembered; busy → warned "
+          "+ reopens on the stopped task; didn't close → asks  OK")
 
 
 def test_codex_chats_from_codex_index():
@@ -464,10 +533,10 @@ def test_name_match_prefers_the_title():
     from types import SimpleNamespace as NS
     import app.core.agent_sessions as asess
     from app.core import codex_runner as crm
-    filler = [NS(id=f"c{i}", title=f"Chat {i}", cwd="/x", project="p", mtime=900 - i, agent="claude",
+    filler = [NS(id=f"c{i}", title=f"Chat {i}", cwd="/x", project="p", mtime=900 - i, agent="claude", when="now",
                  preview="tell me what you think, use the end of the file, what failed and what to test next")
               for i in range(20)]
-    target = NS(id="t1", title="Test Filect MCP end to end", cwd="/y", project="q", mtime=1, agent="codex",
+    target = NS(id="t1", title="Test Filect MCP end to end", cwd="/y", project="q", mtime=1, agent="codex", when="now",
                 preview="I have the Filect MCP connected. Test it end to end.")
     real = (asess.list_sessions, crm.codex_threads)
     asess.list_sessions = lambda limit=500: list(filler)
@@ -574,7 +643,8 @@ if __name__ == "__main__":
     test_stop_while_routing_cancels_it()
     test_update_codex_button()
     test_open_in_codex_desktop_app()
-    test_chat_open_in_codex_app_continues_as_new_chat()
+    test_chat_held_by_codex_app_asks_then_new_chat()
+    test_chat_held_by_codex_app_close_and_continue()
     test_codex_chats_from_codex_index()
     test_name_match_prefers_the_title()
     test_real_chat_held_by_codex_app()

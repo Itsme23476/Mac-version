@@ -274,6 +274,14 @@ def _other_agent(agent: str) -> str:
     return "codex" if agent == "claude" else "claude"
 
 
+def _setting(name: str, default=None):
+    try:
+        from app.core.settings import settings as _s
+        return getattr(_s, name, default)
+    except Exception:
+        return default
+
+
 class AgentSession:
     """One live (or just-finished) agent conversation: its worker thread plus all the state the notch
     and the left rail render from. `AssistantPage` keeps a registry of these and shows ("focuses") one
@@ -289,6 +297,10 @@ class AgentSession:
         self.fell_back = False               # this turn already switched agents once (never ping-pong)
         self.first_error = ""                # the first agent's reason, if the other one fails too
         self.before_switch = None            # (agent, session_id, resume, model, effort) before a hand-over
+        self.codex_held = False              # this turn hit a chat the Codex app holds (_on_done decides)
+        self.awaiting_codex = False          # the card is asking: close Codex / new chat
+        self.busy_in_app = None              # (chat id, title) the Codex app was working on when asked
+        self.reopen_codex = None             # chat to reopen the Codex app on once this turn is done
         self.cwd = cwd
         self.prompt = prompt                 # this turn's input (seeds the Details feed)
         self.title = title                   # short conversation name (notch bubble + rail row + notif)
@@ -325,6 +337,7 @@ class AssistantPage(QWidget):
     _transcript_loaded = Signal(str, object)   # (session id, load_transcript() dict|None)
     _setup_checked = Signal(str, bool)         # (agent, ready) — background check after a setup button
     _codex_info_ready = Signal(object)         # {models, update, msg} — Codex's live model list (background)
+    _codex_released = Signal(str, str, str)    # (session key, what closed "app"/"terminal"/"", interrupted chat)
 
     def __init__(self, main_window):
         super().__init__()
@@ -359,6 +372,7 @@ class AssistantPage(QWidget):
         self._transcript_loaded.connect(self._on_transcript_loaded)
         self._setup_checked.connect(self._on_setup_checked)
         self._codex_info_ready.connect(self._on_codex_info)
+        self._codex_released.connect(self._on_codex_released)
         self._codex_info = None      # {models, update}: loaded off the UI thread (it runs `codex`)
         self._routing = {}           # requests still being routed: id -> what you said (Stop cancels them)
         self._route_seq = 0
@@ -530,6 +544,7 @@ class AssistantPage(QWidget):
         ov.collapsed.connect(self._on_notch_collapsed)
         ov.setup_requested.connect(self._open_agent_setup)
         ov.update_requested.connect(self._on_update_codex)
+        ov.codex_choice.connect(self._on_codex_choice)
         self._overlay = ov
         self._set_view_agent(self._pick_agent())          # reflect the saved choice on the pill
         return ov
@@ -1195,6 +1210,8 @@ class AssistantPage(QWidget):
         sess.started_at, sess.duration = time.time(), None
         sess.fallback_to, sess.fell_back, sess.first_error = None, False, ""   # each turn may hand over once
         sess.before_switch = None
+        sess.codex_held = sess.awaiting_codex = False
+        sess.busy_in_app = None
         _trace(f"restart {sess.key} '{sess.title}' (new turn, resume={sess.session_id or sess.resume})")
         self._start_worker(sess, sess.session_id or sess.resume)
 
@@ -1706,8 +1723,8 @@ class AssistantPage(QWidget):
         from app.core.agent_runner import AGENT_NAMES, setup_info, setup_kind
         from app.core.codex_runner import CHAT_BUSY
         if msg.strip() == CHAT_BUSY and not sess.fell_back and not sess.stopping:
-            sess.fallback_to, sess.first_error = "codex", msg   # the Codex app holds it: new chat + recap
-            _trace(f"{key} chat is open in the Codex app -> continuing as a new Codex chat")
+            sess.codex_held, sess.first_error = True, msg       # the Codex app holds it: _on_done decides
+            _trace(f"{key} chat is open in the Codex app")
             return
         info = setup_info(msg)
         if info and info[0] == sess.agent:          # this agent can't run: not set up / out of usage
@@ -1742,6 +1759,92 @@ class AssistantPage(QWidget):
             title = ("Filect · task failed" if not info else f"Filect · {name} is out of usage"
                      if info[1] == "usage" else f"Filect · set up {name}")
             _notify(title, msg)
+
+    # ---- a chat the Codex app is holding ----
+    def _ask_or_close_codex(self, sess):
+        """Codex lets one program write a chat at a time, and the Codex app keeps any chat it opened until it
+        quits. "Always close Codex" (and nothing running there) → close it and continue the SAME chat; else
+        the card asks: close Codex and continue here, or continue as a new chat."""
+        from app.core import codex_runner as cr
+        busy = cr.codex_app_busy()
+        if _setting("assistant_codex_close_app", False) and not busy:
+            _trace(f"{sess.key} always-close Codex -> closing it")
+            self._close_codex_and_continue(sess.key, "")
+            return
+        sess.status, sess.awaiting_codex = "needs_you", True
+        sess.busy_in_app = busy[0] if busy else None
+        sess.last_action = "This chat is open in the Codex app"
+        _trace(f"{sess.key} asking: close Codex or new chat (Codex busy: {busy})")
+        if sess.key == self._focused_key:
+            self._set_view_agent("codex")
+            self._notch("show_codex_choice", "This chat is open in the Codex app.", busy[0][1] if busy else "")
+            self._notch("open_full")
+        self._refresh_rail(sess.key)
+        _play_chime(False)
+        if sess.key != self._focused_key or not _app_is_active():
+            self._last_notified_key = sess.key
+            _notify("Filect · needs you", f"{sess.title}: this chat is open in the Codex app")
+
+    def _on_codex_choice(self, which: str, always: bool):
+        sess = self._focused
+        if sess is None or not sess.awaiting_codex:
+            return
+        sess.awaiting_codex = False
+        _trace(f"{sess.key} Codex choice: {which} (always={always})")
+        if which == "new":
+            self._switch_agent(sess, "codex")       # a new chat with a recap (cue: open in the Codex app)
+            return
+        if always:
+            try:
+                from app.core.settings import settings as _s
+                _s.assistant_codex_close_app = True
+                _s._save_config()
+            except Exception:
+                pass
+        self._close_codex_and_continue(sess.key, sess.busy_in_app[0] if sess.busy_in_app else "")
+
+    def _close_codex_and_continue(self, key, interrupted: str):
+        """Close what holds the chat (off the UI thread — the app takes a moment to quit), then continue it."""
+        import threading
+        sess = self._sessions.get(key)
+        if sess is None:
+            return
+        sid = sess.session_id or sess.resume
+        sess.status, sess.last_action = "working", "Closing the Codex app…"
+        if key == self._focused_key:
+            self._notch("show_working", "Closing the Codex app…", "")
+        self._refresh_rail(key)
+
+        def worker():
+            from app.core.codex_runner import release_chat
+            what = release_chat(sid, force=bool(interrupted))   # "Close Codex anyway" (it was working)
+            try:
+                self._codex_released.emit(key, what, interrupted or "")
+            except RuntimeError:
+                pass
+        threading.Thread(target=worker, daemon=True, name="filect-close-codex").start()
+
+    def _on_codex_released(self, key, what: str, interrupted: str):
+        sess = self._sessions.get(key)
+        if sess is None:
+            return
+        if not what:                                # it didn't close (it may be asking you something)
+            sess.status, sess.awaiting_codex = "needs_you", True
+            if key == self._focused_key:
+                self._notch("show_codex_choice", "Codex didn't close — it may be asking you something. Close it "
+                                                 "and try again, or continue here as a new chat.", "")
+            self._refresh_rail(key)
+            return
+        sid = sess.session_id or sess.resume
+        sess.reopen_codex = interrupted or sid      # bring the app back where you were (or on what it stopped)
+        cue = "Closed Codex — continuing this chat"
+        _trace(f"{key} {what} closed -> continuing {sid[:8]} (reopen on {sess.reopen_codex[:8]})")
+        sess.last_action = cue
+        self._start_worker(sess, sid, seed=False, send=sess.prompt)
+        if key == self._focused_key:
+            self._set_view_agent("codex")
+            self._append(f"↪ {cue}")
+            self._notch("show_working", cue, "")
 
     def _switch_agent(self, sess, agent: str):
         """Hand this turn to the other agent (the first isn't set up / is out of usage). A new chat just
@@ -1828,6 +1931,15 @@ class AssistantPage(QWidget):
                 self._notch("show_done", "", 0.0, "", "Stopped by you.", True)
             self._refresh_rail(key)
             return
+        if sess.codex_held:                         # the Codex app holds this chat: close it, or a new chat
+            sess.codex_held = False
+            self._ask_or_close_codex(sess)
+            return
+        if sess.reopen_codex and not sess.pending_followup:   # we closed the Codex app for this: bring it back
+            from app.core.codex_runner import open_codex_chat
+            _trace(f"{key} reopening the Codex app on {sess.reopen_codex[:8]}")
+            open_codex_chat(sess.reopen_codex)
+            sess.reopen_codex = None
         if sess.fallback_to:                        # this agent couldn't run → the other takes the turn
             agent, sess.fallback_to = sess.fallback_to, None
             self._switch_agent(sess, agent)

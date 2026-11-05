@@ -55,6 +55,8 @@ class Settings:
         #   one takes over automatically when this one isn't set up or is out of usage)
         self.assistant_codex_model: str = ''   # Assistant: Codex model ('' = Codex's top model)
         self.assistant_codex_effort: str = 'high'  # Assistant: Codex reasoning effort
+        self.assistant_codex_close_app: bool = False  # Assistant: "Always close Codex" — a chat the Codex
+        #   app holds is continued by closing the app (then reopening it), without asking
         self.assistant_router_model: str = 'opus'  # Assistant: model for the voice intent router
         #   (new-vs-follow-up-vs-resume). Opus by default; latency is spawn-bound so the model is
         #   ~latency-neutral. Change to 'sonnet'/'haiku' to spend less of your Max limits on routing.
@@ -322,6 +324,8 @@ class Settings:
         ag = data.get('assistant_agent')
         if ag in ('claude', 'codex'):
             self.assistant_agent = ag
+        if isinstance(data.get('assistant_codex_close_app'), bool):
+            self.assistant_codex_close_app = data['assistant_codex_close_app']
         for k in ('assistant_codex_model', 'assistant_codex_effort'):
             v = data.get(k)
             if isinstance(v, str):
@@ -442,6 +446,7 @@ class Settings:
             'assistant_agent': self.assistant_agent,
             'assistant_codex_model': self.assistant_codex_model,
             'assistant_codex_effort': self.assistant_codex_effort,
+            'assistant_codex_close_app': self.assistant_codex_close_app,
             'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,
