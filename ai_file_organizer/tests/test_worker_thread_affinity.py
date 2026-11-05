@@ -54,6 +54,7 @@ def main():
     ar.AgentRunner = _FakeRunner                 # _go does a local import of this symbol
     main_tid = threading.get_ident()
     page = _TestPage(_MW())
+    page._primary = "claude"                  # the fake runner is Claude's (whatever your saved primary is)
     tids = _TestPage.tids
 
     page.run_task("build a tiny thing")

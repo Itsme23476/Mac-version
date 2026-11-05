@@ -481,6 +481,7 @@ class ClaudeOverlay(QWidget):
     submit_text = Signal(str)          # a typed task submitted from the bottom input field
     collapsed = Signal()               # the open card tucked back into the notch
     setup_requested = Signal(str, str)  # (agent, "install"/"signin") → open that agent's setup in Terminal
+    update_requested = Signal()        # "Update Codex" in the model panel (a newer Codex has newer models)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -725,6 +726,18 @@ class ClaudeOverlay(QWidget):
         self._model_rows = {}
         self._build_model_rows()
         mp.addWidget(self._model_list)
+        # A newer Codex exists: its newer models only show once Codex is updated (one click, ~5s).
+        self._update_btn = QPushButton("")
+        self._update_btn.setCursor(Qt.PointingHandCursor)
+        self._update_btn.setFixedHeight(28)
+        self._update_btn.setStyleSheet(
+            f"QPushButton {{ background:transparent; color:{ACCENT}; border:1px dashed {ACCENT}; "
+            "border-radius:8px; font-size:11.5px; font-weight:600; text-align:left; padding:0 12px; }"
+            f"QPushButton:hover {{ background:{C['surface']}; }}"
+            f"QPushButton:disabled {{ color:{C['text_muted']}; border-color:{C['border']}; }}")
+        self._update_btn.clicked.connect(self._on_update_clicked)
+        self._update_btn.setVisible(False)
+        mp.addWidget(self._update_btn)
         mp.addSpacing(10)          # clear gap so the model dropdown and the effort controls read as
         erow = QHBoxLayout()       # two separate groups, not one cramped block
         _elbl = QLabel("Effort")
@@ -1231,15 +1244,29 @@ class ClaudeOverlay(QWidget):
             self._model_rows[k] = r
             lay.addWidget(r)
 
-    def set_agent(self, agent: str, models=None) -> None:
+    def set_agent(self, agent: str, models=None, update: str = "") -> None:
         """Which agent this card shows: its models in the picker, its name on "Open in …". `models` =
-        [(key, display name)]; omitted → Claude's. Call set_model_effort after, with that agent's pick."""
+        [(key, display name)]; omitted → Claude's. `update`: a newer Codex version (offers "Update Codex").
+        Call set_model_effort after, with that agent's pick."""
         names = dict(models) if models else dict(_MODEL_NAMES)
         self._agent = agent if agent in _AGENT_NAMES else "claude"
         if names != self._model_names:
             self._model_names = names
             self._build_model_rows()
+        self.set_update(update if self._agent == "codex" else "")
         self._update_primary()
+
+    def set_update(self, version: str, busy: bool = False) -> None:
+        """Show/hide the "Update Codex" row; `busy` while the update runs."""
+        self._update_btn.setText("Updating Codex…" if busy else f"↑  Update Codex to {version} for the newest models")
+        self._update_btn.setEnabled(not busy)
+        self._update_btn.setVisible(bool(version) or busy)
+        if not self._minimized:
+            self._fit()
+
+    def _on_update_clicked(self) -> None:
+        self.set_update("", busy=True)
+        self.update_requested.emit()
 
     def set_model_effort(self, model: str, effort: str) -> None:
         first = next(iter(self._model_names), "opus")
@@ -1473,6 +1500,10 @@ class ClaudeOverlay(QWidget):
             self.stop_clicked.emit()
         else:
             self.open_requested.emit()
+
+    def hide_primary(self) -> None:
+        """No "Open in …" / Stop for this card (a request stopped before it became a chat)."""
+        self._primary_btn.setVisible(False)
 
     def mark_stopping(self) -> None:
         """Called the instant Stop is clicked: disable the button + show it registered, so there's
@@ -1795,6 +1826,8 @@ class ClaudeOverlay(QWidget):
         h += TOPBAR_H + sp + self._content_height() + sp + CTRL_H
         if self._model_open:
             h += sp + MODELPANEL_H            # the inline model & effort panel
+            if not self._update_btn.isHidden():
+                h += 28 + 6                   # the "Update Codex" row
             if self._model_list_open:         # model dropdown list expanded (the selected one is hidden)
                 h += MODEL_ROW_H * max(0, len(self._model_rows) - 1) + 3
         if self._details_open:

@@ -324,6 +324,7 @@ class AssistantPage(QWidget):
     _recent_loaded = Signal(object)       # [SessionInfo] — past voice-agent chats for the rail
     _transcript_loaded = Signal(str, object)   # (session id, load_transcript() dict|None)
     _setup_checked = Signal(str, bool)         # (agent, ready) — background check after a setup button
+    _codex_info_ready = Signal(object)         # {models, update, msg} — Codex's live model list (background)
 
     def __init__(self, main_window):
         super().__init__()
@@ -357,6 +358,11 @@ class AssistantPage(QWidget):
         self._recent_loaded.connect(self._on_recent_loaded)
         self._transcript_loaded.connect(self._on_transcript_loaded)
         self._setup_checked.connect(self._on_setup_checked)
+        self._codex_info_ready.connect(self._on_codex_info)
+        self._codex_info = None      # {models, update}: loaded off the UI thread (it runs `codex`)
+        self._routing = {}           # requests still being routed: id -> what you said (Stop cancels them)
+        self._route_seq = 0
+        QTimer.singleShot(2000, self._load_codex_info)
         self._setup_wait = None      # {agent, key, until}: a task waiting for you to finish an agent's setup
         self._setup_timer = None
         self._setup_checking = False
@@ -447,14 +453,51 @@ class AssistantPage(QWidget):
             if agent == self._view_agent:
                 return
             self._view_agent = agent
-            models = None
+            models, update = None, ""
             if agent == "codex":
-                from app.core.codex_runner import codex_models
-                models = codex_models()
-            ov.set_agent(agent, models)
+                info = self._codex_info or {}
+                models, update = info.get("models"), info.get("update", "")
+                if not models:                       # not loaded yet: Codex's cached list for now
+                    from app.core.codex_runner import _FALLBACK_MODELS
+                    models = list(_FALLBACK_MODELS)
+            ov.set_agent(agent, models, update)
             ov.set_model_effort(*self._models[agent])
         except Exception as e:
             _trace(f"notch agent switch failed: {e}")
+
+    def _load_codex_info(self, update_first: bool = False):
+        """Codex's live model list + whether a newer Codex exists, off the UI thread (it runs `codex`).
+        `update_first`: run Codex's own updater before (the model panel's "Update Codex")."""
+        import threading
+
+        def worker():
+            msg = ""
+            try:
+                from app.core import codex_runner as cr
+                if update_first:
+                    ok, msg = cr.update_codex()
+                    msg = "" if ok else (msg or "Codex couldn't update.")
+                info = {"models": cr.codex_models(), "update": cr.codex_update_available(), "msg": msg}
+            except Exception as e:
+                info = {"models": None, "update": "", "msg": str(e) if update_first else ""}
+            try:
+                self._codex_info_ready.emit(info)
+            except RuntimeError:                    # page torn down (quit)
+                pass
+        threading.Thread(target=worker, daemon=True, name="filect-codex-info").start()
+
+    def _on_codex_info(self, info):
+        self._codex_info = info
+        _trace(f"codex models: {[m for m, _ in (info.get('models') or [])]} update={info.get('update')!r}"
+               + (f" | update failed: {info['msg']}" if info.get("msg") else ""))
+        if self._view_agent == "codex":             # repaint the card's model menu with the fresh list
+            self._view_agent = None
+            self._set_view_agent("codex")
+
+    def _on_update_codex(self):
+        """"Update Codex" in the model panel: Codex's own updater, then the fresh model list."""
+        _trace("updating Codex (model panel)")
+        self._load_codex_info(update_first=True)
 
     def _set_primary(self, agent: str):
         """The Assistant tab's "Primary agent" switch: who fn + ⌃ and new chats go to."""
@@ -486,6 +529,7 @@ class AssistantPage(QWidget):
         ov.submit_text.connect(lambda t: self.run_voice_task(t, source="typed"))   # typed = same routing
         ov.collapsed.connect(self._on_notch_collapsed)
         ov.setup_requested.connect(self._open_agent_setup)
+        ov.update_requested.connect(self._on_update_codex)
         self._overlay = ov
         self._set_view_agent(self._pick_agent())          # reflect the saved choice on the pill
         return ov
@@ -518,6 +562,15 @@ class AssistantPage(QWidget):
     def _on_stop_task(self):
         """Stop on ONE click: interrupt the FOCUSED session's turn now, show immediate feedback, and
         force-cancel as a fallback if the interrupt didn't end it."""
+        if self._routing:                           # still deciding where it goes: cancel the request
+            heard = list(self._routing.values())[-1]
+            self._routing.clear()
+            _trace("STOP while routing — request cancelled")
+            self._notch("set_task", heard, "")
+            self._notch("show_done", "", 0.0, "", "Stopped by you.", True)
+            self._notch("hide_primary")             # it never became a chat — nothing to open
+            self.status_label.setText("Stopped")
+            return
         sess = self._focused
         if sess is None or not sess.running:
             return
@@ -992,6 +1045,9 @@ class AssistantPage(QWidget):
         self._notch("show_working", "", "")
         self._notch("flash")
         import threading
+        self._route_seq += 1
+        rid = self._route_seq
+        self._routing[rid] = text                   # Stop now cancels it (it used to be ignored)
 
         claude_ok = self._agent_ok("claude")
 
@@ -1011,13 +1067,19 @@ class AssistantPage(QWidget):
             except Exception as e:                     # safe fallback: continue focused, else new
                 intent, idx, task = ("FOLLOW_UP" if focused_title else "NEW"), None, text
                 _trace(f"router FAILED ({e}) -> fallback {intent}")
-            self._voice_decided.emit({"intent": intent, "idx": idx, "task": task,
+            self._voice_decided.emit({"rid": rid, "intent": intent, "idx": idx, "task": task,
                                       "candidates": candidates, "images": images,
                                       "focused_key": focused.key if focused else None})
         threading.Thread(target=worker, daemon=True, name="filect-assistant-route").start()
 
     def _on_voice_decided(self, result):
         """Router decision (UI thread): continue the focused chat, resume a named one, or start new."""
+        rid = result.get("rid")
+        if rid is not None:
+            if rid not in self._routing:
+                _trace(f"request {rid} dropped — you stopped it while it was routing")
+                return
+            del self._routing[rid]
         intent, idx, task = result["intent"], result["idx"], result["task"]
         cands, fkey = result["candidates"], result["focused_key"]
         images = result.get("images") or []
@@ -1633,6 +1695,11 @@ class AssistantPage(QWidget):
         if sess is None:
             return
         from app.core.agent_runner import AGENT_NAMES, setup_info, setup_kind
+        from app.core.codex_runner import CHAT_BUSY
+        if msg.strip() == CHAT_BUSY and not sess.fell_back and not sess.stopping:
+            sess.fallback_to, sess.first_error = "codex", msg   # the Codex app holds it: new chat + recap
+            _trace(f"{key} chat is open in the Codex app -> continuing as a new Codex chat")
+            return
         info = setup_info(msg)
         if info and info[0] == sess.agent:          # this agent can't run: not set up / out of usage
             import time
@@ -1683,6 +1750,9 @@ class AssistantPage(QWidget):
         sess.session_id, sess.resume = "", None
         sess.status, sess.result_text = "working", ""
         cue = f"{AGENT_NAMES[old]} {why} — switching to {AGENT_NAMES[agent]}"
+        from app.core.codex_runner import CHAT_BUSY
+        if sess.first_error == CHAT_BUSY:
+            cue = "This chat is open in the Codex app — continuing it here as a new chat"
         _trace(f"{sess.key} -> {agent}: {cue} (recap={send != sess.prompt})")
         sess.last_action = cue
         self._start_worker(sess, None, seed=False, send=send)

@@ -21,6 +21,7 @@ from app.core import codex_runner as cr  # noqa: E402
 from app.core.settings import settings  # noqa: E402
 from app.ui import assistant_page as ap  # noqa: E402
 settings._save_config = lambda: None            # NEVER write the user's settings.json
+ar.use_login_path()                             # once, for real, before any test stubs subprocess
 ap._play_chime = lambda *a, **k: None
 ap._notify = lambda *a, **k: None
 ap.AssistantPage._show_idle_overlays = lambda self: None
@@ -189,6 +190,7 @@ def test_codex_chat_on_the_card_and_rail():
         cx.status = cl.status = "done"
         cx.session_id = "01a1a990-e8bc-7342-992a-38e47561293a"
         page._sessions = {"x1": cx, "x2": cl}
+        page._on_codex_info({"models": cr.codex_models(), "update": "", "msg": ""})
         page._focus("x1")
         ov = page._overlay
         names = dict(cr.codex_models())
@@ -198,9 +200,8 @@ def test_codex_chat_on_the_card_and_rail():
         page._on_model_changed("gpt-5.6-luna", "medium")
         assert page._models["codex"] == ["gpt-5.6-luna", "medium"] and page._models["claude"][0] == "opus"
         assert settings.assistant_codex_model == "gpt-5.6-luna"
-        page._open_task()
-        script = Path(opened[-1][3]).read_text()
-        assert "codex resume 01a1a990-e8bc-7342-992a-38e47561293a" in script and "cd '/tmp/proj dir'" in script
+        page._open_task()                                   # this Mac has the Codex desktop app
+        assert opened[-1] == ["open", "codex://threads/01a1a990-e8bc-7342-992a-38e47561293a"], opened[-1]
         page._focus("x2")
         assert ov._agent == "claude" and "Opus" in ov._model_btn.text() and "Open in Claude" in ov._primary_btn.text()
         rail = page._ensure_rail()
@@ -212,8 +213,8 @@ def test_codex_chat_on_the_card_and_rail():
             rail.grab().save(os.path.join(out, "rail_codex_badge.png"))
     finally:
         subprocess.Popen = real
-    print("Codex chat: Codex's models on the pill (picks saved per agent), 'Open in Codex' → Terminal "
-          "`codex resume <id>` in its folder; Claude chat unchanged; rail badges the Codex one  OK")
+    print("Codex chat: Codex's models on the pill (picks saved per agent), 'Open in Codex' → the Codex "
+          "desktop app; Claude chat unchanged; rail badges the Codex one  OK")
 
 
 def test_refused_claude_attempt_is_not_a_chat():
@@ -293,6 +294,113 @@ def test_task_runs_by_itself_after_setup():
     print("after 'Sign in to Codex', the waiting task runs by itself once you're signed in (not twice)  OK")
 
 
+def test_stop_while_routing_cancels_it():
+    """Stop pressed while your request is still being routed (~3s) used to do nothing — you had to press
+    again once the task had started. Now it cancels the request: no task starts."""
+    from app.core import intent_router as ir
+    page = _page(primary="codex")
+    started = []
+    page._start_worker = lambda s, rid, seed=True, send=None: started.append(s.key)
+
+    class _SlowRouter:
+        def classify(self, text, focused, cands):
+            time.sleep(0.6)
+            return {"intent": "NEW", "index": None, "task": text}
+    real = ir.IntentRouter.get
+    ir.IntentRouter.get = classmethod(lambda cls: _SlowRouter())
+    try:
+        page._notch("rest_idle")
+        page.run_voice_task("run sleep 30 then say done")
+        assert page._routing and page._overlay._state == "working"
+        page._on_stop_task()                                       # pressed during routing
+        ov = page._overlay
+        assert ov._status_label.text() == "Stopped" and "Stopped by you" in ov._done_view.toPlainText()
+        assert not ov._primary_btn.isVisibleTo(ov), "no 'Open in …' for a request that never became a chat"
+        _pump(lambda: False, 1.5)                                  # the router answers meanwhile
+        assert started == [] and not page._routing, "a stopped request must not start a task"
+        page.run_voice_task("what is 2 plus 2")                    # a normal one still runs
+        assert _pump(lambda: started, 5), "routing broken after a cancel"
+    finally:
+        ir.IntentRouter.get = real
+    print("Stop while routing cancels the request (no task starts); the next request runs normally  OK")
+
+
+def test_update_codex_button():
+    """An older Codex only knows older models (0.153 had no GPT-6.1-Sol). The model menu offers "Update
+    Codex to 0.166.0"; one click runs Codex's own updater and the menu shows the new models."""
+    page = _page(primary="codex")
+    old = [("gpt-6-astra", "GPT-6-Astra"), ("gpt-5.6-sol", "GPT-5.6-Sol")]
+    new = [("gpt-6-astra", "GPT-6-Astra"), ("gpt-6.1-sol", "GPT-6.1-Sol"), ("gpt-6.1-terra", "GPT-6.1 Terra")]
+    calls = []
+    real = (cr.update_codex, cr.codex_models, cr.codex_update_available)
+    cr.update_codex = lambda: (calls.append("update") or (True, "Update ran successfully"))
+    cr.codex_models = lambda: new
+    cr.codex_update_available = lambda: ""
+    try:
+        page._on_codex_info({"models": old, "update": "0.166.0", "msg": ""})
+        sess = ap.AgentSession("u1", tempfile.mkdtemp(), "hi", "Hi", True, None, "low", agent="codex")
+        sess.status = "done"
+        page._sessions = {"u1": sess}
+        page._focus("u1")
+        ov = page._overlay
+        assert not ov._update_btn.isHidden() and "0.166.0" in ov._update_btn.text()   # (inside the model menu)
+        assert "gpt-6.1-sol" not in ov._model_rows
+        ov._update_btn.click()                                     # the real button
+        assert "Updating" in ov._update_btn.text() and not ov._update_btn.isEnabled()
+        assert _pump(lambda: calls and "gpt-6.1-sol" in ov._model_rows, 10), ov._model_rows
+        assert ov._update_btn.isHidden(), "up to date: no update row"
+    finally:
+        cr.update_codex, cr.codex_models, cr.codex_update_available = real
+    print("model menu: 'Update Codex to 0.166.0' → Codex's updater → the newest models appear  OK")
+
+
+def test_open_in_codex_desktop_app():
+    """"Open in Codex" opens the chat in the Codex desktop app (codex://threads/<id>, what Codex's own /app
+    does), else Codex in Terminal."""
+    import subprocess
+    got = []
+    real_popen, real_app = subprocess.Popen, cr._desktop_app
+    subprocess.Popen = lambda args, **k: got.append(args)
+    old = os.environ.pop("CODEX_HOME", None)
+    try:
+        cr._desktop_app = lambda: True
+        cr.open_in_codex("01a1-abc", "/tmp")
+        assert got[-1] == ["open", "codex://threads/01a1-abc"], got[-1]
+        cr._desktop_app = lambda: False
+        cr.open_in_codex("01a1-abc", "/tmp")
+        assert got[-1][:3] == ["open", "-a", "Terminal"] and "codex resume 01a1-abc" in Path(got[-1][3]).read_text()
+    finally:
+        subprocess.Popen, cr._desktop_app = real_popen, real_app
+        if old is not None:
+            os.environ["CODEX_HOME"] = old
+    assert real_app() is True, "this Mac has the Codex desktop app (ChatGPT.app handles codex://)"
+    print("Open in Codex → the Codex desktop app (codex://threads/<id>); no app → Terminal  OK")
+
+
+def test_chat_open_in_codex_app_continues_as_new_chat():
+    """Once the Codex app has opened a chat it holds it; a follow-up from Filect used to fail. Now it
+    continues as a new Codex chat with a recap."""
+    page = _page(primary="codex")
+    started = []
+    page._start_worker = lambda s, rid, seed=True, send=None: started.append((s.key, s.agent, rid, send))
+    s = ap.AgentSession("o1", tempfile.mkdtemp(), "make it darker", "Coffee Site", True, None, "low",
+                        resume="01a1-old", agent="codex")
+    s.session_id = "01a1-old"
+    s.entries = [{"id": "0", "kind": "user", "text": "make a coffee site"},
+                 {"id": "1", "kind": "text", "text": "Built index.html."},
+                 {"id": "2", "kind": "user", "text": "make it darker"}]
+    page._sessions = {"o1": s}
+    page._focused_key = "o1"
+    page._ensure_notch()
+    page._on_error("o1", cr.CHAT_BUSY)
+    assert s.status != "error"
+    page._on_done("o1")
+    k, agent, rid, send = started[-1]
+    assert (k, agent, rid) == ("o1", "codex", None) and "Codex: Built index.html." in send and send.endswith("make it darker")
+    assert "open in the Codex app" in page._overlay._tool_chip.text(), page._overlay._tool_chip.text()
+    print("a chat held by the Codex app continues here as a new Codex chat (with a recap)  OK")
+
+
 def test_real_codex_task_followup_and_stop():
     page = _page(primary="codex")
     tmp = tempfile.mkdtemp(prefix="filect-codex-")
@@ -359,6 +467,21 @@ def test_real_codex_routes_a_voice_command():
           "each)  OK")
 
 
+def test_real_chat_held_by_codex_app():
+    """REAL: a chat the Codex app has open (FILECT_HELD_THREAD) can't be resumed — Filect says so plainly."""
+    tid = os.environ.get("FILECT_HELD_THREAD")
+    if not tid:
+        print("(skipped: set FILECT_HELD_THREAD to a thread the Codex app has open)")
+        return
+    r = cr.CodexRunner(tempfile.mkdtemp(), on_step=lambda st: None)
+    try:
+        asyncio.run(r.run("say hi", resume=tid, effort="low"))
+        raise AssertionError("resuming a chat held by the Codex app must fail")
+    except RuntimeError as e:
+        assert str(e) == cr.CHAT_BUSY, str(e)
+    print("REAL: Codex's 'already has an active writer' → 'open in the Codex app'  OK")
+
+
 if __name__ == "__main__":
     test_claude_out_of_usage_is_detected()
     test_primary_and_hand_over()
@@ -366,6 +489,11 @@ if __name__ == "__main__":
     test_codex_chat_on_the_card_and_rail()
     test_refused_claude_attempt_is_not_a_chat()
     test_task_runs_by_itself_after_setup()
+    test_stop_while_routing_cancels_it()
+    test_update_codex_button()
+    test_open_in_codex_desktop_app()
+    test_chat_open_in_codex_app_continues_as_new_chat()
+    test_real_chat_held_by_codex_app()
     test_real_codex_task_followup_and_stop()
     test_real_signed_out_claude_hands_over_to_codex()
     test_real_codex_routes_a_voice_command()

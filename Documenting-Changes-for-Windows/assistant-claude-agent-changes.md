@@ -750,3 +750,31 @@ yourself, the Mac side can't see it.
     finished at +9 s, and the task ran and answered at +14 s.
   - **Windows:** same logic. The readiness checks run the same CLIs (`codex login status`,
     `claude auth status`).
+- **Codex follow-ups from his test (2026-11-05): BOTH platforms unless marked.**
+  - **Newest models.**
+    - The menu showed only what the installed Codex knows: 0.153.3 had no GPT-6.1-Sol.
+    - `codex_models()` now asks Codex live (`codex debug models`, ~20 ms) instead of reading the stale
+      `models_cache.json`.
+    - `codex_update_available()` compares `codex --version` with Codex's own `~/.codex/version.json`.
+      When a newer version exists, the model menu shows "↑ Update Codex to X for the newest models".
+      One click runs `codex update` (Codex's own updater: no questions, ~5–7 s), then reloads the list.
+    - The list loads in the background (`AssistantPage._load_codex_info`), so the card never waits on
+      Codex.
+    - Live: 0.153.3 → 0.166.0 in 7 s; the menu then listed GPT-6.1-Sol, GPT-6-Astra, GPT-6.1 Terra,
+      GPT-6-Sol, GPT-6-Luna, …
+  - **Open in Codex → the Codex desktop app.**
+    - `open codex://threads/<id>` is what Codex's own `/app` does. On his Mac the app is
+      `/Applications/ChatGPT.app` (bundle `com.openai.codex`), which handles `codex://`.
+    - No app → Terminal `codex resume`.
+    - **Catch:** once the app has opened a chat it holds it ("thread … already has an active writer", even
+      after it moves to another chat), so `codex exec resume` from Filect fails. Filect recognises it
+      (`CHAT_BUSY`) and continues as a new Codex chat with a recap: "This chat is open in the Codex app —
+      continuing it here as a new chat". Live: the follow-up answered "56 times two is 112".
+    - **Windows:** check whether the Codex Windows app registers `codex://` (registry
+      `HKCR\codex\shell\open\command`). If yes, use `start "" codex://threads/<id>`.
+  - **Stop while routing.**
+    - Presses during the ~3 s "Routing…" were ignored: there was no task yet.
+    - Now `_routing` holds the pending requests and Stop cancels them: card "Stopped", no "Open in …",
+      and the late router answer is dropped. Live: one click, nothing started.
+    - Also, a Stop pressed before `codex` has spawned keeps it from starting.
+  - `tests/test_worker_thread_affinity.py` pins primary = Claude, because it read his saved Codex primary.

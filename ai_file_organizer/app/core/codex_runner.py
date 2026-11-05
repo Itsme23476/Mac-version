@@ -66,17 +66,65 @@ def codex_ready() -> bool:
 
 
 def codex_models() -> list:
-    """[(slug, display name)] Codex offers this account, best first — its own cached model list."""
+    """[(slug, display name)] the installed Codex offers, best first: its live catalog (`codex debug models`,
+    ~20ms — a cache file read went stale), else its cached list. An older Codex knows older models only
+    (0.153 had no GPT-6.1-Sol) — see codex_update_available()."""
+    data = None
+    exe = find_codex()
+    if exe:
+        try:
+            data = json.loads(subprocess.run([exe, "debug", "models"], capture_output=True, text=True,
+                                             timeout=10, stdin=subprocess.DEVNULL).stdout)
+        except Exception:
+            data = None
+    if data is None:
+        try:
+            data = json.loads((codex_home() / "models_cache.json").read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+    models = data.get("models", []) if isinstance(data, dict) else (data or [])
+    ms = sorted((m for m in models if isinstance(m, dict) and m.get("visibility") == "list" and m.get("slug")),
+                key=lambda m: m.get("priority", 99))
+    return [(m["slug"], m.get("display_name") or m["slug"]) for m in ms] or list(_FALLBACK_MODELS)
+
+
+def _ver(s: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", s or "")[:3])
+
+
+def codex_update_available() -> str:
+    """The newer Codex version that exists, or "" — from Codex's own update check (~/.codex/version.json)
+    vs the installed `codex --version`. ponytail: relies on Codex having checked; ask its release feed
+    ourselves if users who never open Codex directly stay behind."""
+    exe = find_codex()
+    if not exe:
+        return ""
     try:
-        data = json.loads((codex_home() / "models_cache.json").read_text(encoding="utf-8"))
-        ms = sorted((m for m in data.get("models", []) if m.get("visibility") == "list" and m.get("slug")),
-                    key=lambda m: m.get("priority", 99))
-        out = [(m["slug"], m.get("display_name") or m["slug"]) for m in ms]
-        if out:
-            return out
+        latest = json.loads((codex_home() / "version.json").read_text(encoding="utf-8")).get("latest_version") or ""
+        cur = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10,
+                             stdin=subprocess.DEVNULL).stdout
     except Exception:
-        pass
-    return list(_FALLBACK_MODELS)
+        return ""
+    return latest if latest and _ver(latest) > _ver(cur) else ""
+
+
+def update_codex() -> tuple:
+    """Codex's own updater (`codex update`: knows how it was installed; ~5s, no questions). (ok, last line)."""
+    exe = find_codex()
+    if not exe:
+        return False, "Codex isn't installed."
+    try:
+        r = subprocess.run([exe, "update"], capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+        lines = [l for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+        logger.info("[codex] update exit=%s: %s", r.returncode, lines[-1] if lines else "")
+        return r.returncode == 0, lines[-1] if lines else ""
+    except Exception as e:
+        return False, str(e)
+
+
+# The Codex desktop app holds a chat it has opened ("thread … already has an active writer") — until it
+# quits — so Filect can't add a turn to it; the Assistant continues it as a new chat instead.
+CHAT_BUSY = "This chat is open in the Codex app, so it can't be continued from here."
 
 
 def _unavailable(msg: str) -> Optional[AgentSetupError]:
@@ -201,10 +249,14 @@ class CodexRunner:
         logger.info("[codex] starting: model=%s effort=%s bypass=%s resume=%s screenshots=%d",
                     model or "(default)", effort or "(default)", bypass, bool(resume), len(shots))
         self.session_id = resume
+        if self._interrupted:                                # Stop pressed while it was starting up
+            return self.session_id
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=self.cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, limit=1 << 24)          # one command's output is one JSON line
         self._proc = proc
+        if self._interrupted:
+            proc.send_signal(signal.SIGINT)
         tail: List[str] = []
 
         async def drain():                                   # stderr must be read or Codex blocks on it
@@ -252,15 +304,18 @@ class CodexRunner:
             drainer.cancel()
             self._proc = None
         if not finished and not self._interrupted:
-            raise RuntimeError(failure or next((l for l in reversed(tail) if l), "")
-                               or f"Codex stopped unexpectedly (exit {proc.returncode}).")
+            why = failure or next((l for l in reversed(tail) if l), "")
+            if "already has an active writer" in why or any("already has an active writer" in l for l in tail):
+                raise RuntimeError(CHAT_BUSY)
+            raise RuntimeError(why or f"Codex stopped unexpectedly (exit {proc.returncode}).")
         return self.session_id
 
     async def interrupt(self) -> None:
-        """Stop the running turn: Ctrl-C, as in Terminal (the worker force-kills if it lingers)."""
+        """Stop the running turn: Ctrl-C, as in Terminal (the worker force-kills if it lingers). Pressed
+        before Codex has started, it never starts."""
+        self._interrupted = True
         p = self._proc
         if p is not None and p.returncode is None:
-            self._interrupted = True
             try:
                 p.send_signal(signal.SIGINT)
                 logger.info("[codex] interrupt sent")
@@ -302,8 +357,25 @@ def open_codex_setup(kind: str) -> str:
     return _open_terminal("filect-codex-setup.command", lines)
 
 
+def _desktop_app() -> bool:
+    """Is the Codex desktop app installed (it handles codex:// links — on this Mac it's ChatGPT.app)?"""
+    try:
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+        return NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(
+            NSURL.URLWithString_("codex://threads/new")) is not None
+    except Exception:
+        return False
+
+
 def open_in_codex(session_id: str, cwd: str) -> str:
-    """"Open in Codex": continue this chat in Codex itself (its terminal app), in the chat's folder."""
+    """"Open in Codex": the chat in the Codex desktop app (codex://threads/<id> — what Codex's own /app
+    does), like "Open in Claude" opens Claude Desktop. No desktop app → Codex in Terminal, in the chat's
+    folder. Once the app has opened a chat it holds it (CHAT_BUSY) — see AssistantPage._on_error."""
+    if _desktop_app() and not os.environ.get("CODEX_HOME"):   # (a custom profile isn't the app's)
+        subprocess.Popen(["open", f"codex://threads/{session_id}"])
+        logger.info("[codex] opened %s in the Codex app", session_id)
+        return f"codex://threads/{session_id}"
     return _open_terminal("filect-open-codex.command",
                           [f"cd {shlex.quote(cwd or str(Path.home()))} || exit 1",
                            f"exec codex resume {shlex.quote(session_id)}"])
