@@ -524,3 +524,23 @@ yourself, the Mac side can't see it.
   turns stay. If nothing is left: "Claude answered directly — no other steps."
 - Tests: `test_details_view.py::test_card_and_details_never_repeat` (checked that it fails without the
   filter); `test_rail_recent.py`: a past chat shows its latest request in the bubble and its name bold.
+
+### 8i. Freeze when a task finishes: the left list rebuilt every row (Mac, 2026-11-05): **BOTH platforms (Qt)**
+- Symptom: a small freeze as the card popped up at the end of a task (and a smaller one on every step).
+- Measured on real macOS with the real page and 71 past chats (a 5ms ticker on the UI thread):
+  - each `_refresh_rail` → `ConversationRail._render` rebuilt every row: about 60ms;
+  - it runs on every agent step, and twice at the finish (`_on_result` + `_on_done`) while the card
+    opens, giving two ~70ms stalls;
+  - the dev log also showed bursts of `qt.qpa.window: Window position QRect(0,1122 212x32)…` stepping
+    36px, which is the rows, detached with `setParent(None)`, briefly becoming top-level native windows.
+- Fix (`conversation_rail.py`): rows and headers are built once and REUSED.
+  - `_row_cache` is keyed by `("session", key)` / `("recent", id)`; `_hdr_cache` by header text.
+  - `_RailRow.set_state(title, status, when, focused)` updates in place and only re-parses the
+    stylesheet when focus changes, which was the costly part.
+  - `_render` re-orders the layout only when the widget order changed; otherwise it returns. Removed
+    rows are `hide()`n, never `setParent(None)`, and freed only when their chat leaves the data
+    (rows hidden by a search are kept).
+- After: a redraw takes 1–3ms (was 50–70); the stall per step is ~11ms (was ~71) and at finish ~18ms
+  (was ~69 twice).
+- Test: `test_rail_recent.py::test_rows_reused_not_rebuilt`. It checks the rows are the same widgets
+  across refreshes and that a finished chat's row moves groups; it fails on the old code.

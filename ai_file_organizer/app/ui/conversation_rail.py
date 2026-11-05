@@ -174,6 +174,21 @@ class _RailRow(QFrame):
     def __init__(self, title, status, when, focused, parent=None):
         super().__init__(parent)
         self.setObjectName("railRow")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 7, 8, 7)
+        lay.setSpacing(10)
+        self._icon = QLabel()
+        self._icon.setFixedSize(18, 18)
+        lay.addWidget(self._icon, 0, Qt.AlignVCenter)
+        self._title = QLabel()
+        self._title.setStyleSheet("color:#EDEDED;font-size:12.5px;font-weight:500;")
+        lay.addWidget(self._title, 1)
+        self._state = None
+        self.set_state(title, status, when, focused)
+
+    def set_state(self, title, status, when, focused):
+        """Update in place — the rail REUSES rows (rebuilding ~70 styled rows took ~60ms of UI freeze on
+        every agent step and twice when a task finished). Only what changed is touched."""
         label = _STATUS.get(status, _STATUS["working"])[1]
         if status == "working":
             sub = f"{label} · {_elapsed(when)}"
@@ -185,22 +200,18 @@ class _RailRow(QFrame):
             sub = _ago(when)
         title = title or "Untitled"
         self.setToolTip(f"{title}\n{sub}")
-        bg = "rgba(124,77,255,0.20)" if focused else "transparent"
-        self.setStyleSheet(
-            f"QFrame#railRow{{background:{bg};border:none;border-radius:10px;}}"
-            "QFrame#railRow:hover{background:rgba(255,255,255,0.07);} "
-            "QFrame#railRow QLabel{background:transparent;border:none;}")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 7, 8, 7)
-        lay.setSpacing(10)
-        icon = QLabel()
-        icon.setFixedSize(18, 18)
-        icon.setPixmap(_row_icon(status))
-        lay.addWidget(icon, 0, Qt.AlignVCenter)
-        t = QLabel()
-        t.setStyleSheet("color:#EDEDED;font-size:12.5px;font-weight:500;")
-        t.setText(t.fontMetrics().elidedText(title, Qt.ElideRight, RAIL_W - TAB_W - 66))
-        lay.addWidget(t, 1)
+        old = self._state or (None, None, None)
+        if focused != old[2]:                    # stylesheet parsing is the costly part — only on change
+            bg = "rgba(124,77,255,0.20)" if focused else "transparent"
+            self.setStyleSheet(
+                f"QFrame#railRow{{background:{bg};border:none;border-radius:10px;}}"
+                "QFrame#railRow:hover{background:rgba(255,255,255,0.07);} "
+                "QFrame#railRow QLabel{background:transparent;border:none;}")
+        if status != old[1]:
+            self._icon.setPixmap(_row_icon(status))
+        if title != old[0]:
+            self._title.setText(self._title.fontMetrics().elidedText(title, Qt.ElideRight, RAIL_W - TAB_W - 66))
+        self._state = (title, status, focused)
 
     def mousePressEvent(self, e):
         self.clicked.emit()
@@ -223,6 +234,9 @@ class ConversationRail(QWidget):
         self.setWindowTitle(RAIL_TITLE)
         self.setFixedWidth(RAIL_W)
         self._rows = []               # every row widget, in display order
+        self._row_cache = {}          # ("session", key) / ("recent", id) -> its _RailRow, reused
+        self._hdr_cache = {}          # group header text -> its QLabel, reused
+        self._empty = None            # the "No chats yet / No matches" label
         self._groups = []             # [(header, row count)] as last rendered
         self._data = ([], None, [])   # (sessions, focused_key, recent) from the last update_sessions
         self._expanded = False
@@ -324,42 +338,61 @@ class ConversationRail(QWidget):
         if q:
             sessions = [s for s in sessions if _matches(q, s.title, getattr(s, "prompt", ""))]
             recent = [r for r in recent if _matches(q, r.title, getattr(r, "preview", ""))]
-        while self._list_box.count():
-            item = self._list_box.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
-        self._rows = []
-        # ponytail: rebuilds every row on each refresh (called per agent step) — fine at today's ~50-300
-        # chats; update rows in place if history grows into the thousands.
+        # Rows and headers are REUSED (built once per chat, then updated in place): a full rebuild of
+        # ~70 styled rows cost ~60ms of frozen UI on every agent step and twice when a task finished.
         groups = _group(sessions, recent)
-        added = []
+        want, rows = [], []
         for i, (header, items) in enumerate(groups):
-            h = QLabel(header.capitalize())          # "PREVIOUS 7 DAYS" → "Previous 7 days" (VoiceOS-quiet)
-            h.setStyleSheet(_HDR_CSS + f"padding:{8 if i else 2}px 6px 2px 6px;")
-            added.append(h)
+            h = self._hdr_cache.get(header)
+            if h is None:
+                h = self._hdr_cache[header] = QLabel(header.capitalize())   # "Previous 7 days" (VoiceOS-quiet)
+            pad = 8 if i else 2
+            if h.property("pad") != pad:
+                h.setProperty("pad", pad)
+                h.setStyleSheet(_HDR_CSS + f"padding:{pad}px 6px 2px 6px;")
+            want.append(h)
             for kind, obj in items:
+                k = (kind, obj.key if kind == "session" else obj.id)
+                row = self._row_cache.get(k)
                 if kind == "session":
-                    row = _RailRow(obj.title, obj.status, obj.started_at, obj.key == focused_key)
-                    row.clicked.connect(lambda k=obj.key: self.session_clicked.emit(k))
+                    args = (obj.title, obj.status, obj.started_at, obj.key == focused_key)
                 else:
-                    row = _RailRow(obj.title, "recent", obj.mtime, False)
-                    row.clicked.connect(lambda sid=obj.id: self.recent_clicked.emit(sid))
-                added.append(row)
-                self._rows.append(row)
+                    args = (obj.title, "recent", obj.mtime, False)
+                if row is None:
+                    row = self._row_cache[k] = _RailRow(*args)
+                    if kind == "session":
+                        row.clicked.connect(lambda key=obj.key: self.session_clicked.emit(key))
+                    else:
+                        row.clicked.connect(lambda sid=obj.id: self.recent_clicked.emit(sid))
+                else:
+                    row.set_state(*args)
+                want.append(row)
+                rows.append(row)
         if not groups:
-            empty = QLabel("No matches" if q else "No chats yet")
-            empty.setStyleSheet("color:#6E6E78;font-size:11px;background:transparent;padding:6px 2px;")
-            added.append(empty)
-        for w in added:
+            if self._empty is None:
+                self._empty = QLabel()
+                self._empty.setStyleSheet("color:#6E6E78;font-size:11px;background:transparent;padding:6px 2px;")
+            self._empty.setText("No matches" if q else "No chats yet")
+            want.append(self._empty)
+        self._rows = rows
+        self._groups = [(h, len(items)) for h, items in groups]
+        have = [self._list_box.itemAt(i).widget() for i in range(self._list_box.count())]
+        if have[:-1] == want:                    # same widgets in the same order: nothing to relayout
+            return
+        while self._list_box.count():            # take items out; the widgets themselves are kept
+            w = self._list_box.takeAt(0).widget()
+            if w is not None and w not in want:
+                w.hide()                         # NOT setParent(None): that made each one a top-level
+        for w in want:                           # native window (the qt.qpa.window bursts in the log)
             self._list_box.addWidget(w)
             # Show NOW: on an already-visible rail Qt only shows new children on a QUEUED event, and
             # until then they measure as hidden (0 height) — which sized the list to 40px on every
             # rebuild (the "only one chat left" bug after selecting a conversation).
             w.show()
         self._list_box.addStretch(1)
-        self._groups = [(h, len(items)) for h, items in groups]
+        known = {("session", x.key) for x in self._data[0]} | {("recent", x.id) for x in self._data[2]}
+        for k in [k for k in self._row_cache if k not in known]:
+            self._row_cache.pop(k).deleteLater()  # gone from the data (search-hidden rows are kept)
         self._reanchor()
 
     def _focus_search(self):

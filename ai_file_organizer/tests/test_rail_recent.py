@@ -466,7 +466,31 @@ def test_quit_mid_task_stops_threads():
     print("quit mid-task: agent cancelled + every thread stopped before teardown  OK")
 
 
+def test_rows_reused_not_rebuilt():
+    """Every agent step refreshes the rail. Rebuilding ~70 styled rows froze the UI ~60ms each time —
+    and twice when a task finished, right as the card popped up. Rows are built once per chat and
+    updated in place; a finished chat's row is the SAME widget, just moved to its new group."""
+    from types import SimpleNamespace as _NS
+    rail = ConversationRail()
+    recent = _history(30, time.time())
+    live = _NS(key="s1", title="Dental site", status="working", started_at=time.time(), prompt="x")
+    rail.update_sessions([live], "s1", recent); pump(100)
+    first = list(rail._rows)
+    rail.update_sessions([live], "s1", recent)                       # a step: nothing visible changed
+    assert all(a is b for a, b in zip(rail._rows, first)) and len(rail._rows) == len(first)
+    live.status = "done"                                             # finished: Running → Today
+    rail.update_sessions([live], "s1", recent); pump(50)
+    assert rail._groups[0][0] != "RUNNING", rail._groups
+    assert {id(r) for r in rail._rows} == {id(r) for r in first}, "same row widgets, only re-ordered"
+    assert [r for r in rail._rows if r._state[1] == "done"], "the finished chat's row shows done"
+    rail.update_sessions([live], "s1", recent[:-1]); pump(50)       # a chat gone from the data
+    assert len(rail._row_cache) == len(recent), "its row is freed (30 left: 29 past + this one)"
+    rail.hide()
+    print("rail: rows reused across refreshes (no rebuild per step), finished chat moves groups  OK")
+
+
 if __name__ == "__main__":
+    test_rows_reused_not_rebuilt()
     test_fast_path()
     test_load_transcript()
     test_group()
