@@ -430,7 +430,7 @@ class LiveListener(QObject):
         self.state, self._detail = "off", ""
         self._paused = None             # pause reason, or None
         self._clear_since = 0.0
-        self._yield_now = False         # set from any thread by the foreground hook
+        self._yield_at = 0.0            # when the foreground hook last took the mic from us (any thread)
         self._gen = 0                   # mic generation: blocks/ends from an older mic are ignored
         self._stop_fn = None
         self._mic_vp = False
@@ -464,7 +464,7 @@ class LiveListener(QObject):
             self._det.set_sensitivity(settings.live_sensitivity)
             self._det.reset()
         self.on = True
-        self._paused, self._yield_now, self._vp_broken = None, False, False
+        self._paused, self._yield_at, self._vp_broken = None, 0.0, False
         self._fails.clear()
         self._mic.add_foreground_hook(self._fg_hook)
         self._monitor = self._monitor_factory()
@@ -575,20 +575,29 @@ class LiveListener(QObject):
             pass
         threading.Thread(target=stop, daemon=True, name="filect-live-mic-stop").start()
 
+    YIELD_SEC = 2.0     # the hook's "step aside" counts this long; by then busy() has taken over
+
+    def _yielding(self) -> bool:
+        return time.monotonic() - self._yield_at < self.YIELD_SEC
+
     def _fg_hook(self) -> None:
-        """A Filect hotkey/mic button is about to record (any thread): let go of the mic NOW."""
-        self._yield_now = True
+        """A Filect hotkey/mic button is about to record (any thread): let go of the mic NOW.
+        REGRESSION (his test, 01:10:25): a 2nd shortcut while already paused for the 1st (before it had
+        resumed) set a permanent "step aside" flag that only a held mic could clear → paused forever.
+        Now it's a timestamp that expires by itself, and only taken when we actually hold the mic."""
         stop = self._stop_fn
+        if stop is None:                     # not holding the mic (paused / reopening): nothing to give up
+            return
+        self._yield_at = time.monotonic()
         try:
-            if stop is not None:
-                stop.proc.kill()
+            stop.proc.kill()
         except Exception:
             pass
 
     def _on_mic_end(self, gen: int, rc: int) -> None:
         if gen != self._gen or not self.on or self._paused:
             return
-        if self._yield_now:
+        if self._yielding():
             self._pause("hotkey", "Paused while you use a Filect shortcut")
             return
         if rc == self._mic.VP_UNAVAILABLE and self._mic_vp:
@@ -612,7 +621,7 @@ class LiveListener(QObject):
 
     # ---- pause / resume ------------------------------------------------------------------------------
     def _pause_reason(self):
-        if self._yield_now or self._mic.busy():
+        if self._yielding() or self._mic.busy():
             return ("hotkey", "Paused while you use a Filect shortcut")
         m = self._monitor
         if m is not None and m.locked:
@@ -625,8 +634,6 @@ class LiveListener(QObject):
         return None
 
     def _pause(self, reason: str, detail: str = "") -> None:
-        if reason == "hotkey":
-            self._yield_now = False         # busy() takes over from here (the capture has started)
         if self._paused == reason:
             return
         self._paused = reason
@@ -654,7 +661,7 @@ class LiveListener(QObject):
                 self._clear_since = now
             elif now - self._clear_since >= 1.0:          # clear for a second → listen again
                 logger.info("[live] resuming (was %s)", self._paused)
-                self._paused, self._yield_now, self._clear_since = None, False, 0.0
+                self._paused, self._yield_at, self._clear_since = None, 0.0, 0.0
                 self._open()
         if self._det is not None and self.state == "countdown":
             left = self._det.countdown_left()

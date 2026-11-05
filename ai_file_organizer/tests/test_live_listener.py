@@ -410,8 +410,17 @@ def test_lets_go_of_the_mic_and_comes_back():
         assert "Filect shortcut" in rec["states"][-1][1]
         _pump(lambda: False, 1.6)
         assert len(mic.calls) == 1, "stays paused while the hotkey records"
+        # REGRESSION (his test, 01:10:25): the 1st dictation ends, and a 2nd shortcut starts BEFORE it
+        # has come back — it used to stay "Paused while you use a Filect shortcut" forever.
         busy["v"] = False
-        assert _pump(lambda: len(mic.calls) == 2, 3), "comes back ~1 s after"
+        _pump(lambda: False, 0.5)                                       # (not back yet: needs ~1 s clear)
+        assert len(mic.calls) == 1
+        for fn in list(mic_helper._fg_hooks):                          # the 2nd shortcut
+            fn()
+        busy["v"] = True
+        _pump(lambda: False, 0.8)
+        busy["v"] = False                                               # …and it ends
+        assert _pump(lambda: len(mic.calls) == 2, 3.5), "must come back after back-to-back shortcuts"
         mic.calls[-1]["on_chunk"](silence(0.1).tobytes())
         assert _pump(lambda: L.state == "listening", 1)
         # 2) another app records (Zoom)
