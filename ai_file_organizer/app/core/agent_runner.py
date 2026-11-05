@@ -243,6 +243,9 @@ def open_claude_setup(kind: str) -> str:
                   '{ echo; echo "The install did not finish. See above."; read -n 1; exit 1; }', "echo"]
     # `claude auth login` signs in and then EXITS (plain `claude` took over the window, wiped these
     # instructions and left people inside Claude Code). Then confirm it worked, in plain words.
+    if os.environ.get("CLAUDE_CONFIG_DIR"):       # a custom Claude profile: Terminal must use the same one
+        import shlex
+        lines.append(f"export CLAUDE_CONFIG_DIR={shlex.quote(os.environ['CLAUDE_CONFIG_DIR'])}")
     lines += ['export PATH="$HOME/.local/bin:$PATH"',
               'echo "Signing in with your Claude account. A browser window will open."', "echo",
               "claude auth login --claudeai", "echo",

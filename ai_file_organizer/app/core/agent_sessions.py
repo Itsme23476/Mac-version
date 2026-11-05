@@ -90,6 +90,8 @@ def _parse_session(path: Path) -> Optional[SessionInfo]:
     first_user: Optional[str] = None
     cwd: Optional[str] = None
     had_content = False
+    replied = api_error = False          # a real reply / only an API error ("Not logged in", out of usage)
+    read_all = True
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             for lineno, line in enumerate(f):
@@ -109,14 +111,22 @@ def _parse_session(path: Path) -> Optional[SessionInfo]:
                     had_content = True
                     if t == "user" and first_user is None:
                         first_user = _extract_text(obj.get("message"))
+                    if t == "assistant":
+                        api_error |= bool(obj.get("isApiErrorMessage"))
+                        replied |= not obj.get("isApiErrorMessage")
                 # Bounded read: a listing row needs a title source + cwd. The summary (when it
                 # exists) sits near the top, so once we have a first user line + cwd and have
                 # scanned a bit, stop — don't read megabytes of a long transcript per row.
                 if (first_user and cwd) and (summary or lineno > 60):
+                    read_all = False
                     break
     except Exception:
         return None
     if not had_content and not summary:
+        return None
+    if read_all and api_error and not replied:
+        # Claude Code refused to run (signed out / out of usage) — the task went to the other agent;
+        # this attempt isn't a conversation (it showed as a dead twin of the Codex chat).
         return None
     preview = (first_user or "").strip().replace("\n", " ")
     ct = _custom_title(path)

@@ -118,6 +118,7 @@ def test_primary_and_hand_over():
     page._on_error("c2", ar.usage_message("codex", "Try again at 5 PM."))
     page._on_done("c2")
     assert len(started) == n and s2.status == "error"
+    assert (s2.agent, s2.resume) == ("claude", "sid-old"), "no hand-over after all: back to its own agent + chat"
     s3 = ap.AgentSession("c3", tempfile.mkdtemp(), "x", "X", True, "opus", "high")
     page._sessions["c3"] = s3
     page._down.clear()
@@ -146,6 +147,7 @@ def test_both_unavailable_shows_the_fixable_one():
         assert sess.agent == "codex"
         page._on_error("b1", ar.CODEX_SETUP_INSTALL)
         assert ov._status_label.text() == "Setup needed" and "Set up Codex" in ov._setup_btn.text()
+        assert sess.agent == "claude" and ov._agent == "claude", "the chat stays with its own agent"
         assert ov._error_label.text() == ar.CODEX_SETUP_INSTALL
         page._down["codex"] = ("install", time.time() + 999)
         ov._setup_btn.click()                     # the real button → page → Terminal
@@ -158,7 +160,13 @@ def test_both_unavailable_shows_the_fixable_one():
         assert "Sign in to Codex" in ov._setup_btn.text()
         ov._setup_btn.click()
         assert "install.sh" not in Path(opened[-1][3]).read_text()
-        page._on_error("b1", ar.usage_message("codex", "Try again at 5 PM."))   # BOTH out of usage
+        b2 = ap.AgentSession("b2", tempfile.mkdtemp(), "again", "Again", True, "opus", "high")
+        page._sessions["b2"] = b2
+        page._focused_key = page._last_sent_key = "b2"
+        page._down.clear()
+        page._on_error("b2", ar.usage_message("claude", "You've hit your limit · resets 3pm"))
+        page._on_done("b2")                        # → Codex, which is out of usage too
+        page._on_error("b2", ar.usage_message("codex", "Try again at 5 PM."))   # BOTH out of usage
         assert ov._status_label.text() == "Out of usage" and not ov._setup_btn.isVisibleTo(ov)
         assert not ov._primary_btn.isVisibleTo(ov)
         assert "resets 3pm" in ov._error_label.text() and "5 PM" in ov._error_label.text(), \
@@ -208,6 +216,39 @@ def test_codex_chat_on_the_card_and_rail():
           "`codex resume <id>` in its folder; Claude chat unchanged; rail badges the Codex one  OK")
 
 
+def test_refused_claude_attempt_is_not_a_chat():
+    """A task Claude refused (signed out / out of usage) and handed to Codex left a Claude chat file whose
+    only reply is an API error — it showed in the rail as a dead twin of the Codex chat. Not any more;
+    a real chat that later hit the limit still shows."""
+    import json
+    from app.core import agent_sessions as asess
+    home = tempfile.mkdtemp()
+    proj = Path(home) / "projects" / "-tmp-ws"
+    proj.mkdir(parents=True)
+
+    def chat(name, *assistant):
+        rows = [{"type": "user", "cwd": "/tmp/ws", "message": {"role": "user", "content": f"task {name}"}}]
+        rows += [dict({"type": "assistant", "cwd": "/tmp/ws",
+                       "message": {"role": "assistant", "content": [{"type": "text", "text": t}]}}, **extra)
+                 for t, extra in assistant]
+        (proj / f"{name}.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    err = {"isApiErrorMessage": True, "error": "rate_limit"}
+    chat("refused", ("You've hit your limit · resets 3pm", err))
+    chat("real", ("Done — built it.", {}))
+    chat("real-then-limit", ("Done — built it.", {}), ("You've hit your limit · resets 3pm", err))
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = home
+    try:
+        ids = sorted(s.id for s in asess.list_sessions(cwd="/tmp/ws"))
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+    assert ids == ["real", "real-then-limit"], ids
+    print("a refused Claude attempt (only an API error) isn't listed as a chat; real chats are  OK")
+
+
 def test_real_codex_task_followup_and_stop():
     page = _page(primary="codex")
     tmp = tempfile.mkdtemp(prefix="filect-codex-")
@@ -234,6 +275,10 @@ def test_real_codex_task_followup_and_stop():
     t = time.time()
     page._on_stop_task()
     assert _pump(lambda: not s2.running, 15) and s2.status == "stopped", s2.status
+    ov = page._overlay
+    assert ov._status_label.text() == "Stopped" and "Stopped by you" in ov._done_view.toPlainText(), \
+        "a stopped task says so — not the agent's last line + 'Finished'"
+    assert "Finished" not in ov._done_view.toPlainText()
     print(f"REAL Codex via the app's worker: task done (file written, its action in Details, Open in Codex), "
           f"follow-up continued the same chat, Stop ended it in {time.time() - t:.1f}s  OK")
     page.shutdown()
@@ -275,6 +320,7 @@ if __name__ == "__main__":
     test_primary_and_hand_over()
     test_both_unavailable_shows_the_fixable_one()
     test_codex_chat_on_the_card_and_rail()
+    test_refused_claude_attempt_is_not_a_chat()
     test_real_codex_task_followup_and_stop()
     test_real_signed_out_claude_hands_over_to_codex()
     test_real_codex_routes_a_voice_command()

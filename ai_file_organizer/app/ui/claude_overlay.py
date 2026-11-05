@@ -511,6 +511,7 @@ class ClaudeOverlay(QWidget):
         self._agent = "claude"        # the agent this card shows ("claude" / "codex"): models, Open in …
         self._model_names = dict(_MODEL_NAMES)   # the picker's models for that agent
         self._expanded = set()        # entry ids whose "Show full" is open
+        self._stopped = False         # the done card is a Stop (its last reply stays in Details)
         self._model = "opus"          # a real model is always chosen: opus/sonnet/haiku
         self._effort = "high"         # a real effort is always chosen: low/medium/high/xhigh/max
         self._model_open = False      # is the inline "Model & effort" panel expanded?
@@ -954,6 +955,7 @@ class ClaudeOverlay(QWidget):
             "background: transparent; border: none;")
         row.addWidget(glyph, 0, Qt.AlignTop)
         if kind == "done":
+            self._done_glyph = glyph             # ✓ done / ◼ stopped (show_done)
             # The ANSWER itself — Claude's whole final reply, formatted (lists, bold) — not a one-line
             # summary (its first paragraph was often just "Here are the files:"). Scrolls past DONE_MAX_H.
             view = QTextBrowser()
@@ -1182,7 +1184,7 @@ class ClaudeOverlay(QWidget):
     def _render_details(self, follow: bool) -> None:
         sb = self._details_feed.verticalScrollBar()
         at_bottom, pos = sb.value() >= sb.maximum() - 4, sb.value()
-        shown = details_view.visible_entries(self._entries, hide_final=self._state == "done",
+        shown = details_view.visible_entries(self._entries, hide_final=self._state == "done" and not self._stopped,
                                              hide_prompt=self._prompt_shown_in_full)
         self._details_feed.setHtml(details_view.render_html(shown, self._expanded) or (
             f'<p style="color:{C["text_muted"]};">{_AGENT_NAMES.get(self._agent, "Claude")} '
@@ -1344,9 +1346,17 @@ class ClaudeOverlay(QWidget):
         if not self._minimized:
             self._fit()
 
-    def show_done(self, session_id: str = "", cost: float = 0.0, task: str = "", result: str = "") -> None:
+    def show_done(self, session_id: str = "", cost: float = 0.0, task: str = "", result: str = "",
+                  stopped: bool = False) -> None:
+        """The finished card. `stopped`: you pressed Stop — say so plainly, not the agent's last line +
+        "Finished" (that read like it had completed); that line stays in Details."""
         self.set_state("done")
-        self._set_status("Done", GREEN)
+        self._stopped = stopped
+        self._set_status("Stopped" if stopped else "Done", C["text_muted"] if stopped else GREEN)
+        self._done_glyph.setText("◼" if stopped else "✓")
+        self._done_glyph.setStyleSheet(
+            f"color: {C['text_muted'] if stopped else GREEN}; font-size: {12 if stopped else 16}px; "
+            "font-weight: 700; background: transparent; border: none;")
         self._stop_elapsed()
         self._work_spinner.stop()
         if task:
@@ -1354,7 +1364,7 @@ class ClaudeOverlay(QWidget):
         if result:
             self._result_text = result
         sid = (session_id or "")[:8]
-        meta = "✓ Finished"
+        meta = "◼ Stopped" if stopped else "✓ Finished"
         if sid:
             meta += f"  ·  saved {sid}…"
         # No $ figure: on the Claude subscription you're not charged per task — a dollar amount would
@@ -1362,7 +1372,7 @@ class ClaudeOverlay(QWidget):
         # Lead with what Claude GENERATED: its whole final reply, formatted, then the file the turn
         # produced, one click from opening. The step-by-step log stays in Details. Falls back to the
         # prompt if there's no text.
-        reply = details_view.final_reply(self._entries) if self._rich else ""
+        reply = details_view.final_reply(self._entries) if self._rich and not stopped else ""
         body = reply or self._result_text or self._task_text
         parts = [details_view._md(body)] if body else []
         made = details_view.deliverable_html(self._entries) if self._rich else ""
@@ -1433,7 +1443,7 @@ class ClaudeOverlay(QWidget):
         elif status == "done":
             self.show_done(session_id=session_id, cost=cost, task=task, result=result or "")
         elif status == "stopped":
-            self.show_done(task=task, result=result or "Stopped by you.")
+            self.show_done(task=task, result="Stopped by you.", stopped=True)
         elif status == "error":
             self.show_error(result or "Something went wrong.")
         else:
@@ -2003,6 +2013,10 @@ if __name__ == "__main__":
     assert "Open in Claude" in ov._primary_btn.text(), "primary becomes Open in Claude when done"
     ov._on_primary()
     assert fired["open"] == _o + 1, "primary on done opens Claude"
+
+    ov.show_done("zz99", 0.0, result="Stopped by you.", stopped=True)
+    assert ov._status_label.text() == "Stopped" and "Stopped by you" in ov._done_view.toPlainText()
+    assert "Finished" not in ov._done_view.toPlainText(), "a Stop doesn't read as finished"
 
     # A Codex chat: its models in the picker, "Open in Codex"; back to Claude restores Claude's.
     ov.set_agent("codex", [("gpt-a", "GPT-A"), ("gpt-b", "GPT-B")])

@@ -288,6 +288,7 @@ class AgentSession:
         self.fallback_to = None              # set when this agent can't run → _on_done hands the turn over
         self.fell_back = False               # this turn already switched agents once (never ping-pong)
         self.first_error = ""                # the first agent's reason, if the other one fails too
+        self.before_switch = None            # (agent, session_id, resume, model, effort) before a hand-over
         self.cwd = cwd
         self.prompt = prompt                 # this turn's input (seeds the Details feed)
         self.title = title                   # short conversation name (notch bubble + rail row + notif)
@@ -1117,6 +1118,7 @@ class AssistantPage(QWidget):
         sess.status, sess.result_text, sess.cost, sess.approval_req = "working", "", 0.0, None
         sess.started_at, sess.duration = time.time(), None
         sess.fallback_to, sess.fell_back, sess.first_error = None, False, ""   # each turn may hand over once
+        sess.before_switch = None
         _trace(f"restart {sess.key} '{sess.title}' (new turn, resume={sess.session_id or sess.resume})")
         self._start_worker(sess, sess.session_id or sess.resume)
 
@@ -1561,6 +1563,10 @@ class AssistantPage(QWidget):
                 fixable = [m for m in (sess.first_error, msg) if setup_kind(m) in ("install", "signin")]
                 msg = fixable[0] if fixable else f"{sess.first_error}\n{msg}"   # both out: both reset times
                 info = setup_info(msg)
+                if sess.before_switch:               # no hand-over after all: the chat keeps its own agent
+                    sess.agent, sess.session_id, sess.resume, sess.model, sess.effort = sess.before_switch
+                    if key == self._focused_key:
+                        self._set_view_agent(sess.agent)
         sess.status, sess.result_text = "error", msg
         _trace(f"{key} ERROR '{sess.title}': {msg}")
         if key == self._focused_key:
@@ -1588,6 +1594,7 @@ class AssistantPage(QWidget):
         send = sess.prompt
         if sess.session_id or sess.resume:
             send = self._recap(sess, AGENT_NAMES[old]) + sess.prompt
+        sess.before_switch = (old, sess.session_id, sess.resume, sess.model, sess.effort)
         sess.agent, sess.fell_back = agent, True
         sess.model, sess.effort = self._model_for(agent)
         sess.session_id, sess.resume = "", None
@@ -1638,7 +1645,7 @@ class AssistantPage(QWidget):
             if key == self._focused_key:
                 self.card.setVisible(False)
                 self.status_label.setText("Stopped")
-                self._notch("show_done", "", 0.0, "", "Stopped by you.")
+                self._notch("show_done", "", 0.0, "", "Stopped by you.", True)
             self._refresh_rail(key)
             return
         if sess.fallback_to:                        # this agent couldn't run → the other takes the turn

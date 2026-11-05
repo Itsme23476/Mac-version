@@ -705,3 +705,32 @@ yourself, the Mac side can't see it.
   It stubs `settings._save_config` so the user's settings are never written. `tests/test_claude_setup.py`
   now marks Codex unusable, because otherwise a missing Claude correctly hands over instead of showing the
   card.
+- **Follow-ups from the live end-to-end test (2026-11-05): BOTH platforms.**
+  - Refused Claude attempts are no longer listed as chats.
+    - Claude Code writes a chat file even when it refuses to run (signed out / out of usage). Its only
+      assistant entry has `"isApiErrorMessage": true` (`error` = `authentication_failed` / `rate_limit`
+      / …), so every handed-over task showed in the rail twice: once as a dead Claude row, once as the
+      real Codex chat.
+    - `agent_sessions._parse_session` now returns None when the WHOLE file was read and its only
+      replies are API errors. A long chat (bounded read) or one with any real reply is kept.
+    - On his Mac this hid 166 of 569 files: all failed attempts (152 signed out, 8 bad model, 6 other),
+      none from Filect's workspace.
+  - When BOTH agents fail, the chat goes back to its own agent: `sess.before_switch` restores
+    agent / session id / resume / model / effort. Before, the card showed Claude's "Opus" pill next to
+    "Sign in to Codex", and a retry would have continued on the wrong agent.
+  - Stop says "Stopped". `show_done(..., stopped=True)` shows status "Stopped", body "Stopped by you.", a
+    grey ◼ instead of the green ✓, and "◼ Stopped" instead of "✓ Finished". The agent's last line stays
+    in Details. Before, a stopped task looked finished: its last line + "✓ Finished". This was not
+    Codex-specific.
+  - The setup / Open buttons carry a custom profile: if `CODEX_HOME` / `CLAUDE_CONFIG_DIR` is set, the
+    Terminal script exports it, so sign-in lands in the profile Filect actually uses.
+  - **Windows:** use the same env carry in the PowerShell script (`$env:CODEX_HOME = …`).
+  - Live-verified on the real screen with throwaway profiles:
+    - Codex primary, both signed out → "Codex isn't set up — switching to Claude Code" → card
+      "Sign in to Codex".
+    - A real click on it → Terminal → the browser sign-in completed → "✓ All set".
+    - Retry → Codex answered.
+    - Claude primary signed out → "Claude Code isn't set up — switching to Codex" → done.
+    - A real click on "Open in Codex" → `codex resume` showed the chat.
+    - A real click on Stop → stopped in 0.3 s.
+    - The rail shows the Codex tags.

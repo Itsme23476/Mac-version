@@ -266,8 +266,11 @@ class CodexRunner:
 def _open_terminal(name: str, lines: list) -> str:
     import tempfile
     path = os.path.join(tempfile.gettempdir(), name)
+    head = ["#!/bin/bash", 'export PATH="$HOME/.local/bin:$PATH"']
+    if os.environ.get("CODEX_HOME"):             # a custom Codex profile: Terminal must use the same one
+        head.append(f"export CODEX_HOME={shlex.quote(os.environ['CODEX_HOME'])}")
     with open(path, "w") as f:
-        f.write("\n".join(["#!/bin/bash", 'export PATH="$HOME/.local/bin:$PATH"'] + lines) + "\n")
+        f.write("\n".join(head + lines) + "\n")
     os.chmod(path, 0o755)
     subprocess.Popen(["open", "-a", "Terminal", path])
     return path
