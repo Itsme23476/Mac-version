@@ -81,10 +81,12 @@ TRANSCRIPT_H = 56    # the "what you said" bubble at the top of the card
 TITLE_H = 20         # the task's short bold name under it (VoiceOS: "Build coffee brand website")
 CTRL_H = 32          # persistent control row (model pill · Details · primary action)
 MODELPANEL_H = 170   # the inline "Model & effort" panel (model dropdown closed)
-MODEL_LIST_H = 96    # extra height when the dropdown list is open (3 rows — the selected is hidden)
+MODEL_ROW_H = 31     # one row of the open model dropdown (28px + spacing; the selected one is hidden)
 _MODELS = ("opus", "sonnet", "haiku", "fable")
 # Display names carry the version (the alias still resolves to Claude Code's latest of each family).
 _MODEL_NAMES = {"opus": "Opus 5.5", "sonnet": "Sonnet 5.5", "haiku": "Haiku 5.5", "fable": "Fable 5.1"}
+_AGENT_NAMES = {"claude": "Claude", "codex": "Codex"}            # the card's "Open in …" / answered-by
+_SETUP_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 _EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]       # slider index 0..4 ("" = Auto, off-slider)
 _EFFORT_NAMES = {"": "Auto", "low": "Low", "medium": "Medium",
                  "high": "High", "xhigh": "Extra high", "max": "Max"}
@@ -478,7 +480,7 @@ class ClaudeOverlay(QWidget):
     stop_clicked = Signal()            # "Stop" pressed while a task is running
     submit_text = Signal(str)          # a typed task submitted from the bottom input field
     collapsed = Signal()               # the open card tucked back into the notch
-    setup_requested = Signal(str)      # "install" / "signin" → open the Claude Code setup in Terminal
+    setup_requested = Signal(str, str)  # (agent, "install"/"signin") → open that agent's setup in Terminal
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -504,7 +506,10 @@ class ClaudeOverlay(QWidget):
         self._detail_last = ""        # last line appended to the feed (dedup)
         self._entries = []            # rich Details: the conversation's entries (see details_view)
         self._rich = False            # True once entries drive Details (plain status lines stop)
-        self._setup_kind = ""         # the error is a Claude Code setup step ("install"/"signin"), not a failure
+        self._setup_kind = ""         # the error is a setup step ("install"/"signin"/"usage"), not a failure
+        self._setup_agent = "claude"  # …for which agent
+        self._agent = "claude"        # the agent this card shows ("claude" / "codex"): models, Open in …
+        self._model_names = dict(_MODEL_NAMES)   # the picker's models for that agent
         self._expanded = set()        # entry ids whose "Show full" is open
         self._model = "opus"          # a real model is always chosen: opus/sonnet/haiku
         self._effort = "high"         # a real effort is always chosen: low/medium/high/xhigh/max
@@ -717,17 +722,7 @@ class ClaudeOverlay(QWidget):
         ml.setContentsMargins(0, 0, 0, 0)
         ml.setSpacing(3)
         self._model_rows = {}
-        for k in _MODELS:
-            r = QPushButton(_MODEL_NAMES[k])
-            r.setCursor(Qt.PointingHandCursor)
-            r.setFixedHeight(28)
-            r.setStyleSheet(
-                f"QPushButton {{ background:#202026; color:{C['text_2']}; border:1px solid {C['border']}; "
-                "border-radius:8px; font-size:12px; text-align:left; padding:0 12px; }"
-                f"QPushButton:hover {{ background:{C['surface']}; color:{C['text']}; border-color:{ACCENT}; }}")
-            r.clicked.connect(lambda _=False, kk=k: self._pick_model(kk))
-            self._model_rows[k] = r
-            ml.addWidget(r)
+        self._build_model_rows()
         mp.addWidget(self._model_list)
         mp.addSpacing(10)          # clear gap so the model dropdown and the effort controls read as
         erow = QHBoxLayout()       # two separate groups, not one cramped block
@@ -992,7 +987,8 @@ class ClaudeOverlay(QWidget):
                 f"QPushButton {{ background: {ACCENT}; color: #0B0B0E; border: none; border-radius: 16px; "
                 "font-size: 12.5px; font-weight: 700; padding: 0 18px; }"
                 f"QPushButton:hover {{ background: {ACCENT_LIGHT}; }}")
-            self._setup_btn.clicked.connect(lambda: self.setup_requested.emit(self._setup_kind))
+            self._setup_btn.clicked.connect(
+                lambda: self.setup_requested.emit(self._setup_agent, self._setup_kind))
             self._setup_btn.setVisible(False)
             lay.addWidget(self._setup_btn, 0, Qt.AlignLeft)
         lay.addStretch(1)
@@ -1189,7 +1185,8 @@ class ClaudeOverlay(QWidget):
         shown = details_view.visible_entries(self._entries, hide_final=self._state == "done",
                                              hide_prompt=self._prompt_shown_in_full)
         self._details_feed.setHtml(details_view.render_html(shown, self._expanded) or (
-            f'<p style="color:{C["text_muted"]};">Claude answered directly — no other steps.</p>'))
+            f'<p style="color:{C["text_muted"]};">{_AGENT_NAMES.get(self._agent, "Claude")} '
+            'answered directly — no other steps.</p>'))
         # Live updates follow the newest activity only if you were already at the bottom; a Show-full
         # toggle keeps your place.
         sb.setValue(sb.maximum() if (follow and at_bottom) else pos)
@@ -1213,8 +1210,39 @@ class ClaudeOverlay(QWidget):
             self._fit()
 
     # -- model + thinking-effort picker (inline; reliable on the non-activating panel) ----
+    def _build_model_rows(self) -> None:
+        """One row per model of the current agent (rebuilt when the card switches agent)."""
+        lay = self._model_list.layout()
+        for r in self._model_rows.values():
+            lay.removeWidget(r)
+            r.deleteLater()
+        self._model_rows = {}
+        for k, name in self._model_names.items():
+            r = QPushButton(name)
+            r.setCursor(Qt.PointingHandCursor)
+            r.setFixedHeight(28)
+            r.setStyleSheet(
+                f"QPushButton {{ background:#202026; color:{C['text_2']}; border:1px solid {C['border']}; "
+                "border-radius:8px; font-size:12px; text-align:left; padding:0 12px; }"
+                f"QPushButton:hover {{ background:{C['surface']}; color:{C['text']}; border-color:{ACCENT}; }}")
+            r.clicked.connect(lambda _=False, kk=k: self._pick_model(kk))
+            self._model_rows[k] = r
+            lay.addWidget(r)
+
+    def set_agent(self, agent: str, models=None) -> None:
+        """Which agent this card shows: its models in the picker, its name on "Open in …". `models` =
+        [(key, display name)]; omitted → Claude's. Call set_model_effort after, with that agent's pick."""
+        names = dict(models) if models else dict(_MODEL_NAMES)
+        self._agent = agent if agent in _AGENT_NAMES else "claude"
+        if names != self._model_names:
+            self._model_names = names
+            self._build_model_rows()
+        self._update_primary()
+
     def set_model_effort(self, model: str, effort: str) -> None:
-        self._model = (model or "").strip() or "opus"       # always a real model
+        first = next(iter(self._model_names), "opus")
+        model = (model or "").strip()
+        self._model = model if model in self._model_names else first   # always a real model
         self._effort = (effort or "").strip()               # '' = Auto; else a slider level
         if self._effort and self._effort not in _EFFORT_ORDER:
             self._effort = "high"
@@ -1222,7 +1250,7 @@ class ClaudeOverlay(QWidget):
         self._update_model_pill()
 
     def _update_model_pill(self) -> None:
-        ml = _MODEL_NAMES.get(self._model, "Opus")
+        ml = self._model_names.get(self._model, self._model or "Opus")
         el = _EFFORT_NAMES.get(self._effort, "High")
         self._model_btn.setText(f"{ml} · {el}  ⌄")
 
@@ -1255,7 +1283,7 @@ class ClaudeOverlay(QWidget):
     def _sync_model_panel(self) -> None:
         """Reflect the current model/effort on the dropdown, slider, and Auto button."""
         chev = "  ⌃" if self._model_list_open else "  ⌄"
-        self._model_select.setText(_MODEL_NAMES.get(self._model, "Opus") + chev)
+        self._model_select.setText(self._model_names.get(self._model, self._model or "Opus") + chev)
         for k, r in getattr(self, "_model_rows", {}).items():
             r.setVisible(k != self._model)        # don't list the already-selected model
         auto = (self._effort == "")
@@ -1357,18 +1385,21 @@ class ClaudeOverlay(QWidget):
 
     def show_error(self, msg: str) -> None:
         try:
-            from app.core.agent_runner import setup_kind
+            from app.core.agent_runner import setup_info
         except Exception:                        # the standalone self-check has no app package
-            setup_kind = lambda _m: ""           # noqa: E731
-        self._setup_kind = setup_kind(msg)
+            setup_info = lambda _m: None         # noqa: E731
+        self._setup_agent, self._setup_kind = setup_info(msg) or ("claude", "")
         self.set_state("error")
-        if self._setup_kind:                     # a setup step, not a failure: amber, with the fix
+        name = _SETUP_NAMES.get(self._setup_agent, "Claude Code")
+        if self._setup_kind == "usage":          # out of usage: nothing to click — it says when it resets
+            self._set_status("Out of usage", AMBER)
+        elif self._setup_kind:                   # a setup step, not a failure: amber, with the fix
             self._set_status("Setup needed", AMBER)
-            self._setup_btn.setText("Set up Claude Code  →" if self._setup_kind == "install"
-                                    else "Sign in to Claude Code  →")
+            self._setup_btn.setText(f"Set up {name}  →" if self._setup_kind == "install"
+                                    else f"Sign in to {name}  →")
         else:
             self._set_status("Error", RED)
-        self._setup_btn.setVisible(bool(self._setup_kind))
+        self._setup_btn.setVisible(self._setup_kind in ("install", "signin"))
         self._stop_elapsed()
         self._work_spinner.stop()
         self._done_timer.stop()
@@ -1455,7 +1486,7 @@ class ClaudeOverlay(QWidget):
         elif self._state == "error" and self._setup_kind:
             self._primary_btn.setVisible(False)  # nothing to open yet — the setup button is the action
         elif self._state in ("done", "error"):
-            self._primary_btn.setText("Open in Claude  →")
+            self._primary_btn.setText(f"Open in {_AGENT_NAMES.get(self._agent, 'Claude')}  →")
             self._primary_btn.setVisible(True)
             self._primary_btn.setStyleSheet(
                 f"QPushButton {{ background: {C['surface']}; color: {C['text']}; border: none; "
@@ -1736,7 +1767,7 @@ class ClaudeOverlay(QWidget):
     def _content_height(self) -> int:
         if self._state == "done":                 # the answer's measured height (see show_done)
             return self._done_view.maximumHeight() + 4
-        if self._state == "error" and self._setup_kind:
+        if self._state == "error" and self._setup_kind in ("install", "signin"):
             return _STACK_H["error"] + 46          # + the setup button
         return _STACK_H.get(self._state, 90)
 
@@ -1754,8 +1785,8 @@ class ClaudeOverlay(QWidget):
         h += TOPBAR_H + sp + self._content_height() + sp + CTRL_H
         if self._model_open:
             h += sp + MODELPANEL_H            # the inline model & effort panel
-            if self._model_list_open:
-                h += MODEL_LIST_H             # model dropdown list expanded
+            if self._model_list_open:         # model dropdown list expanded (the selected one is hidden)
+                h += MODEL_ROW_H * max(0, len(self._model_rows) - 1) + 3
         if self._details_open:
             h += sp + (DETAILS_H - 6)         # the expanded live feed
         h += sp + TYPEFIELD_H + cm.bottom() + om.bottom()
@@ -1972,5 +2003,16 @@ if __name__ == "__main__":
     assert "Open in Claude" in ov._primary_btn.text(), "primary becomes Open in Claude when done"
     ov._on_primary()
     assert fired["open"] == _o + 1, "primary on done opens Claude"
+
+    # A Codex chat: its models in the picker, "Open in Codex"; back to Claude restores Claude's.
+    ov.set_agent("codex", [("gpt-a", "GPT-A"), ("gpt-b", "GPT-B")])
+    ov.set_model_effort("", "high")
+    assert "GPT-A" in ov._model_btn.text() and set(ov._model_rows) == {"gpt-a", "gpt-b"}
+    assert "Open in Codex" in ov._primary_btn.text()
+    ov._set_model("gpt-b")
+    assert picked.get("model") == "gpt-b"
+    ov.set_agent("claude")
+    ov.set_model_effort("sonnet", "high")
+    assert "Sonnet" in ov._model_btn.text() and "Open in Claude" in ov._primary_btn.text()
 
     print("claude_overlay self-check OK")

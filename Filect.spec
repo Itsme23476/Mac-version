@@ -73,6 +73,7 @@ hidden_imports = [
     'app.ui.claude_overlay',
     'app.ui.assistant_page',
     'app.core.agent_runner',
+    'app.core.codex_runner',
     'app.core.agent_sessions',
     'app.version',
     

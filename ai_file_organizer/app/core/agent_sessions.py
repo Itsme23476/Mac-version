@@ -40,6 +40,7 @@ class SessionInfo:
     preview: str     # first user message, trimmed
     mtime: float     # last-modified epoch (recency / sort key)
     project: str     # basename of cwd, for grouping/display
+    agent: str = "claude"   # "claude" (~/.claude/projects) or "codex" (~/.codex/sessions, codex_runner)
 
     @property
     def when(self) -> str:

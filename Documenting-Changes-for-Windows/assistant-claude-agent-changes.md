@@ -605,3 +605,103 @@ yourself, the Mac side can't see it.
   (the user's login is untouched), and fails if the detection is removed. Missing = the SDK's own
   `_find_cli` comes up empty. The card test checks the button opens Terminal with exactly the official
   commands (the launch is captured, not run).
+
+### 8l. Codex as a second agent + "Primary agent" switch + automatic hand-over (Mac, 2026-11-05): **BOTH platforms (logic); a few per-platform bits marked below**
+- What the user gets:
+  - Assistant tab: **Primary agent: [Claude Code | Codex]** (persisted as `settings.assistant_agent`). fn + ⌃,
+    typed notch tasks and Run start new chats on the primary. A chat stays with the agent that started it.
+  - **Automatic hand-over:** if the agent can't run because it isn't installed, is signed out, or is **out of
+    usage on the plan**, the SAME turn re-runs on the other agent. A brand-new chat simply runs there. A
+    continued chat can't carry its memory across, so the other agent starts a new chat with a recap of the
+    last 3 exchanges. The notch says "Claude Code is out of usage — switching to Codex". One hand-over per
+    turn (no ping-pong), never after Stop.
+  - An agent that failed is skipped for new chats: 5 min after install/sign-in problems, 30 min after an
+    out-of-usage error (`AssistantPage._down`). The mark is cleared when it works again or when the user
+    clicks its setup button.
+  - If BOTH can't run, the card shows the one the user can fix ("Set up / Sign in to Codex →"). If both are
+    out of usage, it shows both reset times with no button (status "Out of usage").
+  - Rail: Codex chats get a ">_" icon and a small "Codex" tag. Claude chats are unchanged.
+  - Notch card: the model pill lists the focused chat's agent's models. For Codex these come from Codex's
+    own `~/.codex/models_cache.json` (visibility "list", by priority), e.g. GPT-6-Astra / GPT-5.6-Sol /
+    Terra / Luna. Each agent's model and effort are saved separately (`assistant_codex_model`,
+    `assistant_codex_effort`). The "Open in Claude" button reads "Open in Codex" for Codex chats.
+  - Voice routing: Claude's warm router when Claude is usable; otherwise `classify_with_codex`, a cold
+    `codex exec --ephemeral` that takes about 4–5 s.
+- Engine: new `app/core/codex_runner.py`. `CodexRunner` has the same callbacks as `AgentRunner`, so the
+  notch, rail and Details render it unchanged.
+  - `codex exec --json --skip-git-repo-check --ignore-user-config` plus:
+    - `-m model`;
+    - `-c model_reasoning_effort="…"`;
+    - `-i <screenshot>` per image;
+    - `-- <prompt>` (the `--` matters: `-i` takes several values and would swallow the prompt).
+  - New chat: `codex exec …`. Follow-up: `codex exec resume … -- <id> <prompt>`. Resume has no `-s`/`-C`, so
+    the sandbox goes in via `-c` and the folder via the subprocess cwd.
+  - Bypass on → `--dangerously-bypass-approvals-and-sandbox`. Off → `-c sandbox_mode="workspace-write"`
+    (edits inside the task folder only, no network). Codex never asks for approval, so there are no
+    Approve/Deny cards with Codex.
+  - `--ignore-user-config` is like Claude's `setting_sources=[]`: the user's Codex MCP servers, hooks and
+    notify don't run inside Filect tasks. The ChatGPT login (auth.json) still applies.
+  - JSONL events → `Step`s:
+    - `thread.started` → session id;
+    - `agent_message` → text;
+    - `command_execution` → Bash tool + result (output and exit code);
+    - `file_change` → one Write per file, with the file's content read after the change;
+    - `web_search`, `mcp_tool_call`, `todo_list`;
+    - `turn.completed` → `on_result(id, 0.0)`;
+    - `turn.failed` → error.
+  - Read stderr continuously, or Codex blocks on a full pipe. Set the line limit to 16 MB, because one
+    command's output arrives as a single JSON line.
+  - Setup errors (`AgentSetupError(kind, agent)` in agent_runner):
+    - Missing = `codex` isn't on PATH, using the login-shell PATH from `use_login_path`.
+    - Signed out = `codex login status` exits 1. It takes ~20 ms. A signed-out `exec` would instead retry
+      401s for ~30 s.
+    - Out of usage = Codex's own wording matched by regex: "usage limit", "out of credits",
+      "quota exceeded", "spend cap". "try again at …" is kept.
+  - Claude out of usage: `AssistantMessage.error` is `"rate_limit"` or `"billing_error"`; its text ("You've
+    hit your limit · resets 3pm") is kept.
+  - Stop: SIGINT, then the worker's force-cancel kills the process. An interrupted run returns quietly
+    (→ "Stopped by you").
+  - Past chats: `list_codex_sessions(workspace)` reads `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. The
+    first line is `session_meta` with id and cwd; the user/agent/command/file items are `event_msg
+    item_completed`. `load_codex_transcript(id)` returns the same steps format as Claude's
+    `load_transcript`.
+  - Setup button (`open_codex_setup`): Terminal runs OpenAI's official installer
+    `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh` (only if missing;
+    `NON_INTERACTIVE` skips its "Start Codex now?" prompt, which would take over the window). Then it runs
+    `codex login` (ChatGPT in the browser, then exits) and `codex login status` → "✓ All set" or "didn't
+    finish".
+  - Open in Codex (`open_in_codex`): Terminal → `cd <chat folder> && codex resume <id>`.
+- Verified on Mac (codex-cli 0.153.3):
+  - Real tasks through the app's own worker: command + file write, follow-up continuing the same chat,
+    Stop in 0.3 s.
+  - A real signed-out Claude (empty `CLAUDE_CONFIG_DIR`) handed the task to Codex, which finished it.
+  - Codex routed voice correctly.
+  - The installer ran from Filect's script in a throwaway HOME with a bare PATH (6 s, 0.166.0). Filect
+    found it with no restart and moved on to "Sign in".
+  - The sign-in reached OpenAI's "Sign in to Codex with ChatGPT" page. The approval click was left to the
+    user; the cancel branch says "didn't finish".
+  - Open in Codex reopened the chat with both turns.
+- **Windows** (check each; don't assume):
+  - Install: the Codex binary references `https://chatgpt.com/codex/install.ps1`. Confirm it on OpenAI's
+    Codex docs, then run it in a new PowerShell window, with the same NON_INTERACTIVE idea if it supports
+    it.
+  - Stop: `send_signal(SIGINT)` doesn't work for asyncio subprocesses on Windows. Use
+    `proc.terminate()` there, or start the process with `CREATE_NEW_PROCESS_GROUP` and send
+    `CTRL_BREAK_EVENT`.
+  - Sandbox: check that `workspace-write` works on Windows. Codex's Windows sandbox has its own setup
+    ("set up elevated agent sandbox"). If it isn't available, consider defaulting to read-only plus a
+    clear message.
+  - Paths: sessions live under `%USERPROFILE%\.codex\sessions`. `_shell_cmd` unwraps `zsh -lc`; on Windows
+    the command shape differs (PowerShell), so show it raw.
+  - asyncio subprocesses need the Proactor loop on Windows (the default since Python 3.8; the worker's
+    `new_event_loop()` gets it).
+- Tests: `tests/test_codex_agent.py` covers:
+  - Claude usage detection;
+  - primary + hand-over + recap + once-per-turn + no-hand-over-on-Stop;
+  - the both-unavailable card and the Codex setup button (launch captured);
+  - Codex models / Open in Codex / rail badge;
+  - three REAL runs (task + follow-up + Stop, signed-out-Claude → Codex, Codex routing).
+
+  It stubs `settings._save_config` so the user's settings are never written. `tests/test_claude_setup.py`
+  now marks Codex unusable, because otherwise a missing Claude correctly hands over instead of showing the
+  card.

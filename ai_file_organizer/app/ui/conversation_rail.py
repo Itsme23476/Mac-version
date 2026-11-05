@@ -110,10 +110,11 @@ def _matches(query: str, *fields) -> bool:
     return all(w in hay for w in query.lower().split())
 
 
-def _row_icon(status: str, px: int = 18):
+def _row_icon(status: str, px: int = 18, agent: str = "claude"):
     """A row's round icon (VoiceOS-style): the Claude logo if one is bundled, else a soft lavender
-    circle; a small badge marks a chat that's working (purple) / waiting on you (amber) / failed (red)."""
-    from PySide6.QtGui import QPixmap, QPainter, QColor, QRadialGradient
+    circle — a Codex chat gets a light terminal mark instead; a small badge marks a chat that's working
+    (purple) / waiting on you (amber) / failed (red)."""
+    from PySide6.QtGui import QPixmap, QPainter, QColor, QRadialGradient, QFont
     from PySide6.QtCore import QRectF
     from app.ui.claude_overlay import _load_logo
     pm = QPixmap(px * 2, px * 2)
@@ -121,8 +122,18 @@ def _row_icon(status: str, px: int = 18):
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing, True)
-    logo = _load_logo(px)
-    if logo is not None:
+    logo = _load_logo(px) if agent != "codex" else None
+    if agent == "codex":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(236, 236, 240))
+        p.drawEllipse(QRectF(0.5, 0.5, px - 1, px - 1))
+        f = QFont()
+        f.setPixelSize(int(px * 0.5))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(17, 17, 20))
+        p.drawText(QRectF(0, 0, px, px - 1), Qt.AlignCenter, ">_")
+    elif logo is not None:
         p.drawPixmap(0, 0, px, px, logo)
     else:
         g = QRadialGradient(px * .35, px * .3, px * .8)
@@ -171,7 +182,7 @@ class _RailRow(QFrame):
     icon badge + the tooltip). Clickable."""
     clicked = Signal()
 
-    def __init__(self, title, status, when, focused, parent=None):
+    def __init__(self, title, status, when, focused, agent="claude", parent=None):
         super().__init__(parent)
         self.setObjectName("railRow")
         lay = QHBoxLayout(self)
@@ -183,10 +194,15 @@ class _RailRow(QFrame):
         self._title = QLabel()
         self._title.setStyleSheet("color:#EDEDED;font-size:12.5px;font-weight:500;")
         lay.addWidget(self._title, 1)
+        self._tag = QLabel("Codex")              # which agent runs this chat (Claude = the default, no tag)
+        self._tag.setStyleSheet("color:#9A9AA6;font-size:10px;font-weight:600;padding:0 5px;"
+                                "border:1px solid rgba(255,255,255,0.16);border-radius:6px;")
+        self._tag.setVisible(False)
+        lay.addWidget(self._tag, 0, Qt.AlignVCenter)
         self._state = None
-        self.set_state(title, status, when, focused)
+        self.set_state(title, status, when, focused, agent)
 
-    def set_state(self, title, status, when, focused):
+    def set_state(self, title, status, when, focused, agent="claude"):
         """Update in place — the rail REUSES rows (rebuilding ~70 styled rows took ~60ms of UI freeze on
         every agent step and twice when a task finished). Only what changed is touched."""
         label = _STATUS.get(status, _STATUS["working"])[1]
@@ -199,19 +215,22 @@ class _RailRow(QFrame):
         else:                                    # finished / past: just when
             sub = _ago(when)
         title = title or "Untitled"
-        self.setToolTip(f"{title}\n{sub}")
-        old = self._state or (None, None, None)
+        codex = agent == "codex"
+        self.setToolTip(f"{title}\n{sub}" + (" · Codex" if codex else ""))
+        old = self._state or (None, None, None, None)
         if focused != old[2]:                    # stylesheet parsing is the costly part — only on change
             bg = "rgba(124,77,255,0.20)" if focused else "transparent"
             self.setStyleSheet(
                 f"QFrame#railRow{{background:{bg};border:none;border-radius:10px;}}"
                 "QFrame#railRow:hover{background:rgba(255,255,255,0.07);} "
                 "QFrame#railRow QLabel{background:transparent;border:none;}")
-        if status != old[1]:
-            self._icon.setPixmap(_row_icon(status))
-        if title != old[0]:
-            self._title.setText(self._title.fontMetrics().elidedText(title, Qt.ElideRight, RAIL_W - TAB_W - 66))
-        self._state = (title, status, focused)
+        if status != old[1] or agent != old[3]:
+            self._icon.setPixmap(_row_icon(status, agent=agent))
+            self._tag.setVisible(codex)
+        if title != old[0] or agent != old[3]:
+            room = RAIL_W - TAB_W - 66 - (44 if codex else 0)    # the Codex tag takes its share
+            self._title.setText(self._title.fontMetrics().elidedText(title, Qt.ElideRight, room))
+        self._state = (title, status, focused, agent)
 
     def mousePressEvent(self, e):
         self.clicked.emit()
@@ -354,10 +373,11 @@ class ConversationRail(QWidget):
             for kind, obj in items:
                 k = (kind, obj.key if kind == "session" else obj.id)
                 row = self._row_cache.get(k)
+                agent = getattr(obj, "agent", "claude")
                 if kind == "session":
-                    args = (obj.title, obj.status, obj.started_at, obj.key == focused_key)
+                    args = (obj.title, obj.status, obj.started_at, obj.key == focused_key, agent)
                 else:
-                    args = (obj.title, "recent", obj.mtime, False)
+                    args = (obj.title, "recent", obj.mtime, False, agent)
                 if row is None:
                     row = self._row_cache[k] = _RailRow(*args)
                     if kind == "session":

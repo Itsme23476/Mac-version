@@ -154,9 +154,11 @@ class AgentWorker(QObject):
     done = Signal(str)                       # key
 
     def __init__(self, key: str, cwd: str, prompt: str, resume: str | None = None, bypass: bool = False,
-                 model: str | None = None, effort: str | None = None, images: list | None = None):
+                 model: str | None = None, effort: str | None = None, images: list | None = None,
+                 agent: str = "claude"):
         super().__init__()
         self.key = key
+        self._agent = agent                   # "claude" → AgentRunner, "codex" → CodexRunner
         self._cwd = cwd
         self._prompt = prompt
         self._images = list(images or [])     # fn + ⌃ + Space screenshots for this turn
@@ -212,8 +214,11 @@ class AgentWorker(QObject):
             loop.call_soon_threadsafe(fut.set_result, approved)
 
     async def _go(self):
-        from app.core.agent_runner import AgentRunner
-        runner = AgentRunner(
+        if self._agent == "codex":
+            from app.core.codex_runner import CodexRunner as Runner
+        else:
+            from app.core.agent_runner import AgentRunner as Runner
+        runner = Runner(
             self._cwd,
             on_step=lambda s: self.step.emit(self.key, s),
             on_approval=self._on_approval,
@@ -265,6 +270,10 @@ import itertools as _itertools
 _session_keys = _itertools.count(1)
 
 
+def _other_agent(agent: str) -> str:
+    return "codex" if agent == "claude" else "claude"
+
+
 class AgentSession:
     """One live (or just-finished) agent conversation: its worker thread plus all the state the notch
     and the left rail render from. `AssistantPage` keeps a registry of these and shows ("focuses") one
@@ -272,9 +281,13 @@ class AgentSession:
 
     `feed_lines` mirrors the notch Details feed so we can repaint it when this session is re-focused.
     """
-    def __init__(self, key, cwd, prompt, title, bypass, model, effort, resume=None):
+    def __init__(self, key, cwd, prompt, title, bypass, model, effort, resume=None, agent="claude"):
         import time
         self.key = key
+        self.agent = agent                   # "claude" / "codex" — a chat stays with the agent running it
+        self.fallback_to = None              # set when this agent can't run → _on_done hands the turn over
+        self.fell_back = False               # this turn already switched agents once (never ping-pong)
+        self.first_error = ""                # the first agent's reason, if the other one fails too
         self.cwd = cwd
         self.prompt = prompt                 # this turn's input (seeds the Details feed)
         self.title = title                   # short conversation name (notch bubble + rail row + notif)
@@ -325,12 +338,16 @@ class AssistantPage(QWidget):
         self._recent = []            # past voice-agent chats on disk (rail history); see _load_recent
         self._all_sessions = []      # cached list for in-memory search filtering
         self._loader_thread = None
-        try:                           # model + reasoning effort (picked on the notch card, persisted)
+        try:                           # primary agent + each agent's model/effort (notch card, persisted)
             from app.core.settings import settings as _s
-            self._model = _s.assistant_model or "opus"      # a real model is always selected (no Auto)
-            self._effort = _s.assistant_effort or "high"
+            self._primary = _s.assistant_agent if _s.assistant_agent in ("claude", "codex") else "claude"
+            self._models = {"claude": [_s.assistant_model or "opus", _s.assistant_effort or "high"],
+                            "codex": [_s.assistant_codex_model or "", _s.assistant_codex_effort or "high"]}
         except Exception:
-            self._model, self._effort = "opus", "high"
+            self._primary = "claude"
+            self._models = {"claude": ["opus", "high"], "codex": ["", "high"]}
+        self._down = {}              # agent -> (why, until): found unusable lately (not set up / out of usage)
+        self._view_agent = None      # the agent the notch card shows right now (its models on the pill)
         self._build()
         self._load_sessions()
         self._voice_routed.connect(self._on_voice_routed)
@@ -399,6 +416,55 @@ class AssistantPage(QWidget):
     def _any_running(self) -> bool:
         return any(s.running for s in self._sessions.values())
 
+    # ---- which agent: Claude Code or Codex ----
+    def _agent_ok(self, agent: str) -> bool:
+        """False while `agent` is known unusable (not set up / out of usage) — see _on_error."""
+        import time
+        d = self._down.get(agent)
+        return d is None or time.time() >= d[1]
+
+    def _pick_agent(self) -> str:
+        """A new chat's agent: your primary, unless it's known unusable right now and the other isn't."""
+        other = _other_agent(self._primary)
+        return other if not self._agent_ok(self._primary) and self._agent_ok(other) else self._primary
+
+    def _model_for(self, agent: str):
+        m, e = self._models.get(agent) or ["", ""]
+        return (m or None), (e or None)
+
+    def _set_view_agent(self, agent: str):
+        """The notch card shows `agent`: its models on the pill, "Open in Claude/Codex"."""
+        if agent == self._view_agent:
+            return
+        try:
+            ov = self._ensure_notch()                # (creating it shows your primary first)
+            if agent == self._view_agent:
+                return
+            self._view_agent = agent
+            models = None
+            if agent == "codex":
+                from app.core.codex_runner import codex_models
+                models = codex_models()
+            ov.set_agent(agent, models)
+            ov.set_model_effort(*self._models[agent])
+        except Exception as e:
+            _trace(f"notch agent switch failed: {e}")
+
+    def _set_primary(self, agent: str):
+        """The Assistant tab's "Primary agent" switch: who fn + ⌃ and new chats go to."""
+        if agent not in ("claude", "codex") or agent == self._primary:
+            return
+        self._primary = agent
+        _trace(f"primary agent -> {agent}")
+        try:
+            from app.core.settings import settings as _s
+            _s.assistant_agent = agent
+            _s._save_config()
+        except Exception:
+            pass
+        if self._focused is None:                  # a blank card now offers the new primary's models
+            self._set_view_agent(self._pick_agent())
+
     # ---- ambient notch overlay (purely additive; never breaks the tab flow) ----
     def _ensure_notch(self):
         if self._overlay is not None:
@@ -413,18 +479,16 @@ class AssistantPage(QWidget):
         ov.stop_clicked.connect(self._on_stop_task)
         ov.submit_text.connect(lambda t: self.run_voice_task(t, source="typed"))   # typed = same routing
         ov.collapsed.connect(self._on_notch_collapsed)
-        ov.setup_requested.connect(self._open_claude_setup)
-        try:
-            ov.set_model_effort(self._model, self._effort)   # reflect the saved choice on the pill
-        except Exception:
-            pass
+        ov.setup_requested.connect(self._open_agent_setup)
         self._overlay = ov
+        self._set_view_agent(self._pick_agent())          # reflect the saved choice on the pill
         return ov
 
     def _on_notch_dismissed(self):
         """✕ on the notch clears the focus pointer — the next voice command starts fresh. The
         conversation itself keeps running (and stays in the rail), reopenable by clicking its row."""
         self._focused_key = None
+        self._set_view_agent(self._pick_agent())
 
     def _on_notch_collapsed(self):
         """The notch tucked away. The chat you last SENT a request in stays — reopening the notch shows
@@ -442,6 +506,7 @@ class AssistantPage(QWidget):
         else:
             self._focused_key = None
             self._notch("rest_idle")
+            self._set_view_agent(self._pick_agent())
         self._refresh_rail()
 
     def _on_stop_task(self):
@@ -464,13 +529,16 @@ class AssistantPage(QWidget):
             sess.worker.cancel()            # forceful: cancel the task -> closes client -> kills subprocess
 
     def _on_model_changed(self, model: str, effort: str):
-        """Model/effort picked on the notch card — persist it; applies to the next task/turn."""
-        self._model = model or ""
-        self._effort = effort or ""
+        """Model/effort picked on the notch card — for the agent the card shows; persisted, applies to
+        that agent's next new task."""
+        agent = self._view_agent or self._primary
+        self._models[agent] = [model or "", effort or ""]
         try:
             from app.core.settings import settings as _s
-            _s.assistant_model = self._model
-            _s.assistant_effort = self._effort
+            if agent == "codex":
+                _s.assistant_codex_model, _s.assistant_codex_effort = self._models[agent]
+            else:
+                _s.assistant_model, _s.assistant_effort = self._models[agent]
             _s._save_config()
         except Exception:
             pass
@@ -494,14 +562,20 @@ class AssistantPage(QWidget):
             pass
 
     def _open_task(self):
-        """Notch "View task →" — open the ACTUAL Claude Code conversation in the Claude desktop app
-        via its resume deep link (claude://resume?session=<id> -> importCliSession). Falls back to
-        Filect's own Assistant tab when there's no session id (e.g. the task errored before saving)."""
-        sid = (self._focused.session_id if self._focused else "") or ""
+        """Notch "Open in Claude/Codex →" — open the ACTUAL conversation: Claude Code's in the Claude
+        desktop app via its resume deep link (claude://resume?session=<id> -> importCliSession), a Codex
+        one in Codex itself (Terminal, `codex resume <id>`). Falls back to Filect's own Assistant tab
+        when there's no session id (e.g. the task errored before saving)."""
+        sess = self._focused
+        sid = (sess.session_id if sess else "") or ""
         if sid:
             try:
-                import subprocess
-                subprocess.Popen(["open", f"claude://resume?session={sid}"])
+                if sess.agent == "codex":
+                    from app.core.codex_runner import open_in_codex
+                    open_in_codex(sid, sess.cwd)
+                else:
+                    import subprocess
+                    subprocess.Popen(["open", f"claude://resume?session={sid}"])
                 return
             except Exception:
                 pass
@@ -532,8 +606,8 @@ class AssistantPage(QWidget):
         title = QLabel("Assistant")
         title.setStyleSheet("font-size: 22px; font-weight: 700; background: transparent; border: none;")
         root.addWidget(title)
-        sub = QLabel("Speak or type a task and a local Claude agent does it. Keep talking to follow "
-                     "up on the same conversation, or pick one on the left to continue.")
+        sub = QLabel("Speak or type a task and a local agent (Claude Code or Codex) does it. Keep talking "
+                     "to follow up on the same conversation, or pick one on the left to continue.")
         sub.setWordWrap(True)
         sub.setStyleSheet("color: #8A8A92; font-size: 12.5px; background: transparent; border: none;")
         root.addWidget(sub)
@@ -604,7 +678,9 @@ class AssistantPage(QWidget):
         self.bypass_check.setStyleSheet("color:#B26A00; font-size:12px; background:transparent; border:none;")
         self.bypass_check.setToolTip(
             "When on, the agent edits files and runs commands without asking you first — like "
-            "Claude Code's bypass-permissions mode. Only use it for tasks you trust.")
+            "Claude Code's bypass-permissions mode. Only use it for tasks you trust.\n"
+            "Codex never asks: on = full access; off = it can only change files in the task's folder, "
+            "with no internet.")
         try:                                   # restore the saved choice (persists across restarts)
             from app.core.settings import settings as _s
             self.bypass_check.setChecked(bool(_s.assistant_bypass))
@@ -612,6 +688,37 @@ class AssistantPage(QWidget):
             pass
         self.bypass_check.toggled.connect(self._save_bypass)
         root.addWidget(self.bypass_check)
+
+        # Primary agent: who fn + ⌃ and new chats go to. A chat stays with the agent that started it;
+        # if this one isn't set up or is out of usage, the other takes over on its own.
+        arow = QHBoxLayout()
+        arow.setSpacing(0)
+        alab = QLabel("Primary agent")
+        alab.setStyleSheet("color:#7A7A90; font-size:12px; font-weight:600; background:transparent; border:none;")
+        arow.addWidget(alab)
+        arow.addSpacing(10)
+        self.agent_btns = {}
+        for i, (key, name) in enumerate((("claude", "Claude Code"), ("codex", "Codex"))):
+            b = QPushButton(name)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(28)
+            r = "border-top-left-radius:8px; border-bottom-left-radius:8px;" if i == 0 else \
+                "border-top-right-radius:8px; border-bottom-right-radius:8px; border-left:none;"
+            b.setStyleSheet(
+                f"QPushButton {{ background:transparent; color:#8A8A92; border:1px solid {c['border']}; {r} "
+                "padding:0 14px; font-size:12px; font-weight:600; } "
+                f"QPushButton:checked {{ background:#D97757; color:white; border-color:#D97757; }}")
+            b.clicked.connect(lambda _=False, k=key: self._on_agent_btn(k))
+            self.agent_btns[key] = b
+            arow.addWidget(b)
+        self.agent_btns[self._primary].setChecked(True)
+        arow.addSpacing(12)
+        ahint = QLabel("If it isn't set up or runs out of usage, the other one takes over.")
+        ahint.setStyleSheet("color:#8A8A92; font-size:11.5px; background:transparent; border:none;")
+        arow.addWidget(ahint)
+        arow.addStretch(1)
+        root.addLayout(arow)
 
         # Approval card (hidden until the agent asks)
         self.card = QFrame()
@@ -782,6 +889,12 @@ class AssistantPage(QWidget):
         self.session_list.clearSelection()
         self.task_input.clear()
         self.task_input.setFocus()
+        self._set_view_agent(self._pick_agent())
+
+    def _on_agent_btn(self, key: str):
+        for k, b in self.agent_btns.items():        # exactly one is on (clicking the on one keeps it on)
+            b.setChecked(k == key)
+        self._set_primary(key)
 
     def _save_bypass(self, on: bool):
         """Persist the Bypass toggle so it survives app restarts (the user flagged it resetting)."""
@@ -813,7 +926,7 @@ class AssistantPage(QWidget):
         import re
         cands, seen_ids, seen_titles = [], set(), set()
 
-        def _add(kind, key, sid, cwd, title):
+        def _add(kind, key, sid, cwd, title, agent="claude"):
             t = (title or "").strip()
             k = t.lower()[:60]
             if (sid and sid in seen_ids) or (k and k in seen_titles):
@@ -822,18 +935,23 @@ class AssistantPage(QWidget):
                 seen_ids.add(sid)
             if k:
                 seen_titles.add(k)
-            cands.append({"kind": kind, "key": key, "id": sid, "cwd": cwd, "title": t})
+            cands.append({"kind": kind, "key": key, "id": sid, "cwd": cwd, "title": t, "agent": agent})
 
         for s in sorted(self._sessions.values(), key=lambda s: s.started_at, reverse=True):
-            _add("live", s.key, s.session_id or s.resume, s.cwd, s.title)
+            _add("live", s.key, s.session_id or s.resume, s.cwd, s.title, s.agent)
         try:
             from app.core.agent_sessions import list_sessions
             from app.core.agent_sessions import _TITLE_FILLERS as _fill
             saved = [ss for ss in list_sessions(limit=500) if not self._junk_session(ss)]
         except Exception:
             saved, _fill = [], set()
+        try:                                               # + your Codex chats (Filect's workspace)
+            from app.core.codex_runner import list_codex_sessions
+            saved = sorted(saved + list_codex_sessions(DEFAULT_WORKSPACE), key=lambda s: s.mtime, reverse=True)
+        except Exception:
+            pass
         for ss in saved[:12]:                              # recent real conversations (newest first)
-            _add("saved", None, ss.id, ss.cwd, ss.title)
+            _add("saved", None, ss.id, ss.cwd, ss.title, getattr(ss, "agent", "claude"))
         words = {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
                  if len(w) > 2 and w not in _fill}
         scored = []
@@ -844,7 +962,7 @@ class AssistantPage(QWidget):
                 scored.append((sc, ss.mtime, ss))
         scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
         for _, _, ss in scored[:6]:
-            _add("saved", None, ss.id, ss.cwd, ss.title)
+            _add("saved", None, ss.id, ss.cwd, ss.title, getattr(ss, "agent", "claude"))
         return cands
 
     def run_voice_task(self, text: str, source: str = "voice", images=None):
@@ -869,11 +987,20 @@ class AssistantPage(QWidget):
         self._notch("flash")
         import threading
 
+        claude_ok = self._agent_ok("claude")
+
         def worker():
             cand_titles = [c["title"] for c in candidates]
             try:
-                from app.core.intent_router import IntentRouter
-                d = IntentRouter.get().classify(text, focused_title, cand_titles)
+                try:                                   # Claude routes when it's available (fast, warm)…
+                    if not claude_ok:
+                        raise RuntimeError("Claude Code unavailable right now")
+                    from app.core.intent_router import IntentRouter
+                    d = IntentRouter.get().classify(text, focused_title, cand_titles)
+                except Exception as e:                 # …else Codex does (slower, but it decides)
+                    _trace(f"router: Claude couldn't route ({e}) -> Codex")
+                    from app.core.intent_router import classify_with_codex
+                    d = classify_with_codex(text, focused_title, cand_titles)
                 intent, idx, task = d["intent"], d["index"], d["task"]
             except Exception as e:                     # safe fallback: continue focused, else new
                 intent, idx, task = ("FOLLOW_UP" if focused_title else "NEW"), None, text
@@ -910,10 +1037,11 @@ class AssistantPage(QWidget):
             if c["kind"] == "live" and c["key"] in self._sessions:
                 _continue(self._sessions[c["key"]], c["title"])
             else:
-                self._resume_target = {"id": c["id"], "cwd": c["cwd"], "title": c["title"]}
-                _trace(f"  -> resume saved '{c['title']}' id={(c['id'] or '')[:8]}")
+                self._resume_target = {"id": c["id"], "cwd": c["cwd"], "title": c["title"],
+                                       "agent": c.get("agent", "claude")}
+                _trace(f"  -> resume saved '{c['title']}' id={(c['id'] or '')[:8]} ({c.get('agent')})")
                 self._notch("set_title", f"↳ continuing “{c['title']}”")
-                self.run_task(task, resume=c["id"], cwd=c["cwd"], images=images)
+                self.run_task(task, resume=c["id"], cwd=c["cwd"], images=images, agent=c.get("agent"))
             return
         # NEW (or anything unresolved) → a fresh conversation.
         _trace("  -> NEW conversation")
@@ -937,11 +1065,12 @@ class AssistantPage(QWidget):
         self.run_task(self.task_input.toPlainText(), self.bypass_check.isChecked())
 
     def run_task(self, prompt: str, bypass: bool | None = None,
-                 resume: str | None = None, cwd: str | None = None, images=None):
+                 resume: str | None = None, cwd: str | None = None, images=None, agent: str | None = None):
         """Start a NEW agent conversation, or continue an existing one. New tasks each get their own
         AgentSession and run CONCURRENTLY. Resuming REUSES that conversation's AgentSession: queued as
-        a follow-up if it's still running, or a fresh turn on the same claude session if it's idle — so
-        one conversation is one entry for its whole life. Shared by Run, voice, and the left rail."""
+        a follow-up if it's still running, or a fresh turn on the same session if it's idle — so one
+        conversation is one entry for its whole life. Shared by Run, voice, and the left rail.
+        A new chat goes to your primary agent (see _pick_agent); a continued one stays with its own."""
         prompt = (prompt or "").strip()
         if not prompt:
             return
@@ -950,6 +1079,7 @@ class AssistantPage(QWidget):
         if resume is None and self._resume_target:        # browser selection is the resume target
             resume = self._resume_target["id"]
             cwd = cwd or self._resume_target["cwd"]
+            agent = agent or self._resume_target.get("agent")
         if resume:
             existing = self._session_by_claude_id(resume)
             if existing is not None and existing.running:  # still working → queue a follow-up on it
@@ -971,8 +1101,10 @@ class AssistantPage(QWidget):
         display = ((self._resume_target or {}).get("title") or generate_title(prompt)) if resume \
             else generate_title(prompt)               # new task names itself locally (instant, no AI)
         key = f"s{next(_session_keys)}"
-        sess = AgentSession(key, workdir, prompt, display, bypass,
-                            self._model or None, self._effort or None, resume=resume)
+        # A saved chat continues with ITS agent (Claude's store unless it says Codex); a new one: primary.
+        agent = (agent or "claude") if resume else self._pick_agent()
+        sess = AgentSession(key, workdir, prompt, display, bypass, *self._model_for(agent),
+                            resume=resume, agent=agent)
         sess.images = list(images or [])
         self._sessions[key] = sess
         self._start_worker(sess, resume)
@@ -984,18 +1116,22 @@ class AssistantPage(QWidget):
         sess.prompt, sess.bypass, sess.images = prompt, bypass, list(images or [])
         sess.status, sess.result_text, sess.cost, sess.approval_req = "working", "", 0.0, None
         sess.started_at, sess.duration = time.time(), None
+        sess.fallback_to, sess.fell_back, sess.first_error = None, False, ""   # each turn may hand over once
         _trace(f"restart {sess.key} '{sess.title}' (new turn, resume={sess.session_id or sess.resume})")
         self._start_worker(sess, sess.session_id or sess.resume)
 
-    def _start_worker(self, sess, resume_id):
-        """Build + start this session's worker thread, wire its signals (keyed by session), focus it."""
+    def _start_worker(self, sess, resume_id, seed: bool = True, send: str | None = None):
+        """Build + start this session's worker thread, wire its signals (keyed by session), focus it.
+        `seed=False`: the same turn handed to the other agent — the notch already shows it. `send`: what
+        the agent gets, if not just the prompt (the hand-over adds a recap)."""
         if self.task_input.toPlainText().strip() != sess.prompt:
             self.task_input.setPlainText(sess.prompt)   # reflect a voice task in the box
         self.run_btn.setEnabled(False)
         self.status_label.setText("Running…")
         sess.thread = QThread(self)
-        sess.worker = AgentWorker(sess.key, sess.cwd, sess.prompt, resume=resume_id, bypass=sess.bypass,
-                                  model=sess.model, effort=sess.effort, images=sess.images)
+        sess.worker = AgentWorker(sess.key, sess.cwd, send or sess.prompt, resume=resume_id,
+                                  bypass=sess.bypass, model=sess.model, effort=sess.effort,
+                                  images=sess.images, agent=sess.agent)
         sess.worker.moveToThread(sess.thread)
         sess.thread.started.connect(sess.worker.run)
         # BOUND methods, never lambdas: Qt queues a bound-method slot to its receiver's (main) thread,
@@ -1007,11 +1143,15 @@ class AssistantPage(QWidget):
         sess.worker.result.connect(self._on_result)
         sess.worker.error.connect(self._on_error)
         sess.worker.done.connect(self._on_done)
-        _trace(f"spawn {sess.key} '{sess.title}' cwd={sess.cwd} resume={resume_id or '(new)'} "
-               f"model={sess.model} bypass={sess.bypass} | live now: {sorted(self._sessions)}")
+        _trace(f"spawn {sess.key} '{sess.title}' agent={sess.agent} cwd={sess.cwd} "
+               f"resume={resume_id or '(new)'} model={sess.model} bypass={sess.bypass} | "
+               f"live now: {sorted(self._sessions)}")
         sess.thread.start()
         self._last_sent_key = sess.key           # a request was sent here → the notch's "last chat"
-        self._focus(sess.key, fresh=True)
+        if seed:
+            self._focus(sess.key, fresh=True)
+        else:
+            self._refresh_rail(sess.key)
 
     # ---- focus: which conversation the notch shows (and voice follow-ups target) ----
     def _focus(self, key: str, fresh: bool = False):
@@ -1031,6 +1171,7 @@ class AssistantPage(QWidget):
                 self._append(f"🖼 {len(sess.images)} screenshot(s) attached\n")
             if sess.bypass:
                 self._append("⚡ Bypass mode: running without approval prompts.\n")
+            self._set_view_agent(sess.agent)
             self._notch("present")                  # resets the notch Details feed
             self._notch("set_task", sess.prompt, sess.title)   # bubble = what you asked, bold = its name
             self._notch("show_working", "Starting…", "")
@@ -1049,6 +1190,7 @@ class AssistantPage(QWidget):
         sess = self._focused
         if sess is None:
             return
+        self._set_view_agent(sess.agent)
         self._notch("present")
         self._notch("load_state", sess.title, list(sess.feed_lines), sess.status,
                     sess.last_action, sess.approval_req, sess.result_text, sess.cost,
@@ -1101,7 +1243,8 @@ class AssistantPage(QWidget):
         sess = self._sessions[key]
         self._focus(key)
         self._notch("open_full")
-        self._resume_target = {"id": sess.session_id or sess.resume, "cwd": sess.cwd, "title": sess.title}
+        self._resume_target = {"id": sess.session_id or sess.resume, "cwd": sess.cwd, "title": sess.title,
+                               "agent": sess.agent}
 
     def _on_recent_clicked(self, sid):
         """A past chat from disk — load its transcript off the UI thread (_on_transcript_loaded shows it).
@@ -1117,8 +1260,12 @@ class AssistantPage(QWidget):
 
         def worker():
             try:
-                from app.core.agent_sessions import load_transcript
-                data = load_transcript(sid, info.cwd)
+                if getattr(info, "agent", "claude") == "codex":
+                    from app.core.codex_runner import load_codex_transcript
+                    data = load_codex_transcript(sid)
+                else:
+                    from app.core.agent_sessions import load_transcript
+                    data = load_transcript(sid, info.cwd)
             except Exception:
                 data = None
             try:
@@ -1142,8 +1289,8 @@ class AssistantPage(QWidget):
         lines, prompt, result, entries = self._transcript_view(data) if data else ([], "", "", [])
         prompt = prompt or info.preview or info.title
         sess = AgentSession(f"s{next(_session_keys)}", info.cwd, prompt, info.title,
-                            self.bypass_check.isChecked(), self._model or None, self._effort or None,
-                            resume=sid)
+                            self.bypass_check.isChecked(), *self._model_for(getattr(info, "agent", "claude")),
+                            resume=sid, agent=getattr(info, "agent", "claude"))
         sess.status, sess.result_text = "done", result
         sess.feed_lines = lines or [f"▸ {prompt}"]
         sess.entries = entries or [{"id": "0", "kind": "user", "text": prompt}]
@@ -1191,6 +1338,11 @@ class AssistantPage(QWidget):
                 # + chats continued outside the workspace (a resumed project chat), else they'd
                 # vanish from the rail after a restart
                 found = list_sessions(limit=300, cwd=DEFAULT_WORKSPACE) + remembered_sessions(DEFAULT_WORKSPACE)
+                try:                                # + Codex chats in the workspace (badged on the rail)
+                    from app.core.codex_runner import list_codex_sessions
+                    found += list_codex_sessions(DEFAULT_WORKSPACE)
+                except Exception:
+                    pass
                 seen, items = set(), []
                 for s in found:
                     if s.id not in seen and not self._junk_session(s):   # the rail keeps the last 30 days
@@ -1348,9 +1500,13 @@ class AssistantPage(QWidget):
         sess = self._sessions.get(key)
         if sess is None:
             return
-        if session_id:                              # real claude id — so a follow-up continues it
+        self._down.pop(sess.agent, None)            # it just worked — usable again
+        if session_id:                              # real session id — so a follow-up continues it
             sess.session_id = session_id
-            if sess.cwd and _os.path.normpath(sess.cwd) != _os.path.normpath(DEFAULT_WORKSPACE):
+            # ponytail: Claude chats only — a Codex chat outside the workspace (a hand-over in a project
+            # folder) drops off the rail after a restart; scan its folder too if that ever matters.
+            if sess.agent == "claude" and sess.cwd and \
+                    _os.path.normpath(sess.cwd) != _os.path.normpath(DEFAULT_WORKSPACE):
                 try:                                # a chat continued in another project: keep it
                     from app.core.agent_sessions import remember_session   # on the rail after restarts
                     remember_session(session_id, sess.cwd)
@@ -1375,18 +1531,36 @@ class AssistantPage(QWidget):
                 _trace(f"NOTIFY done: {sess.title!r}")
                 _notify("Filect · task finished", sess.title or "Done")
 
-    def _open_claude_setup(self, kind: str):
-        """The card's "Set up / Sign in to Claude Code" button: Terminal with the official setup."""
+    def _open_agent_setup(self, agent: str, kind: str):
+        """The card's "Set up / Sign in to Claude Code | Codex" button: Terminal with the official setup."""
+        self._down.pop(agent, None)                 # you're fixing it — try it first again next time
         try:
-            from app.core.agent_runner import open_claude_setup
-            open_claude_setup(kind)
+            if agent == "codex":
+                from app.core.codex_runner import open_codex_setup as open_setup
+            else:
+                from app.core.agent_runner import open_claude_setup as open_setup
+            open_setup(kind)
         except Exception as e:
-            _trace(f"Claude Code setup failed to open: {e}")
+            _trace(f"{agent} setup failed to open: {e}")
 
     def _on_error(self, key, msg: str):
         sess = self._sessions.get(key)
         if sess is None:
             return
+        from app.core.agent_runner import AGENT_NAMES, setup_info, setup_kind
+        info = setup_info(msg)
+        if info and info[0] == sess.agent:          # this agent can't run: not set up / out of usage
+            import time
+            self._down[sess.agent] = (info[1], time.time() + (1800 if info[1] == "usage" else 300))
+            other = _other_agent(sess.agent)
+            if not sess.fell_back and not sess.stopping and self._agent_ok(other):
+                sess.fallback_to, sess.first_error = other, msg      # _on_done hands this turn over
+                _trace(f"{key} {sess.agent} unavailable ({info[1]}) -> handing the turn to {other}")
+                return
+            if sess.fell_back and sess.first_error:  # BOTH can't run: show the one you can fix
+                fixable = [m for m in (sess.first_error, msg) if setup_kind(m) in ("install", "signin")]
+                msg = fixable[0] if fixable else f"{sess.first_error}\n{msg}"   # both out: both reset times
+                info = setup_info(msg)
         sess.status, sess.result_text = "error", msg
         _trace(f"{key} ERROR '{sess.title}': {msg}")
         if key == self._focused_key:
@@ -1399,8 +1573,49 @@ class AssistantPage(QWidget):
         if key != self._focused_key or not _app_is_active():
             self._last_notified_key = key
             _trace(f"NOTIFY error: {sess.title!r}")
-            from app.core.agent_runner import setup_kind
-            _notify("Filect · set up Claude Code" if setup_kind(msg) else "Filect · task failed", msg)
+            name = AGENT_NAMES[info[0]] if info else ""
+            title = ("Filect · task failed" if not info else f"Filect · {name} is out of usage"
+                     if info[1] == "usage" else f"Filect · set up {name}")
+            _notify(title, msg)
+
+    def _switch_agent(self, sess, agent: str):
+        """Hand this turn to the other agent (the first isn't set up / is out of usage). A new chat just
+        runs there; a continued one can't take its memory across, so the other agent starts a new chat
+        with a recap of this one. From then on the chat stays with `agent`."""
+        from app.core.agent_runner import AGENT_NAMES, setup_kind
+        old = sess.agent
+        why = "is out of usage" if setup_kind(sess.first_error) == "usage" else "isn't set up"
+        send = sess.prompt
+        if sess.session_id or sess.resume:
+            send = self._recap(sess, AGENT_NAMES[old]) + sess.prompt
+        sess.agent, sess.fell_back = agent, True
+        sess.model, sess.effort = self._model_for(agent)
+        sess.session_id, sess.resume = "", None
+        sess.status, sess.result_text = "working", ""
+        cue = f"{AGENT_NAMES[old]} {why} — switching to {AGENT_NAMES[agent]}"
+        _trace(f"{sess.key} -> {agent}: {cue} (recap={send != sess.prompt})")
+        sess.last_action = cue
+        self._start_worker(sess, None, seed=False, send=send)
+        if sess.key == self._focused_key:
+            self._set_view_agent(agent)
+            self._append(f"↪ {cue}")
+            self._notch("show_working", cue, "")
+
+    @staticmethod
+    def _recap(sess, old_name: str, turns: int = 3) -> str:
+        """The chat's last few exchanges, for the agent picking it up."""
+        pairs, cur = [], None
+        for e in sess.entries:
+            if e.get("kind") == "user":
+                cur = [e.get("text", ""), ""]
+                pairs.append(cur)
+            elif e.get("kind") == "text" and cur is not None:
+                cur[1] = e.get("text", "")
+        pairs = pairs[:-1][-turns:]                  # the last one is this turn's request
+        body = "\n\n".join(f"Me: {u[:600]}\n{old_name}: {(r or '(no reply)')[:900]}" for u, r in pairs) \
+            or f"(a chat called “{sess.title}”)"
+        return (f"[You're picking up a conversation that started in {old_name}, which can't continue it "
+                f"right now. Earlier in it:\n\n{body}\n\nCarry on from there.]\n\n")
 
     def _on_done(self, key):
         sess = self._sessions.get(key)
@@ -1425,6 +1640,10 @@ class AssistantPage(QWidget):
                 self.status_label.setText("Stopped")
                 self._notch("show_done", "", 0.0, "", "Stopped by you.")
             self._refresh_rail(key)
+            return
+        if sess.fallback_to:                        # this agent couldn't run → the other takes the turn
+            agent, sess.fallback_to = sess.fallback_to, None
+            self._switch_agent(sess, agent)
             return
         # A follow-up was spoken while this was running — send it now, continuing the SAME chat.
         if sess.pending_followup:

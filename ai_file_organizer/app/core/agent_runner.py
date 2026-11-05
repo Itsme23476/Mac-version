@@ -92,20 +92,26 @@ def _tool_detail(name: str, inp: dict) -> str:
     return ""
 
 
+def wait_for_file(path: str, timeout: float = 5.0) -> bool:
+    """screen_ink writes a screenshot's PNG in the background; it appears atomically when complete."""
+    import time
+    deadline = time.time() + timeout
+    while not os.path.exists(path) and time.time() < deadline:
+        time.sleep(0.05)
+    return os.path.exists(path)
+
+
 def _image_block(path: str) -> Optional[dict]:
     """A screenshot as an image content block for Claude: downscaled to 1568px on the long edge
     (Claude's sweet spot; full resolution stays on disk) and PNG-encoded so red marks stay crisp —
     JPEG only if the PNG is still too big for the API's per-image limit."""
     import base64
-    import time
     try:
         from PySide6.QtCore import QBuffer, QIODevice, Qt
         from PySide6.QtGui import QImage
     except Exception:
         return None
-    deadline = time.time() + 5               # screen_ink writes the PNG in the background; it appears
-    while not os.path.exists(path) and time.time() < deadline:     # atomically when complete
-        time.sleep(0.05)
+    wait_for_file(path)
     img = QImage(path)                       # QImage (not QPixmap) is fine off the UI thread
     if img.isNull():
         logger.warning("[agent] screenshot unreadable: %s", path)
@@ -131,18 +137,25 @@ def user_message(prompt: str, images) -> dict:
     are and where each is saved ("[screenshot: …]" lines — Claude can reuse the file, and the notch
     shows them as thumbnails when the chat is reopened)."""
     imgs = [b for b in (_image_block(p) for p in images) if b]
-    n = len(imgs)
-    if n == 1:
-        blocks, note = imgs, "Screenshot of my screen attached"
+    if len(imgs) == 1:
+        blocks = imgs
     else:
         # several (receive mode): label each image so "[screenshot 2]" in my words points at it
         blocks = [x for i, b in enumerate(imgs, 1) for x in ({"type": "text", "text": f"[screenshot {i}]"}, b)]
+    text = screenshot_text(prompt, images, len(imgs))
+    return {"type": "user", "message": {"role": "user", "content": blocks + [{"type": "text", "text": text}]},
+            "parent_tool_use_id": None}
+
+
+def screenshot_text(prompt: str, images, n: int) -> str:
+    """Your words + what the n attached screenshots are and where each is saved (shared with Codex)."""
+    if n == 1:
+        note = "Screenshot of my screen attached"
+    else:
         note = (f"{n} screenshots of my screen attached, in order — [screenshot N] in my words marks "
                 "where I took each")
     note += " — anything marked in red is what I'm pointing at."
-    text = f"{prompt}\n\n({note})\n" + "\n".join(f"[screenshot: {p}]" for p in images)
-    return {"type": "user", "message": {"role": "user", "content": blocks + [{"type": "text", "text": text}]},
-            "parent_tool_use_id": None}
+    return f"{prompt}\n\n({note})\n" + "\n".join(f"[screenshot: {p}]" for p in images)
 
 
 def _steps_from_message(msg) -> list:
@@ -179,18 +192,43 @@ class ApprovalRequest:
 SETUP_INSTALL = ("Claude Code isn't installed on this Mac yet. The Assistant runs on Claude Code with "
                  "your Claude plan. Set it up once (about a minute), then try again.")
 SETUP_SIGNIN = "Claude Code isn't signed in yet. Sign in once with your Claude account, then try again."
+CODEX_SETUP_INSTALL = ("Codex isn't installed on this Mac yet. The Assistant can run on Codex with your "
+                       "ChatGPT plan. Set it up once (about a minute), then try again.")
+CODEX_SETUP_SIGNIN = "Codex isn't signed in yet. Sign in once with your ChatGPT account, then try again."
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+_SETUP = {("claude", "install"): SETUP_INSTALL, ("claude", "signin"): SETUP_SIGNIN,
+          ("codex", "install"): CODEX_SETUP_INSTALL, ("codex", "signin"): CODEX_SETUP_SIGNIN}
+
+
+def usage_message(agent: str, detail: str = "") -> str:
+    """Out of usage on the plan — the agent's own words carry when it resets."""
+    return f"{AGENT_NAMES[agent]} is out of usage for now. {(detail or '').strip()}".strip()
 
 
 class AgentSetupError(Exception):
-    """Claude Code is missing ("install") or signed out ("signin"). str() is the friendly message."""
-    def __init__(self, kind: str):
-        self.kind = kind
-        super().__init__(SETUP_INSTALL if kind == "install" else SETUP_SIGNIN)
+    """The agent can't run right now: missing ("install"), signed out ("signin") or out of usage on the
+    plan ("usage"). str() is the friendly message — the Assistant switches to the other agent."""
+    def __init__(self, kind: str, agent: str = "claude", detail: str = ""):
+        self.kind, self.agent = kind, agent
+        super().__init__(usage_message(agent, detail) if kind == "usage" else _SETUP[(agent, kind)])
+
+
+def setup_info(message: str):
+    """(agent, kind) for an AgentSetupError's message, else None (a real task error)."""
+    m = (message or "").strip()
+    for key, text in _SETUP.items():
+        if m == text:
+            return key
+    for agent, name in AGENT_NAMES.items():
+        if m.startswith(f"{name} is out of usage"):
+            return agent, "usage"
+    return None
 
 
 def setup_kind(message: str) -> str:
-    """"install" / "signin" for a setup message, else "" (a real task error)."""
-    return {SETUP_INSTALL: "install", SETUP_SIGNIN: "signin"}.get((message or "").strip(), "")
+    """"install" / "signin" / "usage" for a setup message, else "" (a real task error)."""
+    info = setup_info(message)
+    return info[1] if info else ""
 
 
 def open_claude_setup(kind: str) -> str:
@@ -301,10 +339,17 @@ class AgentRunner:
                 else:
                     await client.query(prompt)
                 async for msg in client.receive_response():
-                    if isinstance(msg, AssistantMessage) and getattr(msg, "error", None) == "authentication_failed":
+                    err = getattr(msg, "error", None) if isinstance(msg, AssistantMessage) else None
+                    if err == "authentication_failed":
                         # Signed out: Claude Code answers "Not logged in · Please run /login" as if it were
                         # the reply — that showed as a DONE card. It's a setup step, not an answer.
                         raise AgentSetupError("signin")
+                    if err in ("rate_limit", "billing_error"):
+                        # Out of usage ("You've hit your limit · resets 3pm") — also not an answer: the
+                        # Assistant hands the task to the other agent.
+                        from claude_agent_sdk import TextBlock
+                        said = " ".join(b.text for b in msg.content if isinstance(b, TextBlock))
+                        raise AgentSetupError("usage", detail=said)
                     for st in _steps_from_message(msg):
                         self.on_step(st)
                     if isinstance(msg, ResultMessage):

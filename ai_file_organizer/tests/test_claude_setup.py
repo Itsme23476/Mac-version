@@ -77,6 +77,9 @@ def test_card_shows_the_fix():
     subprocess.Popen = lambda args, **k: opened.append(args)    # capture: don't really open Terminal
     try:
         page = ap.AssistantPage(_MW())
+        # With Codex usable the task would just move to Codex (test_codex_agent); here it can't.
+        import time
+        page._down["codex"] = ("install", time.time() + 999)
         sess = ap.AgentSession("s1", tempfile.mkdtemp(), "build me a site", "Build Site", True, "opus", "high")
         page._sessions = {"s1": sess}
         page._focused_key = page._last_sent_key = "s1"

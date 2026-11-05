@@ -51,6 +51,10 @@ class Settings:
         #   cards (Claude Code's bypass-permissions). Persisted so it survives app restarts.
         self.assistant_model: str = ''   # Assistant: '' = default, else 'opus'/'sonnet'/'haiku'
         self.assistant_effort: str = ''  # Assistant: '' = default, else low/medium/high/xhigh/max
+        self.assistant_agent: str = 'claude'   # Assistant: primary agent, 'claude' or 'codex' (the other
+        #   one takes over automatically when this one isn't set up or is out of usage)
+        self.assistant_codex_model: str = ''   # Assistant: Codex model ('' = Codex's top model)
+        self.assistant_codex_effort: str = 'high'  # Assistant: Codex reasoning effort
         self.assistant_router_model: str = 'opus'  # Assistant: model for the voice intent router
         #   (new-vs-follow-up-vs-resume). Opus by default; latency is spawn-bound so the model is
         #   ~latency-neutral. Change to 'sonnet'/'haiku' to spend less of your Max limits on routing.
@@ -315,6 +319,13 @@ class Settings:
         ae = data.get('assistant_effort')
         if isinstance(ae, str):
             self.assistant_effort = ae.strip()
+        ag = data.get('assistant_agent')
+        if ag in ('claude', 'codex'):
+            self.assistant_agent = ag
+        for k in ('assistant_codex_model', 'assistant_codex_effort'):
+            v = data.get(k)
+            if isinstance(v, str):
+                setattr(self, k, v.strip())
         mw = data.get('dictation_mute_while_recording')
         if isinstance(mw, bool):
             self.dictation_mute_while_recording = mw
@@ -428,6 +439,9 @@ class Settings:
             'assistant_model': self.assistant_model,
             'assistant_router_model': self.assistant_router_model,
             'assistant_effort': self.assistant_effort,
+            'assistant_agent': self.assistant_agent,
+            'assistant_codex_model': self.assistant_codex_model,
+            'assistant_codex_effort': self.assistant_codex_effort,
             'dictation_mute_while_recording': self.dictation_mute_while_recording,
             'theme': self.theme,
             'auto_index_downloads': self.auto_index_downloads,

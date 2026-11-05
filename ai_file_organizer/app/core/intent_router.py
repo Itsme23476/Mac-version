@@ -63,7 +63,7 @@ class IntentRouter:
     @classmethod
     def get(cls) -> "IntentRouter":
         with cls._init_lock:
-            if cls._instance is None:
+            if cls._instance is None or cls._instance._failed:   # e.g. Claude Code installed since
                 model = "opus"
                 try:
                     from app.core.settings import settings as _s
@@ -78,6 +78,7 @@ class IntentRouter:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client = None
         self._calls = 0
+        self._failed = False                   # the warm client couldn't start (no Claude Code)
         self._ready = threading.Event()
         self._call_lock = threading.Lock()     # one warm conversation → serialize classifications
         self._thread = threading.Thread(target=self._run, daemon=True, name="filect-intent-router")
@@ -90,8 +91,10 @@ class IntentRouter:
             self._loop.run_until_complete(self._open())
             self._ready.set()
             self._loop.run_forever()
-        except Exception as e:                 # a dead loop just means callers fall back to NEW
+        except Exception as e:                 # a dead loop just means callers fall back (Codex / NEW)
             logger.warning("[intent-router] loop failed to start: %s", e)
+            self._failed = True
+            self._ready.set()                  # don't make classify() wait 8s to find out
 
     async def _open(self):
         from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
@@ -129,7 +132,7 @@ class IntentRouter:
         """Return {"intent": NEW|FOLLOW_UP|RESUME, "index": int|None, "task": str}.
         Raises on not-ready / timeout / parse failure — the caller falls back safely."""
         import time
-        if not self._ready.wait(8.0) or self._loop is None:
+        if not self._ready.wait(8.0) or self._loop is None or self._failed:
             raise RuntimeError("intent router not ready")
         prompt = _build_prompt(text, focused_title, candidate_titles)
         t0 = time.time()
@@ -141,6 +144,18 @@ class IntentRouter:
                     time.time() - t0, text, focused_title, candidate_titles,
                     d["intent"], d["index"], d["task"])
         return d
+
+
+def classify_with_codex(text: str, focused_title: str | None, candidate_titles: list[str]) -> dict:
+    """The same decision made by Codex — when Claude Code isn't available. A cold `codex exec` per call
+    (slower than the warm Claude client, several seconds). Raises on any failure, like classify()."""
+    import time
+    from app.core.codex_runner import complete
+    t0 = time.time()
+    d = _parse(complete(_SYS, _build_prompt(text, focused_title, candidate_titles)), text)
+    logger.info("[intent-router] codex %.2fs | heard=%r -> %s idx=%s task=%r",
+                time.time() - t0, text, d["intent"], d["index"], d["task"])
+    return d
 
 
 def warm_up():
