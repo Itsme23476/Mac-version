@@ -842,3 +842,14 @@ yourself, the Mac side can't see it.
     - busy: warned, force-closed after 6 s, same chat, reopened on the stopped task.
   - **Windows:** close via the app's window/`taskkill` without `/F` first, then `/F` only after "Close
     anyway". Check the Codex Windows app's quit dialog the same way.
+- **Codex reopens only once you're quiet on the chat (2026-11-05): BOTH platforms.**
+  - Before, Filect reopened the Codex app the moment its turn ended. Codex takes ~10 s to load the chat;
+    a follow-up sent in that window had Filect writing the chat while Codex loaded it. Codex then showed
+    "This is open in another app — Retry" and never retried by itself.
+  - Now `_reopen_codex_when_quiet` waits `REOPEN_QUIET_MS` (15 s). Every new turn on that chat bumps
+    `sess.reopen_token` in `_start_worker`, which cancels the pending reopen; it's rescheduled when that
+    turn ends.
+  - Live:
+    - Close + follow-up 1, then follow-up 2 right away: it ran with Codex still closed, same chat.
+    - Codex reopened 14.5 s after it, with **no banner**, all three answers in one chat.
+    - Follow-up 3 found Codex had taken the chat back and auto-closed it again (Always).

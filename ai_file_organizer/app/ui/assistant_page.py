@@ -270,6 +270,12 @@ import itertools as _itertools
 _session_keys = _itertools.count(1)
 
 
+# After Filect closed the Codex app to continue a chat, it reopens it once you've been quiet on that chat
+# this long. Right away raced your next follow-up: Codex takes ~10s to load the chat, saw Filect writing
+# it, showed "This is open in another app — Retry" and never retried. ponytail: tunable.
+REOPEN_QUIET_MS = 15000
+
+
 def _other_agent(agent: str) -> str:
     return "codex" if agent == "claude" else "claude"
 
@@ -301,6 +307,7 @@ class AgentSession:
         self.awaiting_codex = False          # the card is asking: close Codex / new chat
         self.busy_in_app = None              # (chat id, title) the Codex app was working on when asked
         self.reopen_codex = None             # chat to reopen the Codex app on once this turn is done
+        self.reopen_token = 0                # a newer turn cancels a pending reopen (see _reopen_codex_when_quiet)
         self.cwd = cwd
         self.prompt = prompt                 # this turn's input (seeds the Details feed)
         self.title = title                   # short conversation name (notch bubble + rail row + notif)
@@ -1223,6 +1230,7 @@ class AssistantPage(QWidget):
             self.task_input.setPlainText(sess.prompt)   # reflect a voice task in the box
         self.run_btn.setEnabled(False)
         self.status_label.setText("Running…")
+        sess.reopen_token += 1                      # a pending Codex reopen waits for this turn too
         sess.thread = QThread(self)
         sess.worker = AgentWorker(sess.key, sess.cwd, send or sess.prompt, resume=resume_id,
                                   bypass=sess.bypass, model=sess.model, effort=sess.effort,
@@ -1785,6 +1793,23 @@ class AssistantPage(QWidget):
             self._last_notified_key = sess.key
             _notify("Filect · needs you", f"{sess.title}: this chat is open in the Codex app")
 
+    def _reopen_codex_when_quiet(self, sess):
+        """Reopen the Codex app on the chat after REOPEN_QUIET_MS without a new turn on it."""
+        sess.reopen_token += 1
+        tok = sess.reopen_token
+        _trace(f"{sess.key} will reopen the Codex app on {sess.reopen_codex[:8]} in {REOPEN_QUIET_MS // 1000}s "
+               "unless you follow up")
+        QTimer.singleShot(REOPEN_QUIET_MS, lambda k=sess.key, t=tok: self._reopen_codex_now(k, t))
+
+    def _reopen_codex_now(self, key, tok):
+        sess = self._sessions.get(key)
+        if sess is None or not sess.reopen_codex or sess.reopen_token != tok or sess.running:
+            return                                  # you followed up meanwhile — it reopens after that one
+        from app.core.codex_runner import open_codex_chat
+        _trace(f"{key} reopening the Codex app on {sess.reopen_codex[:8]}")
+        open_codex_chat(sess.reopen_codex)
+        sess.reopen_codex = None
+
     def _on_codex_choice(self, which: str, always: bool):
         sess = self._focused
         if sess is None or not sess.awaiting_codex:
@@ -1936,10 +1961,7 @@ class AssistantPage(QWidget):
             self._ask_or_close_codex(sess)
             return
         if sess.reopen_codex and not sess.pending_followup:   # we closed the Codex app for this: bring it back
-            from app.core.codex_runner import open_codex_chat
-            _trace(f"{key} reopening the Codex app on {sess.reopen_codex[:8]}")
-            open_codex_chat(sess.reopen_codex)
-            sess.reopen_codex = None
+            self._reopen_codex_when_quiet(sess)               # …once you've stopped talking to this chat
         if sess.fallback_to:                        # this agent couldn't run → the other takes the turn
             agent, sess.fallback_to = sess.fallback_to, None
             self._switch_agent(sess, agent)

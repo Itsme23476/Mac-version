@@ -380,7 +380,11 @@ def test_open_in_codex_desktop_app():
 def _held_page():
     page = _page(primary="codex")
     started = []
-    page._start_worker = lambda s, rid, seed=True, send=None: started.append((s.key, s.agent, rid, send))
+
+    def fake_start(s, rid, seed=True, send=None):          # like the real one: a new turn delays a reopen
+        s.reopen_token += 1
+        started.append((s.key, s.agent, rid, send))
+    page._start_worker = fake_start
     s = ap.AgentSession("o1", tempfile.mkdtemp(), "make it darker", "Coffee Site", True, None, "low",
                         resume="01a1-old", agent="codex")
     s.session_id = "01a1-old"
@@ -435,9 +439,16 @@ def test_chat_held_by_codex_app_close_and_continue():
             (calls, started)                                       # idle Codex: a normal quit, never forced
         assert settings.assistant_codex_close_app is True, "'Always' is remembered"
         assert "continuing this chat" in ov._tool_chip.text()
+        ap.REOPEN_QUIET_MS = 300
         s.thread = None
-        page._on_done("o1")                                        # the turn ended → Codex comes back on it
-        assert calls[-1] == ("reopen", "01a1-old"), calls
+        page._on_done("o1")                                        # the turn ended…
+        assert ("reopen", "01a1-old") not in calls, "not right away — that raced your next follow-up"
+        page.run_task("and the footer too", resume="01a1-old")     # …you follow up within the quiet time
+        _pump(lambda: False, 0.6)
+        assert ("reopen", "01a1-old") not in calls, "a follow-up in the quiet time postpones the reopen"
+        s.thread = None
+        page._on_done("o1")                                        # that one ended too → quiet → reopen
+        assert _pump(lambda: ("reopen", "01a1-old") in calls, 3), calls
 
         # Always on + Codex idle → no question at all
         calls.clear(); started.clear()
@@ -455,7 +466,7 @@ def test_chat_held_by_codex_app_close_and_continue():
         assert calls[0] == ("close", "01a1-old", True), "busy Codex ignores a normal quit: 'anyway' forces it"
         s.thread = None
         page._on_done("o1")
-        assert calls[-1] == ("reopen", "01a1-app"), "reopen on the task it stopped, so you can continue it"
+        assert _pump(lambda: calls[-1] == ("reopen", "01a1-app"), 3), "reopen on the task it stopped"
 
         # Codex didn't close → asks again, nothing runs
         calls.clear(); started.clear()
@@ -465,9 +476,10 @@ def test_chat_held_by_codex_app_close_and_continue():
         _pump(lambda: s.awaiting_codex and "didn't close" in ov._error_label.text(), 5)
         assert started == [] and "didn't close" in ov._error_label.text()
     finally:
+        ap.REOPEN_QUIET_MS = 15000
         cr.codex_app_busy, cr.release_chat, cr.open_codex_chat, settings.assistant_codex_close_app = real
-    print("'Close Codex and continue here' → same chat, Codex reopens on it; Always remembered; busy → warned "
-          "+ reopens on the stopped task; didn't close → asks  OK")
+    print("'Close Codex and continue here' → same chat, Codex reopens on it once you're quiet (a follow-up "
+          "postpones it); Always remembered; busy → warned + reopens on the stopped task; didn't close → asks  OK")
 
 
 def test_codex_chats_from_codex_index():
