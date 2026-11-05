@@ -480,3 +480,30 @@ yourself, the Mac side can't see it.
 - Test (real macOS): `tests/test_hide_on_close_real.py`. NSWindow `performClose:` (the red button)
   hides the window with the app still running; "Open Filect" shows it; "Quit Filect" exits 0. On
   Windows, test with the title-bar X and the tray menu.
+
+### 8g. The card stays open + shows the WHOLE answer (Mac, 2026-11-05): **BOTH platforms (Qt)**
+- **Bug 1:** a voice task's card tucked itself away about 3.5s after the last step (the flash timer),
+  usually BEFORE the answer arrived, and a finished task didn't bring it back. You never saw the answer.
+  - Fix: `ClaudeOverlay.present()` sets `_pinned = True`, so the card stays open while the task runs
+    and after it's done, until YOU close it (click the card, ✕ or Esc). `_end_flash` and
+    `_maybe_collapse` already respect `_pinned`.
+  - `assistant_page._on_result` (when the task is focused and not stopped) and `_on_error` now call
+    `_notch("open_full")` after showing the result. The answer comes up even if you tucked the card
+    away mid-run.
+- **Bug 2:** the done card showed only the FIRST PARAGRAPH of Claude's reply (`details_view.summary`).
+  For "list some files" that was just "These are the most recent items in your Downloads folder:"
+  with the list cut off, so you had to open Details.
+  - Fix: the done page's QLabel is replaced by a QTextBrowser, `_done_view`. It shows Claude's whole
+    final reply through `details_view._md` (markdown with lists and bold), plus the deliverable's
+    Open link and a muted "✓ Finished" line.
+  - Its height is measured per answer (`document().setTextWidth(DONE_TEXT_W)`; the ✓ column has a
+    fixed 16px width so the measurement is exact). It's clamped to `DONE_MAX_H` (280) and scrolls
+    beyond that.
+  - `_content_height()` uses the measured height for "done". Lists use `setIndentWidth(14)`, because
+    Qt's 40px default wastes the narrow card.
+  - `details_view.summary()` is deleted (it had no other users). The dark scrollbar CSS is shared as
+    `_SCROLLBAR_CSS`.
+- Test: `tests/test_details_view.py::test_done_card_shows_whole_answer_and_stays_open`. It uses the real
+  Downloads answer and checks: the card survives the flash timer with the mouse away; it reopens on the
+  result after being tucked; the whole list shows with no raw `**`; a click closes it; a long answer
+  scrolls. Checked that it fails with the old `present()`.

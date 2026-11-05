@@ -1365,6 +1365,8 @@ class AssistantPage(QWidget):
             self.status_label.setText(f"Done — saved as session {session_id[:8]}…" if session_id
                                       else "Done")
             self._notch("show_done", session_id, cost, sess.prompt, sess.result_text)
+            if not sess.stopping:
+                self._notch("open_full")        # the answer always comes up; stays until you close it
         self._refresh_rail(key)
         if not sess.stopping:                       # a user-initiated Stop isn't a "finished" event
             _play_chime(True)
@@ -1383,6 +1385,7 @@ class AssistantPage(QWidget):
             self._append(f"\n⚠ error: {msg}")
             self.status_label.setText("Error")
             self._notch("show_error", msg)
+            self._notch("open_full")            # like an answer: comes up, stays until you close it
         self._refresh_rail(key)
         _play_chime(False)
         if key != self._focused_key or not _app_is_active():

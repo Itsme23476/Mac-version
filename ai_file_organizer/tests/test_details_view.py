@@ -14,7 +14,7 @@ import os, sys, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, QPoint
 app = QApplication.instance() or QApplication([])
 
 from claude_agent_sdk import AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock
@@ -113,7 +113,7 @@ def test_render_actions():
     print("render: previews, sizes, Show full, Open / Open in browser / moved, ✗ reasons, diff, command, search, plan  OK")
 
 
-def test_deliverable_and_summary():
+def test_deliverable():
     p = _f("plan.md", "a b c")
     e = _entries(dict(kind="user", text="first"),
                  dict(kind="tool", tool="Write", input={"file_path": p, "content": "a b c"}, tool_id="w1"),
@@ -128,10 +128,7 @@ def test_deliverable_and_summary():
                   dict(kind="result", tool_id="w1", text="ok"))
     assert dv.deliverable(e2) == (p, "3 words")
     assert dv.final_reply(e) == "I **couldn't** save it.\n\nSecond paragraph."
-    assert dv.summary(dv.final_reply(e)) == "I couldn't save it."
-    s = dv.summary("word " * 200)
-    assert len(s) <= 281 and s.endswith("…") and not s.endswith(" …")
-    print("done card: deliverable = latest turn's successful write; summary = first paragraph, clean cut  OK")
+    print("done card: deliverable = latest turn's successful write; final reply = Claude's last message  OK")
 
 
 def test_overlay_links_and_done_card():
@@ -154,9 +151,9 @@ def test_overlay_links_and_done_card():
     ov._on_details_link(QUrl.fromLocalFile(essay))
     assert opened == [essay], opened
     ov.show_done("abcd1234", 0, "write me an essay", "")
-    label = ov._done_label.text()
-    assert "I wrote a 200-word essay" in label and "essay2.md" in label and "180 words" in label
-    assert f'href="{dv.file_url(essay)}"' in label and "Open ↗" in label
+    text, markup = ov._done_view.toPlainText(), ov._done_view.toHtml()
+    assert "I wrote a 200-word essay" in text and "essay2.md" in text and "180 words" in text
+    assert f'href="{dv.file_url(essay)}"' in markup and "Open ↗" in text
     print("overlay: entries drive Details, Show full/less + Open via the real link handler, done card links the file  OK")
 
 
@@ -181,14 +178,70 @@ def test_live_flow_through_page():
     d = ov._details_feed.toPlainText()
     assert "Wrote essay3.md · 180 words" in d and "Done — a 200-word essay" in d, d
     page._on_result("s1", "sid-123", 0.0)
-    assert "essay3.md" in ov._done_label.text() and "Open ↗" in ov._done_label.text()
+    assert "essay3.md" in ov._done_view.toPlainText() and "Open ↗" in ov._done_view.toPlainText()
     print("live: _on_step tool → result → text builds the rich Details; done card offers Open  OK")
+
+
+# The real answer from 2026-11-05 ("what files are in my Downloads?"): its first paragraph was only
+# the lead-in, so the old one-paragraph summary showed nothing useful.
+DOWNLOADS_REPLY = """These are the most recently modified items in your Downloads folder:
+
+**Images from Nov 4**
+- `free unlimited 2 softwaregent.png`
+- `Opus 5.5 free forever b softwaregent.png`
+
+**Folder from Nov 3**
+- `crtypto_trading/` (35 items)
+
+Most of the recent files are PNGs around 2–3 MB each. The whole folder uses about 86 GB."""
+
+
+def test_done_card_shows_whole_answer_and_stays_open():
+    """A voice task's card stays open while it runs and after it finishes, until YOU close it; the
+    finished card shows Claude's whole answer (formatted, scrolls when long), not its first line."""
+    real = co.QCursor
+    co.QCursor = type("C", (), {"pos": staticmethod(lambda: QPoint(5, 900))})   # mouse far away
+    try:
+        page = ap.AssistantPage(_MW())
+        sess = ap.AgentSession("s1", TMP, "what files are in my downloads", "Downloads", True, "opus", "high")
+        page._sessions = {"s1": sess}
+        page._focused_key = page._last_sent_key = "s1"         # as _start_worker marks a sent task
+        ov = page._ensure_notch()
+        page._notch("present"); page._notch("flash")             # what a voice task does
+        ov._end_flash(); ov._maybe_collapse()                     # the old auto-tuck, mouse away
+        assert not ov._minimized, "a running task's card must stay open until you close it"
+        sess.entries = []
+        dv.add_step(sess.entries, "user", text=sess.prompt)
+        page._on_step("s1", Step("text", text=DOWNLOADS_REPLY))
+        ov.minimize_panel()                                       # you tucked it away mid-run…
+        page._on_result("s1", "sid-dl", 0.0)                      # …the answer still comes up
+        page._on_done("s1")                                       # then the worker ends
+        assert not ov._minimized and ov._stack.currentWidget() is ov._page_done
+        text = ov._done_view.toPlainText()
+        assert "These are the most recently" in text and "crtypto_trading/" in text and "86 GB" in text, text
+        assert "**" not in text, "markdown must be rendered, not shown raw"
+        h_short = ov._done_view.maximumHeight()
+        assert 60 < h_short <= co.DONE_MAX_H, h_short
+        ov._end_flash(); ov._maybe_collapse()
+        assert not ov._minimized, "the answer stays up until you close it"
+        ov.mousePressEvent(type("E", (), {"accept": lambda self: None})())   # a click on the card
+        assert ov._minimized, "a click on the card closes it"
+        ov = co.ClaudeOverlay(); ov.rest_idle(); ov.present(); ov.open_full()
+        ov.show_done(task="x", result="line\n\n" * 120)              # a very long answer scrolls
+        for _ in range(5):
+            QApplication.processEvents()
+        assert ov._done_view.maximumHeight() == co.DONE_MAX_H
+        assert ov._done_view.verticalScrollBar().maximum() > 0, "long answers must scroll"
+    finally:
+        co.QCursor = real
+    print("done card: whole answer (formatted), stays open while running + after done until you close it  OK")
 
 
 if __name__ == "__main__":
     test_steps_from_real_sdk_messages()
     test_render_actions()
-    test_deliverable_and_summary()
+    test_deliverable()
     test_overlay_links_and_done_card()
     test_live_flow_through_page()
+    test_done_card_shows_whole_answer_and_stays_open()
     print("test_details_view OK")

@@ -74,6 +74,8 @@ WIN_TITLE = "Filect Assistant"   # unique — notch_panel finds the NSWindow by 
 # Deterministic content heights per state (no runtime layout measuring — that raced in organize).
 _STACK_H = {"working": 22, "needs_you": 116, "done": 118, "error": 56, "idle": 34}
 DETAILS_H = 166      # height of the live "Details" feed when expanded
+DONE_MAX_H = 280     # the finished answer shows in full up to this height, then scrolls
+DONE_TEXT_W = CARD_W - 32 - 26   # its width: card minus the column margins and the ✓ column
 TRANSCRIPT_H = 56    # the "what you said" bubble at the top of the card
 CTRL_H = 32          # persistent control row (model pill · Details · primary action)
 MODELPANEL_H = 170   # the inline "Model & effort" panel (model dropdown closed)
@@ -84,6 +86,13 @@ _MODEL_NAMES = {"opus": "Opus 5.5", "sonnet": "Sonnet 5.5", "haiku": "Haiku 5.5"
 _EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]       # slider index 0..4 ("" = Auto, off-slider)
 _EFFORT_NAMES = {"": "Auto", "low": "Low", "medium": "Medium",
                  "high": "High", "xhigh": "Extra high", "max": "Max"}
+
+# Dark scrollbar: unstyled, its track fell back to the app's LIGHT palette (a white strip).
+_SCROLLBAR_CSS = (
+    "QScrollBar:vertical { background: transparent; width: 6px; margin: 2px; }"
+    "QScrollBar::handle:vertical { background: rgba(255,255,255,0.18); border-radius: 3px; min-height: 24px; }"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
 
 FLASH_MS = 3500      # how long the pop-up stays open; each new step re-arms it (follows activity)
 
@@ -627,12 +636,7 @@ class ClaudeOverlay(QWidget):
         self._details_feed.setVisible(False)
         self._details_feed.setStyleSheet(
             f"QTextEdit {{ background: #111113; border: none; border-radius: 12px; "
-            f"color: {C['text_2']}; font-size: 11.5px; padding: 8px; }}"
-            # Dark scrollbar: unstyled, its track fell back to the app's LIGHT palette (a white strip).
-            "QScrollBar:vertical { background: transparent; width: 6px; margin: 2px; }"
-            "QScrollBar::handle:vertical { background: rgba(255,255,255,0.18); border-radius: 3px; min-height: 24px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
+            f"color: {C['text_2']}; font-size: 11.5px; padding: 8px; }}" + _SCROLLBAR_CSS)
         col.addWidget(self._details_feed)
 
         # Persistent control row: [model·effort pill]   [Details]  [primary action]
@@ -937,23 +941,36 @@ class ClaudeOverlay(QWidget):
         row = QHBoxLayout()
         row.setSpacing(10)
         glyph = QLabel("✓" if kind == "done" else "⚠")
+        glyph.setFixedWidth(16)                  # fixed, so the answer's width (DONE_TEXT_W) is exact
         glyph.setStyleSheet(
             f"color: {GREEN if kind == 'done' else RED}; font-size: 16px; font-weight: 700; "
             "background: transparent; border: none;")
         row.addWidget(glyph, 0, Qt.AlignTop)
-        label = QLabel("")
-        label.setWordWrap(True)
-        label.setStyleSheet(
-            f"color: {C['text']}; font-size: 13px; background: transparent; border: none;")
-        row.addWidget(label, 1)
-        lay.addLayout(row)
         if kind == "done":
-            self._done_label = label          # "Open in Claude" is the persistent primary button now
-            label.setTextFormat(Qt.RichText)  # carries the deliverable's Open link
-            label.setOpenExternalLinks(False)
-            label.linkActivated.connect(self._on_details_link)
+            # The ANSWER itself — Claude's whole final reply, formatted (lists, bold) — not a one-line
+            # summary (its first paragraph was often just "Here are the files:"). Scrolls past DONE_MAX_H.
+            view = QTextBrowser()
+            view.setReadOnly(True)
+            view.setOpenLinks(False)
+            view.anchorClicked.connect(self._on_details_link)   # the deliverable's Open link
+            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            view.document().setDefaultStyleSheet("p, li { white-space: pre-wrap; }")
+            view.document().setDocumentMargin(0)
+            view.document().setIndentWidth(14)   # Qt's default 40px list indent wastes a narrow card
+            view.setStyleSheet(
+                f"QTextEdit {{ background: transparent; border: none; color: {C['text']}; "
+                f"font-size: 13px; padding: 0; }}" + _SCROLLBAR_CSS)
+            view.setFixedHeight(_STACK_H["done"] - 4)
+            row.addWidget(view, 1)
+            self._done_view = view
         else:
+            label = QLabel("")
+            label.setWordWrap(True)
+            label.setStyleSheet(
+                f"color: {C['text']}; font-size: 13px; background: transparent; border: none;")
+            row.addWidget(label, 1)
             self._error_label = label
+        lay.addLayout(row)
         lay.addStretch(1)
         return pg
 
@@ -963,8 +980,9 @@ class ClaudeOverlay(QWidget):
         open briefly via flash, then tuck back. HOVER the notch to slide it open (VoiceOS-style, like
         the left rail); click the ⇣ pin to keep it open while you watch a task. Dismiss with ✕."""
         self._done_timer.stop()
-        # Default = NOT pinned → tucked at rest, revealed on hover. (Keeps whatever the user pinned;
-        # present never force-pins anymore — that was the old 'constantly up' behaviour.)
+        # A task keeps the card OPEN — while it runs and once it's done — until YOU close it (click
+        # the card, ✕ or Esc). 2026-11-05: the auto-tuck hid the answer before it arrived.
+        self._pinned = True
         self.set_state("working")
         self._set_status("Working", C["text_muted"])
         self._start_elapsed()        # reset the "Working m:ss" counter for this task
@@ -1241,20 +1259,25 @@ class ClaudeOverlay(QWidget):
             meta += f"  ·  saved {sid}…"
         # No $ figure: on the Claude subscription you're not charged per task — a dollar amount would
         # falsely imply a bill. (The token value is still in the [asst] trace if we need it.)
-        # Lead with what Claude GENERATED: its closing summary (first paragraph, cut at a word — not a
-        # hard 240-char chop), then the file the turn produced, one click from opening. Full output is
-        # in Details. Falls back to the prompt if there's no text.
+        # Lead with what Claude GENERATED: its whole final reply, formatted, then the file the turn
+        # produced, one click from opening. The step-by-step log stays in Details. Falls back to the
+        # prompt if there's no text.
         reply = details_view.final_reply(self._entries) if self._rich else ""
-        shown = details_view.summary(reply or self._result_text or self._task_text)
-        parts = [html.escape(shown)] if shown else []
+        body = reply or self._result_text or self._task_text
+        parts = [details_view._md(body)] if body else []
         made = details_view.deliverable_html(self._entries) if self._rich else ""
         if made:
-            parts.append(made)
-        parts.append(html.escape(meta))
-        self._done_label.setText("<br><br>".join(parts))
+            parts.append(f"<p>{made}</p>")
+        parts.append(f'<p style="color:{C["text_muted"]}; font-size:11.5px;">{html.escape(meta)}</p>')
+        view = self._done_view
+        view.setHtml("".join(parts))
+        view.ensurePolished()                     # the 13px stylesheet font must apply before measuring
+        doc = view.document()
+        doc.setTextWidth(DONE_TEXT_W)
+        view.setFixedHeight(max(24, min(DONE_MAX_H, int(doc.size().height()) + 2)))
+        view.verticalScrollBar().setValue(0)
         self._stack.setCurrentWidget(self._page_done)
-        # Stay up showing the result (pinned since the task started) — dismiss with ✕, or tuck it to
-        # a reopenable green pill with the ⇣ button. (If already tucked, it rests as the green pill.)
+        # Stays up showing the answer until you close it (present() pinned it).
         if not self._minimized:
             self._fit()
 
@@ -1622,6 +1645,8 @@ class ClaudeOverlay(QWidget):
 
     # -- sizing / anchoring ----------------------------------------------------
     def _content_height(self) -> int:
+        if self._state == "done":                 # the answer's measured height (see show_done)
+            return self._done_view.maximumHeight() + 4
         return _STACK_H.get(self._state, 90)
 
     def _fit(self) -> None:
@@ -1806,10 +1831,10 @@ if __name__ == "__main__":
     ov._on_deny()
     assert fired["deny"] == 1
 
-    # New behaviour: present() does NOT force-pin — the card tucks to the notch and reveals on hover.
+    # A task keeps the card open until the user closes it (2026-11-05): present() pins.
     ov._pinned = False
     ov.present()
-    assert ov._pinned is False, "present() must not force-pin (default = tucked, hover to reveal)"
+    assert ov._pinned is True, "a task must keep the card open until you close it"
     ov.restore_panel()                      # what a hover does
     ov.show_done("cc7618c9abcd", 0.1234, task="Build a site",
                  result="Subject: Partnership — Here is a short intro email you can send to brands.")
@@ -1817,7 +1842,7 @@ if __name__ == "__main__":
     assert not ov._done_timer.isActive(), "done must NOT auto-hide — it stays reopenable"
     assert ov._handle._state == "done"
     assert ov._handle._shows_at_rest(), "done nub visible at rest (the status sliver / hover target)"
-    assert "intro email" in ov._done_label.text(), "done card must show what Claude GENERATED"
+    assert "intro email" in ov._done_view.toPlainText(), "done card must show what Claude GENERATED"
     # Click the nub still pins it open (watch-this-task mode).
     ov.minimize_panel()
     assert ov._minimized is True

@@ -90,15 +90,6 @@ def size_label(path, content) -> str:
     return f"{n:,} line" + ("" if n == 1 else "s")
 
 
-def summary(text, limit=280) -> str:
-    """The first paragraph of a reply, markdown markers stripped, cut at a word boundary."""
-    para = next((p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()), "")
-    para = re.sub(r"[#*`>_]+", "", " ".join(para.split())).strip()
-    if len(para) <= limit:
-        return para
-    return para[:limit].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
-
-
 def open_label(path) -> str:
     return "Open in browser ↗" if os.path.splitext(path)[1].lower() in _WEB else "Open ↗"
 

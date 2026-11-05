@@ -233,7 +233,7 @@ def test_select_past_chat_shows_it_in_notch():
     ov = page._overlay
     assert ov._minimized is False, "selecting a conversation must OPEN the notch on it"
     assert ov._transcript.text() == "Build me a site"
-    assert "Made it blue." in ov._done_label.text(), ov._done_label.text()
+    assert "Made it blue." in ov._done_view.toPlainText(), ov._done_view.toPlainText()
     details = ov._details_feed.toPlainText()                          # the rich Details feed
     assert "Wrote index.html" in details and "Edited style.css" in details and "Made it blue." in details, details
     assert ov._timer_label.text() == "0:30", f"timer must be the real duration, got {ov._timer_label.text()!r}"
