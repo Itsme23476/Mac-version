@@ -46,8 +46,7 @@ def main():
     assert not ns.ignoresMouseEvents(), "ink layer is click-through while drawing"
     edge = _red_pixels(ns.windowNumber())                 # the red "you're drawing" edge alone
 
-    def ev(t, x, y):
-        flags = (1 << 23) | AppKit.NSEventModifierFlagControl          # fn + ⌃ held = the real gesture
+    def ev(t, x, y, flags=(1 << 23) | AppKit.NSEventModifierFlagControl):   # fn + ⌃ held = the gesture
         return AppKit.NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
             t, AppKit.NSMakePoint(x, y), flags, time.time(), ns.windowNumber(), None, 0, 1, 1.0)
 
@@ -59,8 +58,19 @@ def main():
     assert len(ink._strokes) == 1 and len(ink._strokes[0]) >= 10, f"⌃-drag dropped: {ink._strokes}"
     inked = _red_pixels(ns.windowNumber())
     assert inked > edge + 40, f"stroke not visible on screen: red px {edge} → {inked}"
+    # Receive mode + a right-click turned drawing on: nothing is held, a PLAIN left-drag must draw.
+    ink.clear(); _pump()
+    ink.set_drawing(True, "draw with left-click · right-click to capture · Esc cancels the drawing")
+    AppKit.NSApp.sendEvent_(ev(AppKit.NSEventTypeLeftMouseDown, 130, 30, 0))
+    for i in range(1, 11):
+        AppKit.NSApp.sendEvent_(ev(AppKit.NSEventTypeLeftMouseDragged, 130 - 10 * i, 30 + 10 * i, 0))
+    AppKit.NSApp.sendEvent_(ev(AppKit.NSEventTypeLeftMouseUp, 30, 130, 0))
+    _pump()
+    assert len(ink._strokes) == 1 and len(ink._strokes[0]) >= 10, f"plain left-drag dropped: {ink._strokes}"
+    plain = _red_pixels(ns.windowNumber())
+    assert plain > edge + 40, f"plain left-drag not visible on screen: red px {edge} → {plain}"
     ink.end()
-    print(f"test_ink_real_mouse OK  (⌃-drag drew a stroke; on-screen red px {edge} → {inked})")
+    print(f"test_ink_real_mouse OK  (⌃-drag and plain left-drag both drew; red px {edge} → {inked} / {plain})")
 
 
 if __name__ == "__main__":

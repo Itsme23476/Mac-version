@@ -489,7 +489,106 @@ def test_routing_and_details():
     print("routing: screenshots ride with new chats + queued follow-ups; Details shows thumbnails  OK")
 
 
+def test_right_click_tap():
+    """Real CGEvents through the real tap callback: a right-click while talking to Claude (fn + ⌃ held,
+    or receive mode) → on_right, swallowed (no context menu). Every other right-click passes through,
+    and ⌃ + LEFT click stays a left click (it draws)."""
+    from Quartz import (CGEventCreateMouseEvent, CGEventCreateKeyboardEvent, CGEventSetFlags,
+                        kCGEventRightMouseDown, kCGEventRightMouseUp, kCGEventLeftMouseDown,
+                        kCGEventFlagsChanged, kCGMouseButtonRight, kCGMouseButtonLeft)
+    FN, CTRL = mh.FN_FLAG, mh.CONTROL_FLAG
+    rc = []
+    st = {'down': False, 'space': False, 'tap': None}
+    cb = mh._make_fn_callback(st, lambda *a: None, lambda: None, True, on_space=lambda d: None,
+                              on_escape=lambda: None, on_control=lambda k: None,
+                              on_right=lambda: rc.append("right"))
+
+    def mouse(t, button, flags=0):
+        e = CGEventCreateMouseEvent(None, t, (500, 400), button)
+        CGEventSetFlags(e, flags)
+        return e
+
+    def kb(keycode, down, flags):
+        e = CGEventCreateKeyboardEvent(None, keycode, down)
+        CGEventSetFlags(e, flags)
+        return e
+
+    def right_click(flags=0):
+        d, u = mouse(kCGEventRightMouseDown, kCGMouseButtonRight, flags), mouse(kCGEventRightMouseUp, kCGMouseButtonRight, flags)
+        return cb(None, kCGEventRightMouseDown, d, None) is d, cb(None, kCGEventRightMouseUp, u, None) is u
+
+    assert right_click() == (True, True) and rc == [], "not talking to Claude: a normal right-click"
+    cb(None, kCGEventFlagsChanged, kb(63, True, FN), None)                    # fn alone = dictation
+    assert right_click(FN) == (True, True) and rc == [], "plain dictation: right-click stays normal"
+    cb(None, kCGEventFlagsChanged, kb(59, True, FN | CTRL), None)             # + ⌃ = talking to Claude
+    assert right_click(FN | CTRL) == (False, False) and rc == ["right"], "fn+⌃: swallowed, fired once"
+    e = mouse(kCGEventLeftMouseDown, kCGMouseButtonLeft, FN | CTRL)           # ⌃ + LEFT click
+    assert cb(None, kCGEventLeftMouseDown, e, None) is e and rc == ["right"], "⌃+left-click isn't the right button"
+    cb(None, kCGEventFlagsChanged, kb(59, False, FN), None)
+    cb(None, kCGEventFlagsChanged, kb(63, False, 0), None)                    # let go of fn + ⌃
+    assert right_click() == (True, True) and rc == ["right"], "back to normal"
+    st['receive'] = True                                                      # receive mode: hands-free
+    assert right_click() == (False, False) and rc == ["right", "right"], "receive mode: swallowed, fired"
+    st['receive'] = False
+    assert right_click() == (True, True) and rc == ["right", "right"]
+    print("right-click tap: only while talking to Claude (fn+⌃ or receive mode), swallowed; ⌃+left stays left  OK")
+
+
+def test_right_click_controller():
+    """Right-click → drawing on; draw with the LEFT button (several marks); right-click again → ONE
+    snapshot with the marks. Two right-clicks with no drawing = a plain shot. Esc on a right-click
+    drawing cancels only that drawing (you keep talking); Esc again drops everything (unchanged)."""
+    from app.ui import dictation as dc
+    mw = _MW()
+    mw.assistant_page = _Assistant()
+    d = dc.VoiceDictationController(mw)
+    st = {}
+    d._hotkey, d._gesture_mode = (0, {'_st': st}, 0), True
+    d._on_right_click()
+    assert not d._inking, "not recording: a stray right-click does nothing"
+    d._state, d._recorder, d._key_down = "recording", _Rec(), True
+    d._mods_seen = {"shift": False, "option": False, "control": False}
+    d._press_time = time.monotonic()
+    d._on_control(); d._on_control()                                    # fn + ⌃⌃ → receive mode
+    _fake_screen(d._ink)
+    d._press_time -= 2; d._on_release()                                 # let go of fn — still listening
+    assert "right-click" in d._ink._banner, d._ink._banner
+    d._recorder.words = 2
+    d._on_right_click()                                                 # right-click → draw
+    assert d._inking and d._ink._drawing and "right-click to capture" in d._ink._hint
+    _stroke(d._ink, [(50, 50), (150, 50)])                              # two marks, left button
+    _stroke(d._ink, [(60, 80), (160, 120)])
+    assert len(d._ink._strokes) == 2
+    d._on_right_click()                                                 # right-click → snapshot
+    assert not d._inking and not d._ink._drawing and len(d._shots) == 1 and d._shots[0][1] is True
+    d._recorder.words = 4
+    d._on_right_click(); d._on_right_click()                            # no drawing → a plain shot
+    assert len(d._shots) == 2 and d._shots[1][1] is False
+    d._on_right_click(); _stroke(d._ink, [(10, 10), (90, 90)])
+    d._on_escape()                                                      # Esc → undo just this drawing
+    assert d._state == "recording" and d._receive and not d._inking and d._ink._strokes == []
+    assert len(d._shots) == 2, "the earlier screenshots are kept"
+    d._on_right_click(); _stroke(d._ink, [(20, 20), (70, 70)])
+    d._on_space(True); d._on_space(False)                               # Space captures it too
+    assert len(d._shots) == 3 and not d._inking
+    d._on_control("tap")                                                # tap ⌃ → send ONE message
+    d._on_text("look here and here please")
+    text, imgs = mw.assistant_page.calls[-1]
+    assert "[screenshot 1]" in text and "[screenshot 3]" in text and len(imgs) == 3, text
+    assert all(_wait(p) for p in imgs)
+    n = len(mw.assistant_page.calls)                                    # Esc when NOT drawing: drop all
+    d._state, d._recorder, d._key_down, d._latched = "recording", _Rec(), True, False
+    d._on_control(); d._ctrl_at -= 0.2; d._on_control()
+    d._on_right_click(); d._on_right_click()
+    d._on_escape()
+    assert d._state == "idle" and d._shots == [] and len(mw.assistant_page.calls) == n
+    print("right-click controller: right=draw, left draws (several marks), right=snapshot; plain shot; "
+          "Esc undoes the drawing only; Space captures too; ONE message  OK")
+
+
 if __name__ == "__main__":
+    test_right_click_tap()
+    test_right_click_controller()
     test_key_tap()
     test_ink_snapshot()
     test_controller_gesture()

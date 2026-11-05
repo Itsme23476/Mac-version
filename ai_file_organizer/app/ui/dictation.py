@@ -137,6 +137,7 @@ class VoiceDictationController(QObject):
     _space_sig = Signal(bool)         # fn + ⌃ + Space down/up → draw on the screen / snapshot it
     _esc_sig = Signal()               # fn + ⌃ + Esc → cancel the capture
     _ctrl_sig = Signal(str)           # "press": ⌃ while fn held (⌃⌃ = receive) · "tap": lone ⌃ = send
+    _right_sig = Signal()             # right-click while talking to Claude → draw on / snapshot
     _search_ready = Signal(str, str)  # (spoken text, distilled query) -> open popup (UI thread)
     _final_ready = Signal(str)        # final dictation text (after optional AI cleanup) -> paste
     dictation_saved = Signal()        # a dictation was saved to History -> refresh the card
@@ -168,6 +169,7 @@ class VoiceDictationController(QObject):
         self._inking = False              # drawing on the screen right now
         self._ink_down_at = 0.0           # when the draw key (Space/Shift) went down
         self._ink_tapped_at = None        # set when a TAP turned drawing on (it stays on till the next tap)
+        self._ink_by_right = False        # this drawing was started with a right-click (Esc = undo it only)
         self._receive = False             # receive mode (fn + ⌃⌃): hands-free, collecting words + shots
         self._ctrl_at = None              # last ⌃ press while fn was held (to spot the double-tap)
         self._shots = []                  # [(png path, had_marks)] taken during this hold
@@ -179,6 +181,7 @@ class VoiceDictationController(QObject):
         self._space_sig.connect(self._on_space, Qt.QueuedConnection)
         self._esc_sig.connect(self._on_escape, Qt.QueuedConnection)
         self._ctrl_sig.connect(self._on_control, Qt.QueuedConnection)
+        self._right_sig.connect(self._on_right_click, Qt.QueuedConnection)
         self._search_ready.connect(self._open_search, Qt.QueuedConnection)
         self._final_ready.connect(self._on_final, Qt.QueuedConnection)
         if settings.dictation_enabled:
@@ -202,6 +205,7 @@ class VoiceDictationController(QObject):
                 on_space=lambda down: self._space_sig.emit(bool(down)),
                 on_escape=lambda: self._esc_sig.emit(),
                 on_control=lambda kind="press": self._ctrl_sig.emit(kind),
+                on_right=lambda: self._right_sig.emit(),
             )
             if self._hotkey:
                 handle = self._hotkey[1] if isinstance(self._hotkey[1], dict) else {}
@@ -365,6 +369,29 @@ class VoiceDictationController(QObject):
             else:
                 self._take_shot()                      # a hold: release = snapshot
 
+    RIGHT_HINT = "draw with left-click · right-click to capture · Esc cancels the drawing"
+
+    def _on_right_click(self):
+        """While talking to Claude (receive mode or fn + ⌃ held): right-click → drawing on, draw with
+        the LEFT button, as many marks as you like; right-click again → snapshot (screen + marks).
+        The right button only toggles — a trackpad can't comfortably right-drag."""
+        if self._state != "recording":
+            return
+        if self._inking:
+            self._take_shot()                          # the second right-click (or after a Space tap)
+            return
+        ink = self._ensure_ink()
+        if ink is None:
+            return
+        self._mods_seen["control"] = True              # a screen gesture is always an assistant one
+        if not ink.isVisible():
+            ink.begin()
+        ink.set_drawing(True, self.RIGHT_HINT)
+        now = time.monotonic()
+        # latched like a Space tap (so a Space press now snapshots too), past the re-grip window
+        self._inking, self._ink_down_at, self._ink_tapped_at = True, now, now - 1
+        self._ink_by_right = True
+
     # ---- receive mode: hold fn, double-tap ⌃ → hands-free; talk, scroll, snapshot; tap ⌃ = send --
     RECEIVE_TAP_SEC = 1.0    # two ⌃ presses this close together (while fn is held) = receive mode
                              # (was 0.45: too tight live; press–release–press within 1s now counts)
@@ -405,7 +432,8 @@ class VoiceDictationController(QObject):
         if self._receive and self._ink is not None:
             n = len(self._shots)
             count = f" · {n} screenshot{'s' if n != 1 else ''}" if n else ""
-            self._ink.set_banner(f"●  Receiving{count} — tap Space or ⇧ to draw · tap ⌃ to send · Esc cancels")
+            self._ink.set_banner(f"●  Receiving{count} — right-click (or tap Space / ⇧) to draw · "
+                                 f"tap ⌃ to send · Esc cancels")
 
     def _exit_receive(self):
         if self._receive:
@@ -415,7 +443,15 @@ class VoiceDictationController(QObject):
         set_screen_keys(self._hotkey, False)
 
     def _on_escape(self):
-        """fn + ⌃ + Esc: drop the whole capture — nothing is sent."""
+        """fn + ⌃ + Esc: drop the whole capture — nothing is sent. On a drawing started with a
+        right-click, Esc cancels just that drawing (marks gone, keep talking); Esc again drops it all."""
+        if self._state == "recording" and self._inking and self._ink_by_right and self._ink is not None:
+            logger.info("[screen] right-click drawing cancelled with Esc")
+            self._inking, self._ink_tapped_at, self._ink_by_right = False, None, False
+            self._ink.clear()
+            self._ink.set_drawing(False)
+            self._receive_banner()
+            return
         if self._state == "recording":
             logger.info("[screen] cancelled with Esc")
             self._cancel_recording()
@@ -432,7 +468,7 @@ class VoiceDictationController(QObject):
         return self._ink
 
     def _take_shot(self):
-        self._inking, self._ink_tapped_at = False, None
+        self._inking, self._ink_tapped_at, self._ink_by_right = False, None, False
         ink = self._ink
         if ink is None:
             return
@@ -448,7 +484,7 @@ class VoiceDictationController(QObject):
                          "in System Settings → Privacy & Security.")
 
     def _end_ink(self):
-        self._inking, self._ink_tapped_at = False, None
+        self._inking, self._ink_tapped_at, self._ink_by_right = False, None, False
         if self._ink is not None:
             self._ink.end()
 

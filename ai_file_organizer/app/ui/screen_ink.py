@@ -122,6 +122,11 @@ class ScreenInk(QWidget):
         self._apply_native()
         self.update()
 
+    def clear(self) -> None:
+        """Drop the marks drawn so far (Esc on a right-click drawing)."""
+        self._strokes = []
+        self.update()
+
     def set_banner(self, text: str) -> None:
         """A standing hint shown whenever you're not drawing (e.g. "Receiving · 2 screenshots …")."""
         self._banner = text

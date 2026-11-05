@@ -544,3 +544,30 @@ yourself, the Mac side can't see it.
   (was ~69 twice).
 - Test: `test_rail_recent.py::test_rows_reused_not_rebuilt`. It checks the rows are the same widgets
   across refreshes and that a finished chat's row moves groups; it fails on the old code.
+
+### 8j. Right-click screenshots while talking to Claude (Mac, 2026-11-05): **design applies to BOTH; input hook is per-platform**
+- Damianos' design: the RIGHT button toggles, the LEFT button draws (a trackpad can't comfortably
+  right-drag, and you can make several marks). Active ONLY while talking to Claude (receive mode, or
+  fn + ⌃ held); every other right-click is untouched.
+  - Right-click: drawing on. The banner reads "Drawing — draw with left-click · right-click to capture ·
+    Esc cancels the drawing".
+  - Left-drag: red marks, as many as you like.
+  - Right-click again: snapshot with the marks, placed in the message where you took it, like the
+    Space/Shift ones.
+  - Two right-clicks without drawing: a plain screenshot.
+  - Esc on a right-click drawing: cancels ONLY that drawing (marks cleared, keep talking). Esc again
+    drops everything, unchanged. Space/Shift drawings keep their old "Esc drops all".
+- Mac input (`mac_hotkey.py`): the fn tap's mask gains `kCGEventRightMouseDown/Up`, right button only,
+  never mouse moves. `_make_fn_callback(..., on_right)`: when `st['receive']`, or fn + ⌃ are held, the
+  right down/up are SWALLOWED (no context menu) and `on_right()` fires on the down. A ⌃+click is a LEFT
+  mouse event with the ⌃ flag, so it isn't mistaken for the right button.
+- Controller (`dictation.py`): `_right_sig` → `_on_right_click()` turns drawing on, latched like a Space
+  tap (`_ink_tapped_at = now-1` so the re-grip guard doesn't apply); if already drawing →
+  `_take_shot()`. `_ink_by_right` marks Esc = undo-drawing. `ScreenInk.clear()` drops the marks.
+- **Windows:** use a low-level mouse hook (`WH_MOUSE_LL`). Swallow `WM_RBUTTONDOWN/UP` only while
+  talking to Claude (return 1 from the hook), then post a signal to the UI thread. Same controller logic.
+- Tests: `test_screen_ink.py::test_right_click_tap` (real CGEvents through the callback) and
+  `::test_right_click_controller`; `test_ink_real_mouse.py`: a plain left-drag draws on the real screen.
+  Live end-to-end in the dev app with real system input: receive mode, right-click, left-drag, right-click
+  gave "snapshot 1 (marks=True)" with the red mark in the saved PNG, then Esc. Both tests fail if the
+  swallow or the Esc rule is removed.

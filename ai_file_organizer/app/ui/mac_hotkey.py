@@ -426,7 +426,7 @@ def set_screen_keys(hotkey, on: bool) -> None:
 
 
 def _make_fn_callback(st, on_pressed, on_released=None, override=True, on_space=None, on_escape=None,
-                      on_control=None):
+                      on_control=None, on_right=None):
     """The Fn tap's event callback (factored out so tests can drive it with real CGEvents).
 
     flagsChanged on the fn key → on_pressed(shift, option) / on_released(). With on_space set it also
@@ -436,12 +436,15 @@ def _make_fn_callback(st, on_pressed, on_released=None, override=True, on_space=
     modifier, so it always passes through (swallowing a modifier can leave apps thinking it's stuck
     down). on_control("press") fires on each ⌃ press while fn is held (fn + ⌃⌃ = receive mode), and
     on_control("tap") on a clean lone ⌃ tap in receive mode (= send; ⌃ + any other key doesn't count).
-    Every other keystroke passes through untouched."""
+    A real right-click (the right button — not a ⌃-click, which is a LEFT mouse event with the ⌃ flag)
+    while talking to Claude (receive mode, or fn + ⌃ held) → on_right(), and is SWALLOWED so no context
+    menu opens; every other right-click and keystroke passes through untouched."""
     from Quartz import (
         CGEventTapEnable, CGEventGetFlags, CGEventGetIntegerValueField,
         kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput, kCGKeyboardEventKeycode,
         kCGKeyboardEventAutorepeat, kCGEventKeyDown, kCGEventKeyUp,
         CGEventSourceFlagsState, kCGEventSourceStateCombinedSessionState,
+        kCGEventRightMouseDown, kCGEventRightMouseUp,
     )
 
     def _key(etype, event):
@@ -490,6 +493,13 @@ def _make_fn_callback(st, on_pressed, on_released=None, override=True, on_space=
                 if st['tap'] is not None:
                     CGEventTapEnable(st['tap'], True)   # system disabled us -> re-arm
                 return event
+            if etype in (kCGEventRightMouseDown, kCGEventRightMouseUp):
+                if on_right is None or not (st.get('receive') or (st['down'] and st.get('ctrl'))):
+                    return event                        # a normal right-click everywhere else
+                if etype == kCGEventRightMouseDown:
+                    logger.info("[screen] right-click")
+                    on_right()
+                return None                             # swallowed (down AND up): no context menu
             if etype in (kCGEventKeyDown, kCGEventKeyUp):
                 if etype == kCGEventKeyDown:
                     st['ctrl_t'] = None                 # ⌃ + a key (⌃C, ⌃→ …) is a shortcut, not a tap
@@ -558,7 +568,8 @@ def _register_fn_tap(on_pressed: Callable[[], None],
                      override: bool = True,
                      on_space: Optional[Callable[[bool], None]] = None,
                      on_escape: Optional[Callable[[], None]] = None,
-                     on_control: Optional[Callable[[], None]] = None) -> Optional[Tuple[int, Any, int]]:
+                     on_control: Optional[Callable[[], None]] = None,
+                     on_right: Optional[Callable[[], None]] = None) -> Optional[Tuple[int, Any, int]]:
     """Capture the Fn / Globe key via a CGEventTap so dictation can use it for
     hold-to-talk. With override=True the Fn key event is CONSUMED, so it overrides
     macOS's default Globe action (emoji / dictation / input-switch) and every other app.
@@ -576,13 +587,17 @@ def _register_fn_tap(on_pressed: Callable[[], None],
         CFRunLoopRun, kCFRunLoopCommonModes,
         kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
         kCGEventFlagsChanged, kCGEventKeyDown, kCGEventKeyUp,
+        kCGEventRightMouseDown, kCGEventRightMouseUp,
     )
     st = {'down': False, 'space': False, 'shift': False, 'ctrl': False, 'receive': False,
           'tap': None, 'runloop': None, 'thread': None}
-    _cb = _make_fn_callback(st, on_pressed, on_released, override, on_space, on_escape, on_control)
+    _cb = _make_fn_callback(st, on_pressed, on_released, override, on_space, on_escape, on_control,
+                            on_right)
     mask = CGEventMaskBit(kCGEventFlagsChanged)
     if on_space is not None:          # only then do key presses pass through this tap at all
         mask |= CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp)
+    if on_right is not None:          # right button only — never mouse moves (no per-move cost)
+        mask |= CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventRightMouseUp)
 
     def _run():
         tap = CGEventTapCreate(
@@ -617,6 +632,7 @@ def register_global_hotkey(
     on_space: Optional[Callable[[bool], None]] = None,
     on_escape: Optional[Callable[[], None]] = None,
     on_control: Optional[Callable[[], None]] = None,
+    on_right: Optional[Callable[[], None]] = None,
 ) -> Optional[Tuple[int, Any, int]]:
     """
     Register a global hotkey on macOS.
@@ -640,7 +656,8 @@ def register_global_hotkey(
     if (sequence or '').strip().lower() in ('fn', 'globe', 'function'):
         try:
             result = _register_fn_tap(on_activated, on_released, override=True,
-                                      on_space=on_space, on_escape=on_escape, on_control=on_control)
+                                      on_space=on_space, on_escape=on_escape, on_control=on_control,
+                                      on_right=on_right)
             if result:
                 return result
         except Exception as e:
