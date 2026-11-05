@@ -383,6 +383,7 @@ class AssistantPage(QWidget):
         self._codex_released.connect(self._on_codex_released)
         self._codex_info = None      # {models, update}: loaded off the UI thread (it runs `codex`)
         self._routing = {}           # requests still being routed: id -> what you said (Stop cancels them)
+        self._live_tags = {}         # hands-free requests being routed: id -> the tab's tag (Esc cancels them)
         self._route_seq = 0
         QTimer.singleShot(2000, self._load_codex_info)
         self._setup_wait = None      # {agent, key, until}: a task waiting for you to finish an agent's setup
@@ -1097,6 +1098,8 @@ class AssistantPage(QWidget):
         self._route_seq += 1
         rid = self._route_seq
         self._routing[rid] = text                   # Stop now cancels it (it used to be ignored)
+        if live:
+            self._live_tags[rid] = tag
 
         claude_ok = self._agent_ok("claude")
 
@@ -1126,9 +1129,21 @@ class AssistantPage(QWidget):
                                       "source": source, "tag": tag})
         threading.Thread(target=worker, daemon=True, name="filect-assistant-route").start()
 
+    def cancel_live(self, tag) -> bool:
+        """Esc on a hands-free request the router is still checking: drop it — it never runs."""
+        for rid, t in list(self._live_tags.items()):
+            if t == tag and rid in self._routing:
+                del self._routing[rid]
+                self._live_tags.pop(rid, None)
+                _trace(f"hands-free request {tag} cancelled (Esc) while routing")
+                self.live_routed.emit(tag, "cancelled", "", "")
+                return True
+        return False
+
     def _on_voice_decided(self, result):
         """Router decision (UI thread): continue the focused chat, resume a named one, or start new."""
         rid = result.get("rid")
+        self._live_tags.pop(rid, None)
         if rid is not None:
             if rid not in self._routing:
                 _trace(f"request {rid} dropped — you stopped it while it was routing")

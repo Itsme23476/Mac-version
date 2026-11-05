@@ -31,7 +31,7 @@ ap.AssistantPage._show_idle_overlays = lambda self: None
 ap.AssistantPage._load_recent = lambda self: None
 tracked, chimes = [], []
 lp._track = lambda ev, **k: tracked.append(ev)
-lp._chime = lambda: chimes.append(1)
+lp._chime = lambda name="Tink": chimes.append(name)
 settings.live_send_after_sec, settings.live_sensitivity = 2.0, "medium"
 settings.live_chime, settings.live_noise_filter = True, True
 
@@ -144,6 +144,49 @@ def test_hands_free_routing():
           "nothing; fn + ⌃ unchanged  OK")
 
 
+def test_esc_while_the_router_checks():
+    """Esc after the transcript, while the router is still deciding: the request is dropped — it never
+    runs — and reported as cancelled."""
+    page, notch, runs, reports = _page()
+
+    class Slow(_Router):
+        def classify(self, text, focused, cands, live=False):
+            time.sleep(0.6)
+            return {"intent": "NEW", "index": None, "task": text}
+    real = _with_router(Slow())
+    try:
+        page.run_voice_task("delete all my screenshots", source="live", tag=21)
+        assert page.cancel_live(21) is True
+        assert reports == [(21, "cancelled", "", "")]
+        _pump(lambda: False, 1.2)                          # the router answers meanwhile
+        assert runs == [] and len(reports) == 1, (runs, reports)
+        assert page.cancel_live(21) is False, "nothing left to cancel"
+        page.run_voice_task("open my notes", source="live", tag=22)   # the next one runs normally
+        assert _pump(lambda: runs, 3) and reports[-1][:2] == (22, "new")
+    finally:
+        _restore(real)
+    print("Esc while the router checks: dropped, never runs, reported cancelled; the next runs  OK")
+
+
+def test_note_under_the_notch():
+    from app.ui.claude_overlay import ClaudeOverlay
+    ov = ClaudeOverlay()
+    h = ov._handle
+    h.resize(150, 34)
+    blank = h.grab().toImage()
+    ov.flash_note("Cancelled", ms=150)
+    assert h._note == "Cancelled"
+    img = h.grab().toImage()
+    drawn = sum(1 for x in range(0, 150, 3) for y in range(0, 34, 3) if img.pixelColor(x, y).alpha() > 0)
+    assert drawn > 20, drawn
+    assert _pump(lambda: h._note == "", 1), "it goes away by itself"
+    ov.set_listening("listening")
+    ov.flash_note("Not a request")
+    h.grab()
+    ov.set_listening("")
+    print(f"note under the notch: drawn ({drawn} px sampled), clears itself  OK")
+
+
 def test_fn_ctrl_fakes_with_three_args_still_work():
     page, notch, runs, reports = _page()
 
@@ -161,6 +204,7 @@ def test_fn_ctrl_fakes_with_three_args_still_work():
 
 # ---- the Assistant tab ------------------------------------------------------------------------------
 class FakeListener(QObject):
+    esc_late = Signal()
     state_changed = Signal(str, str)
     level = Signal(float)
     countdown = Signal(float)
@@ -194,10 +238,13 @@ class FakeListener(QObject):
 
 class FakeOverlay:
     def __init__(self):
-        self.lights = []
+        self.lights, self.notes = [], []
 
     def set_listening(self, m):
         self.lights.append(m)
+
+    def flash_note(self, text, color="#B8B8C4", ms=2500):
+        self.notes.append(text)
 
 
 class FakeAP(QObject):
@@ -210,6 +257,10 @@ class FakeAP(QObject):
 
     def run_voice_task(self, text, source="voice", images=None, tag=None):
         self.runs.append((text, source, tag))
+
+    def cancel_live(self, tag):
+        self.live_routed.emit(tag, "cancelled", "", "")
+        return True
 
     def _ensure_notch(self):
         self._overlay = self.ov
@@ -267,13 +318,14 @@ def test_tab_start_stop_and_rows():
     assert page._rows[1].text.text() == "“make a landing page for my coffee shop”"
     mw.assistant_page.live_routed.emit(1, "new", "Coffee Shop Site", "k1")
     assert page._rows[1].outcome.text() == "Started “Coffee Shop Site”  →" and page._rows[1].key == "k1"
-    assert L.learned == [1] and chimes == [1] and "live_task" in tracked
+    assert L.learned == [1] and chimes == ["Tink"] and "live_task" in tracked
 
     # not a request
     L.utterance_ended.emit(2)
     L.heard.emit(2, "yeah I'll call you back")
     mw.assistant_page.live_routed.emit(2, "ignored", "", "")
-    assert page._rows[2].outcome.text() == "Ignored — not a request" and L.learned == [1] and chimes == [1]
+    assert page._rows[2].outcome.text() == "Ignored — not a request" and L.learned == [1] and chimes == ["Tink"]
+    assert mw.assistant_page.ov.notes[-1] == "Not a request", "ignored speech gets a note at the notch"
 
     # router down
     L.heard.emit(3, "rename the folder")
@@ -282,7 +334,17 @@ def test_tab_start_stop_and_rows():
 
     # Esc / a cough / Stop while transcribing
     L.dropped.emit(4, "", "cancelled")
-    assert page._rows[4].outcome.text() == "Cancelled (Esc)"
+    assert page._rows[4].outcome.text() == "Cancelled (Esc) — not sent"
+    assert mw.assistant_page.ov.notes[-1] == "✕  Cancelled" and chimes[-1] == "Pop", "Esc is visible + audible"
+    n_notes = len(mw.assistant_page.ov.notes)
+    L.dropped.emit(4, "delete everything in downloads", "cancelled")   # the cancelled text arrives later
+    assert page._rows[4].text.text() == "“delete everything in downloads”"
+    assert len(mw.assistant_page.ov.notes) == n_notes, "one note per cancel, not two"
+    # a late Esc while the router is still checking one
+    L.heard.emit(11, "rename my project folder")
+    assert page._rows[11].outcome.text() == "Checking…"
+    L.esc_late.emit()
+    assert page._rows[11].outcome.text() == "Cancelled (Esc) — not sent" and mw.assistant_page.ov.notes[-1] == "✕  Cancelled"
     L.dropped.emit(5, "", "too short")
     assert 5 not in page._rows, "a cough doesn't get a row"
     L.utterance_ended.emit(6)
@@ -291,9 +353,10 @@ def test_tab_start_stop_and_rows():
 
     # chime off → no chime
     settings.live_chime = False
+    n_ch = len(chimes)
     L.heard.emit(7, "open my notes")
     mw.assistant_page.live_routed.emit(7, "continued", "Notes", "k1")
-    assert chimes == [1] and page._rows[7].outcome.text() == "Continued “Notes”  →"
+    assert len(chimes) == n_ch and page._rows[7].outcome.text() == "Continued “Notes”  →"
     settings.live_chime = True
 
     # clicking a row opens that chat in Agents
@@ -378,6 +441,8 @@ if __name__ == "__main__":
     test_ignore_only_for_hands_free()
     test_hands_free_routing()
     test_fn_ctrl_fakes_with_three_args_still_work()
+    test_esc_while_the_router_checks()
+    test_note_under_the_notch()
     test_tab_start_stop_and_rows()
     test_tab_settings()
     test_settings_load_validation()

@@ -153,6 +153,10 @@ class _Handle(QWidget):
         super().__init__(parent)
         self._state = "idle"
         self._listening = ""          # Filect Assistant: "" (off) | "listening" | "hearing" | "paused"
+        self._note, self._note_color = "", None   # a short note under the notch ("Cancelled"), for ~2.5 s
+        self._note_timer = QTimer(self)
+        self._note_timer.setSingleShot(True)
+        self._note_timer.timeout.connect(lambda: self.flash_note(""))
         self._hovered = False
         self._phase = 0.0
         # Always tall enough to draw the hover tab below the notch — the window never resizes on hover
@@ -182,6 +186,34 @@ class _Handle(QWidget):
             self._listening = mode
             self._run_timer()
             self.update()
+
+    def flash_note(self, text: str, color: str = "#B8B8C4", ms: int = 2500) -> None:
+        """Filect Assistant feedback right under the notch — where you're looking, not the tab: e.g.
+        "Cancelled" after Esc, "Not a request" for ignored speech. "" clears it."""
+        self._note, self._note_color = text, QColor(color)
+        if text:
+            self._note_timer.start(ms)
+        else:
+            self._note_timer.stop()
+        self.update()
+
+    def _paint_note(self, p, y: float) -> bool:
+        if not self._note or self._reveal > 0.3:
+            return False
+        f = QFont(self.font())
+        f.setPixelSize(11)
+        f.setWeight(QFont.Weight.DemiBold)
+        fm = QFontMetrics(f)
+        text = fm.elidedText(self._note, Qt.ElideRight, max(20, self.width() - 22))
+        w, h = fm.horizontalAdvance(text) + 18, 19.0
+        x = (self.width() - w) / 2.0
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(24, 24, 30, 235))
+        p.drawRoundedRect(QRectF(x, y, w, h), h / 2.0, h / 2.0)
+        p.setFont(f)
+        p.setPen(self._note_color or QColor("#B8B8C4"))
+        p.drawText(QRectF(x, y, w, h), Qt.AlignCenter, text)
+        return True
 
     def _run_timer(self) -> None:
         # Breathe only while a task is live (working) or blocked on you (needs_you), or the hands-free
@@ -250,10 +282,11 @@ class _Handle(QWidget):
         # or a task is live/blocked/finished (base). No idle hint, no resting pill. (Filect Assistant
         # adds only its small light while it's on.)
         if not base and self._reveal < 0.02:
-            if self._listening:
+            if self._listening or self._note:
                 p = QPainter(self)
                 p.setRenderHint(QPainter.Antialiasing, True)
-                self._paint_listening(p, 7.0)
+                if not self._paint_note(p, 4.0):
+                    self._paint_listening(p, 7.0)
                 p.end()
             return
         p = QPainter(self)
@@ -297,7 +330,8 @@ class _Handle(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(AMBER))
             p.drawEllipse(QPointF(x + lip_w + 9, t / 2.0 + 1), 3.5, 3.5)
-        self._paint_listening(p, t + 9.0)
+        if not self._paint_note(p, t + 4.0):
+            self._paint_listening(p, t + 9.0)
         p.end()
 
     def mousePressEvent(self, e) -> None:
@@ -1398,6 +1432,10 @@ class ClaudeOverlay(QWidget):
     def set_listening(self, mode: str) -> None:
         """Filect Assistant (hands-free) state for the light under the notch: "" | listening | hearing | paused."""
         self._handle.set_listening(mode)
+
+    def flash_note(self, text: str, color: str = "#B8B8C4", ms: int = 2500) -> None:
+        """Filect Assistant: a short note under the notch for a moment ("Cancelled", "Not a request")."""
+        self._handle.flash_note(text, color, ms)
 
     def set_open_defaults(self, where: dict) -> None:
         """Where "Open in …" opens, per agent ("app" / "terminal") — the page's saved choice."""

@@ -998,3 +998,20 @@ yourself, the Mac side can't see it.
       file" **continued** the chat; "Hmm." made no row;
     - a real Claude run answered "56" from a spoken question;
     - real Start/Stop on screen, with the notch light.
+- **Esc feedback + a late Esc (2026-11-06, from his first hands-on test): BOTH platforms.**
+  - His log: the Esc DID cancel the request (`[live] cancelled with Esc` → it was never routed or run).
+    But nothing visible changed where he was looking, so it "didn't seem to cancel". And an Esc pressed
+    after the 2 s pause did nothing.
+  - Now Esc cancels at **every stage before the request runs**:
+    - while you talk or pause: `LiveListener.cancel_current`;
+    - while it's transcribing: the newest pending one is marked cancelled, and its text is ignored;
+    - while the router checks it: `esc_late` → `LivePage._on_esc_late` → `AssistantPage.cancel_live(tag)`,
+      which removes it from `_routing` (`_live_tags` maps rid → tag) and reports
+      `live_routed(tag, "cancelled")`.
+  - Visible + audible:
+    - a pill under the notch, "✕  Cancelled", for 2.5 s (`ClaudeOverlay.flash_note` / `_Handle._paint_note`);
+    - the "Pop" sound, if the chime setting is on;
+    - the row shows WHAT was cancelled: the cancelled transcript still arrives, and is shown, not run.
+  - Ignored speech gets a gray "Not a request" pill; a routing failure gets an amber "Couldn't check that".
+  - Every Esc press is logged with the state it found.
+  - **Windows:** the same; Esc comes from the non-swallowing keyboard hook.

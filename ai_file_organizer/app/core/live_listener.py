@@ -411,6 +411,8 @@ class LiveListener(QObject):
     heard = Signal(int, str)              # (id, text): run it
     dropped = Signal(int, str, str)       # (id, text, why): not run
     usage = Signal(float)                 # seconds of your voice sent today (≈ what counts toward the limit)
+    esc_late = Signal()                   # Esc with nothing being heard/transcribed: the page may cancel a
+                                          #   request still being checked by the router
     _chunk_sig = Signal(int, object)
     _end_sig = Signal(int, int)
     _esc_sig = Signal()
@@ -437,7 +439,7 @@ class LiveListener(QObject):
         self._uid = 0
         self._cur = None                # (uid, transcriber) being fed right now
         self._pending = {}              # uid → (transcriber, stats) waiting for text
-        self._cancelled = set()
+        self._cancelled = {}            # uid → why it was dropped (its text, if it still comes, is ignored)
         self._levels = {}               # uid → speech level (for learn())
         self._used = load_usage_today()
         self._used_day = time.strftime("%Y-%m-%d")
@@ -445,7 +447,7 @@ class LiveListener(QObject):
         self._esc_monitors = []
         self._chunk_sig.connect(self._on_chunk)
         self._end_sig.connect(self._on_mic_end)
-        self._esc_sig.connect(self.cancel_current)
+        self._esc_sig.connect(self._on_esc)
         self._poll = QTimer(self)
         self._poll.setInterval(400)
         self._poll.timeout.connect(self._tick)
@@ -485,7 +487,7 @@ class LiveListener(QObject):
             self._monitor = None
         self._abandon("stopped")
         for uid in list(self._pending):     # finished talking but not transcribed yet: Stop = don't run it
-            self._cancelled.add(uid)
+            self._cancelled[uid] = "stopped"
             self._pending.pop(uid, None)
             self.dropped.emit(uid, "", "stopped")
         self._close()
@@ -518,6 +520,24 @@ class LiveListener(QObject):
         self._abandon("cancelled")
         self._det.suppress()
         self._set_state("listening", "")
+
+    def _on_esc(self) -> None:
+        """Esc — cancels the request at whatever stage it's in, until it actually starts: while you talk
+        or pause, while it's being transcribed (here), or while the router checks it (the page:
+        esc_late). A late Esc used to do nothing and the request ran."""
+        logger.info("[live] Esc (state=%s, hearing=%s, transcribing=%s)", self.state, self._cur is not None,
+                    sorted(self._pending))
+        if self._cur is not None:
+            self.cancel_current()
+        elif self._pending:
+            uid = max(self._pending)
+            self._pending.pop(uid, None)
+            self._levels.pop(uid, None)
+            self._cancelled[uid] = "cancelled"
+            logger.info("[live] utterance %d cancelled with Esc while transcribing", uid)
+            self.dropped.emit(uid, "", "cancelled")
+        else:
+            self.esc_late.emit()
 
     def used_today(self) -> float:
         return self._used
@@ -715,7 +735,7 @@ class LiveListener(QObject):
         if cur is None:
             return
         uid, tr = cur
-        self._cancelled.add(uid)
+        self._cancelled[uid] = why
         try:
             tr.stop_recording()
         except Exception:
@@ -730,7 +750,9 @@ class LiveListener(QObject):
             return
         self._pending.pop(uid, None)
         if uid in self._cancelled:
-            self._cancelled.discard(uid)
+            why = self._cancelled.pop(uid)
+            if why == "cancelled" and (text or "").strip():
+                self.dropped.emit(uid, text.strip(), "cancelled")   # show WHAT was cancelled (still not run)
             return
         text = (text or "").strip()
         if len(text.split()) < MIN_WORDS:
@@ -748,7 +770,7 @@ class LiveListener(QObject):
         self._pending.pop(uid, None)
         self._levels.pop(uid, None)
         if uid in self._cancelled:
-            self._cancelled.discard(uid)
+            self._cancelled.pop(uid, None)
             return
         self.dropped.emit(uid, "", f"Couldn't transcribe: {msg}")
         if "limit" in (msg or "").lower():          # the daily voice limit → stop listening
@@ -769,7 +791,7 @@ class LiveListener(QObject):
             mask = AppKit.NSEventMaskKeyDown
 
             def _global(ev):
-                if ev.keyCode() == 53 and self._cur is not None:
+                if ev.keyCode() == 53:
                     self._esc_sig.emit()
 
             def _local(ev):

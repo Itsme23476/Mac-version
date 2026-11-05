@@ -238,6 +238,7 @@ class FakeTx(QObject):
     finished = Signal(str)
     error = Signal(str)
     reply = "Create a new folder called invoices"
+    delay = 10                       # ms until the "transcript" arrives
     made = []
 
     def __init__(self):
@@ -255,9 +256,9 @@ class FakeTx(QObject):
         self.stopped = True
         r = FakeTx.reply
         if isinstance(r, Exception):
-            QTimer.singleShot(10, lambda: self.error.emit(str(r)))
+            QTimer.singleShot(FakeTx.delay, lambda: self.error.emit(str(r)))
         else:
-            QTimer.singleShot(10, lambda: self.finished.emit(r))
+            QTimer.singleShot(FakeTx.delay, lambda: self.finished.emit(r))
 
 
 class FakeMonitor:
@@ -275,7 +276,7 @@ class FakeMonitor:
 
 def _listener():
     FakeTx.made.clear()
-    FakeTx.reply = "Create a new folder called invoices"
+    FakeTx.reply, FakeTx.delay = "Create a new folder called invoices", 10
     FakeMonitor.others, FakeMonitor.locked = [], False
     mic = FakeMic()
     L = ll.LiveListener(open_mic=mic, make_transcriber=FakeTx, monitor_factory=lambda: FakeMonitor())
@@ -351,6 +352,43 @@ def test_esc_and_stop_drop_what_isnt_finished():
     finally:
         L.stop()
     print("Esc mid-sentence drops it; Stop drops what was still being transcribed  OK")
+
+
+def test_esc_at_every_stage():
+    """REGRESSION (his live test): Esc must cancel the request at ANY stage before it runs — while you
+    talk, during the pause, while it's being transcribed — and show WHAT was cancelled. With nothing in
+    flight it hands over to the page (esc_late: the router may still be checking one)."""
+    L, mic, rec = _listener()
+    late = []
+    L.esc_late.connect(lambda: late.append(1))
+    L.start()
+    try:
+        s = speech("Move all my screenshots into a folder called old stuff.")
+        # 1) during the pause (you stopped talking, the 2 s countdown is running)
+        mic.push(np.concatenate([silence(0.5), s, silence(1.0)]))
+        assert L.state == "countdown" and L._cur is not None, L.state
+        L._on_esc()
+        assert rec["dropped"][-1][2] == "cancelled" and L._cur is None
+        _pump(lambda: False, 0.2)
+        mic.push(silence(3.0))
+        assert not rec["heard"], "cancelled in the pause → never heard/run"
+        # 2) while it's being transcribed (after the countdown ended)
+        FakeTx.reply, FakeTx.delay = "Move all my screenshots into a folder called old stuff", 400
+        mic.push(np.concatenate([silence(0.5), s, silence(2.4)]))
+        assert L._pending and L._cur is None, (L._pending, L._cur)
+        uid = max(L._pending)
+        L._on_esc()
+        assert rec["dropped"][-1] == (uid, "", "cancelled") and not L._pending
+        assert _pump(lambda: rec["dropped"][-1][1], 2), "the text still arrives — to show what was cancelled"
+        assert rec["dropped"][-1] == (uid, "Move all my screenshots into a folder called old stuff", "cancelled")
+        assert not rec["heard"], "cancelled while transcribing → never run"
+        # 3) nothing in flight → esc_late (the page cancels one the router is still checking)
+        L._on_esc()
+        assert late == [1]
+    finally:
+        L.stop()
+    print("Esc cancels during the pause and while transcribing (and shows what was said); otherwise → "
+          "esc_late for the router stage  OK")
 
 
 def test_lets_go_of_the_mic_and_comes_back():
@@ -461,6 +499,7 @@ if __name__ == "__main__":
     test_listener_hears_a_request()
     test_one_word_and_errors()
     test_esc_and_stop_drop_what_isnt_finished()
+    test_esc_at_every_stage()
     test_lets_go_of_the_mic_and_comes_back()
     test_no_voice_processing_and_a_dying_mic()
     test_real_noise_filtered_mic()

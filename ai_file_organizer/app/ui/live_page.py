@@ -40,10 +40,10 @@ def _track(event: str, **props) -> None:
         pass
 
 
-def _chime() -> None:
+def _chime(name: str = "Tink") -> None:
     try:
         import AppKit
-        snd = AppKit.NSSound.soundNamed_("Tink")
+        snd = AppKit.NSSound.soundNamed_(name)
         if snd is not None:
             snd.play()
     except Exception:
@@ -159,7 +159,9 @@ class LivePage(QScrollArea):
         L.heard.connect(self._on_heard)
         L.dropped.connect(self._on_dropped)
         L.usage.connect(self._on_usage)
+        L.esc_late.connect(self._on_esc_late)
         self._on_usage(L.used_today())
+        self._noted = set()             # uids whose "Cancelled" note was already shown
         self._hooked_ap = None
         QTimer.singleShot(0, self._add_tray_item)
         app = QApplication.instance()
@@ -503,11 +505,17 @@ class LivePage(QScrollArea):
         elif outcome == "ignored":
             if row is not None:
                 row.set_outcome("Ignored — not a request", self._c["text_muted"])
+            self._note("Not a request")
             _track("live_ignored")
+        elif outcome == "cancelled":                 # Esc while the router was still checking it
+            if row is not None:
+                row.set_outcome("Cancelled (Esc) — not sent", self._c["text_muted"])
+            self._cancel_feedback(tag)
         else:
             if row is not None:
                 row.set_outcome("Couldn't check this one — say it again, or check Claude Code / Codex in Agents",
                                 AMBER)
+            self._note("Couldn't check that", AMBER)
             _track("live_error", kind="route_failed")
 
     def _on_dropped(self, uid: int, text: str, why: str):
@@ -517,8 +525,37 @@ class LivePage(QScrollArea):
         row = self._row(uid)
         if text:
             row.set_text(text)
-        label = {"cancelled": "Cancelled (Esc)", "stopped": "Not sent — you clicked Stop"}.get(why, f"Not sent — {why}")
+        label = {"cancelled": "Cancelled (Esc) — not sent",
+                 "stopped": "Not sent — you clicked Stop"}.get(why, f"Not sent — {why}")
         row.set_outcome(label, self._c["text_muted"])
+        if why == "cancelled":
+            self._cancel_feedback(uid)
+
+    def _on_esc_late(self):
+        """Esc after it stopped listening to that request: cancel the newest one still being checked."""
+        ap = getattr(self._mw, "assistant_page", None)
+        checking = [u for u, r in self._rows.items() if r.outcome.text() == "Checking…"]
+        if ap is not None and checking and hasattr(ap, "cancel_live"):
+            ap.cancel_live(max(checking))
+
+    def _cancel_feedback(self, uid):
+        """Make a cancel unmistakable where you're looking: a note under the notch (+ a short sound)."""
+        if uid in self._noted:
+            return
+        self._noted.add(uid)
+        self._note("✕  Cancelled", "#FFFFFF")
+        if settings.live_chime:
+            _chime("Pop")
+        _track("live_cancelled")
+
+    def _note(self, text: str, color: str = "#B8B8C4"):
+        ap = getattr(self._mw, "assistant_page", None)
+        try:
+            ov = ap._ensure_notch() if ap is not None else None
+            if ov is not None and hasattr(ov, "flash_note"):
+                ov.flash_note(text, color)
+        except Exception:
+            pass
 
     def clear_activity(self):
         for row in self._rows.values():
