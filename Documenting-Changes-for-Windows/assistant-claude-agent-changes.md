@@ -1042,3 +1042,15 @@ yourself, the Mac side can't see it.
       even 'yes' — is a FOLLOW_UP").
     - Real router: "Yes." / "Yes, and make it blue." / "No thanks." continued the chat that asked;
       "Yes." when nothing was asked → ignored.
+- **"Filect" near-miss correction in the backend (2026-11-06): applies to BOTH platforms automatically
+  (server-side).**
+  - `transcribe` (v7) and `transcribe-stream` (v5) still bias the key-term "Filect". They now also fix
+    transcripts that miss it anyway:
+    - a fixed whole-word list ("Filelect", "Firelect", "Philect"…) → "Filect";
+    - "filet"/"fillet" ONLY right before app / assistant / shortcut / dictation / voice / search / tab /
+      account / subscription.
+    - Real words ("salmon fillet", "select", "reflect") are never touched.
+  - The stream relays xAI's events verbatim except for that text fix (`fixEvent`; events with nothing to
+    fix pass through unchanged).
+  - Verified live: "Open the Filect app…" was "Filet app" before and is "Filect app" now (stream +
+    batch); "salmon fillet" is unchanged. Nothing to port; Windows uses the same endpoints.

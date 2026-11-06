@@ -36,6 +36,33 @@ const MAX_KEYTERM_LEN = 50;
 const DAILY_LIMIT_SECONDS = 3 * 60 * 60; // 3h/user/day — mirrors `transcribe`
 const SAMPLE_RATE = 16000; // for audio-seconds accounting (int16 mono)
 
+// "Filect" still comes back misheard now and then despite the key-term bias — e.g. "Filelect",
+// "Firelect" (seen in real dictation). Fix those near-misses here, for everyone: whole words from a
+// fixed list only (never a fuzzy match), so real words like "fillet" or "select" are never touched.
+const BRAND_WORDS = "filelect|firelect|fillect|philect|phylect|fylect|filact|philact|feelect|felect|fileect|fylact";
+const BRAND_FIX = new RegExp(`\\b(?:${BRAND_WORDS})\\b`, "gi");
+const BRAND_SEEN = new RegExp(`\\b(?:${BRAND_WORDS}|(?:filet|fillet)\\s+(?:app|assistant|shortcut|dictation|voice|search|tab|account|subscription))\\b`, "i");
+// "Filet"/"fillet" ARE real words — fixed only right before a word that only fits the app ("the Filet app").
+const BRAND_CONTEXT = /\b(?:filet|fillet)(?=\s+(?:app|assistant|shortcut|dictation|voice|search|tab|account|subscription)\b)/gi;
+function fixBrand(text: string): string {
+  return typeof text === "string" && text
+    ? text.replace(BRAND_FIX, "Filect").replace(BRAND_CONTEXT, "Filect")
+    : text;
+}
+// Transcript events are relayed verbatim — except a brand near-miss in their text gets fixed.
+function fixEvent(raw: string): string {
+  if (!BRAND_SEEN.test(raw)) return raw;              // most events: nothing to fix, untouched
+  try {
+    const ev = JSON.parse(raw);
+    for (const k of ["text", "transcript", "content"]) {
+      if (typeof ev[k] === "string") ev[k] = fixBrand(ev[k]);
+    }
+    return JSON.stringify(ev);
+  } catch (_e) {
+    return raw;
+  }
+}
+
 function cleanTerms(raw: unknown): string[] {
   const arr = Array.isArray(raw)
     ? raw
@@ -150,10 +177,10 @@ Deno.serve(async (req) => {
     try { client.send(JSON.stringify({ type: "ready" })); } catch (_e) { /* noop */ }
   });
   upstream.on("message", (data: any, isBinary: boolean) => {
-    // xAI sends JSON text events; relay them verbatim to the client.
+    // xAI sends JSON text events; relay them to the client (with brand near-misses fixed).
     try {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(isBinary ? data : data.toString());
+        client.send(isBinary ? data : fixEvent(data.toString()));
       }
     } catch (_e) { /* noop */ }
   });

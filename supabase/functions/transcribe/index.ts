@@ -32,6 +32,19 @@ const BASE_KEYTERMS = ["Filect"];
 const MAX_KEYTERMS = 100; // xAI per-request ceiling
 const MAX_KEYTERM_LEN = 50; // xAI per-term char ceiling
 
+// "Filect" still comes back misheard now and then despite the key-term bias — e.g. "Filelect",
+// "Firelect" (seen in real dictation). Fix those near-misses here, for everyone: whole words from a
+// fixed list only (never a fuzzy match), so real words like "fillet" or "select" are never touched.
+const BRAND_WORDS = "filelect|firelect|fillect|philect|phylect|fylect|filact|philact|feelect|felect|fileect|fylact";
+const BRAND_FIX = new RegExp(`\\b(?:${BRAND_WORDS})\\b`, "gi");
+// "Filet"/"fillet" ARE real words — fixed only right before a word that only fits the app ("the Filet app").
+const BRAND_CONTEXT = /\b(?:filet|fillet)(?=\s+(?:app|assistant|shortcut|dictation|voice|search|tab|account|subscription)\b)/gi;
+function fixBrand(text: string): string {
+  return typeof text === "string" && text
+    ? text.replace(BRAND_FIX, "Filect").replace(BRAND_CONTEXT, "Filect")
+    : text;
+}
+
 // Normalize a raw term source (array or comma-separated string): trim, drop empties
 // and over-long entries, de-dupe case-insensitively.
 function cleanTerms(raw: unknown): string[] {
@@ -157,7 +170,7 @@ serve(async (req) => {
       return json({ error: "Transcription provider error", details: detail }, xaiRes.status);
     }
     const data = await xaiRes.json();
-    const text = (data.text || "").trim();
+    const text = fixBrand((data.text || "").trim());
     const duration = Number(data.duration || 0); // xAI returns audio length in seconds
 
     // 6) Log real audio-seconds AFTER replying — keep the DB write OFF the response
